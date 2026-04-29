@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Virtualenvs
+.venv/
+venv/
+env/
+
+# Editor / OS
+.DS_Store
+*.swp
+*.swo
+.idea/
+.vscode/
+
+# Node / Vite
+node_modules/
+web/dist/
+web/.vite/
+web/*.tsbuildinfo
+
+# Built frontend bundle (populated by `pnpm build`, included in wheels)
+src/unwind/static/

@@ -1,0 +1,51 @@
+[build-system]
+requires = ["poetry-core>=2.0"]
+build-backend = "poetry.core.masonry.api"
+
+[project]
+name = "unwind"
+version = "0.1.0"
+description = "Outside-in web observer for Claude Code sessions and callstack call trees"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+authors = [{ name = "Amol Kelkar" }]
+keywords = ["claude-code", "agents", "observability", "callstack"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Debuggers",
+]
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "watchdog>=4.0",
+    "pydantic>=2.7",
+    "typer>=0.12",
+    "pyyaml>=6.0",
+    "psutil>=5.9",
+    "rich>=13.7",
+]
+
+[project.scripts]
+unwind = "unwind.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/amolk/agent-callstack"
+Repository = "https://github.com/amolk/agent-callstack"
+
+[tool.poetry]
+packages = [{ include = "unwind", from = "src" }]
+include = [
+    { path = "src/unwind/static/**/*", format = ["sdist", "wheel"] },
+]
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.0"
+pytest-asyncio = "^0.23"
+websockets = "^12.0"
+httpx = "^0.27"
+build = "^1.2"

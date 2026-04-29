@@ -1,0 +1,190 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 222 47% 11%;
+
+    --card: 0 0% 100%;
+    --card-foreground: 222 47% 11%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 222 47% 11%;
+
+    --primary: 222 47% 11%;
+    --primary-foreground: 210 40% 98%;
+
+    --secondary: 210 40% 96%;
+    --secondary-foreground: 222 47% 11%;
+
+    --muted: 210 40% 96%;
+    --muted-foreground: 215 16% 47%;
+
+    --accent: 210 40% 96%;
+    --accent-foreground: 222 47% 11%;
+
+    --destructive: 0 84% 60%;
+    --destructive-foreground: 210 40% 98%;
+
+    --border: 214 32% 91%;
+    --input: 214 32% 91%;
+    --ring: 222 47% 11%;
+
+    --radius: 0.5rem;
+  }
+
+  .dark {
+    --background: 222 24% 8%;
+    --foreground: 210 40% 94%;
+
+    --card: 222 24% 10%;
+    --card-foreground: 210 40% 94%;
+
+    --popover: 222 24% 10%;
+    --popover-foreground: 210 40% 94%;
+
+    --primary: 210 40% 94%;
+    --primary-foreground: 222 47% 11%;
+
+    --secondary: 217 19% 16%;
+    --secondary-foreground: 210 40% 94%;
+
+    --muted: 217 19% 16%;
+    --muted-foreground: 215 20% 65%;
+
+    --accent: 217 19% 20%;
+    --accent-foreground: 210 40% 94%;
+
+    --destructive: 0 63% 45%;
+    --destructive-foreground: 210 40% 94%;
+
+    --border: 217 19% 20%;
+    --input: 217 19% 20%;
+    --ring: 210 40% 94%;
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    @apply antialiased font-sans;
+    font-size: 13px;
+    font-feature-settings: "cv11", "ss01", "ss03";
+  }
+
+  /* Radix ScrollArea injects a wrapper with display:table around children
+     so intrinsic-width content forces horizontal scroll. We almost always
+     want our content to fill the pane and wrap normally instead. */
+  [data-radix-scroll-area-viewport] > div {
+    display: flex !important;
+    flex-direction: column;
+    min-width: 100%;
+    width: 100%;
+  }
+
+  /* Scrollbars: thin, subtle. */
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: hsl(var(--border));
+    border-radius: 8px;
+    border: 2px solid hsl(var(--background));
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: hsl(var(--muted-foreground));
+  }
+}
+
+/* Three-dot in-progress indicator on active CALL rows. */
+@keyframes uw-dot-pulse {
+  0%, 60%, 100% { opacity: 0.2; }
+  30% { opacity: 1; }
+}
+.dot-pulse-1, .dot-pulse-2, .dot-pulse-3 {
+  animation: uw-dot-pulse 1.2s infinite;
+}
+.dot-pulse-2 { animation-delay: 0.2s; }
+.dot-pulse-3 { animation-delay: 0.4s; }
+
+/* React Flow tweaks. */
+.react-flow__edge-path {
+  stroke-width: 1.5;
+}
+/* Render edges ABOVE nodes so the source handles (dots) sit inside the
+   card and the connector path is visible all the way from dot to dot. */
+.react-flow__edges {
+  z-index: 5 !important;
+}
+/* Override React Flow's default cursor:grab on nodes and force pointer
+   on interactive children, with enough specificity + !important to beat
+   any cascade ordering issues. */
+.react-flow .react-flow__node,
+.react-flow .react-flow__node:active {
+  cursor: default !important;
+}
+.react-flow .react-flow__node button,
+.react-flow .react-flow__node a,
+.react-flow .react-flow__node [role="button"] {
+  cursor: pointer !important;
+}
+.react-flow__edge.uw-edge-call .react-flow__edge-path {
+  stroke: rgb(56 189 248 / 0.7);
+}
+.react-flow__edge.uw-edge-subagent .react-flow__edge-path {
+  stroke: rgb(167 139 250 / 0.7);
+}
+.react-flow__edge.uw-edge-pending .react-flow__edge-path {
+  stroke-dasharray: 4 3;
+}
+
+/* Markdown rendering inside message bubbles. */
+.uw-markdown {
+  @apply text-sm leading-relaxed;
+}
+.uw-markdown p {
+  @apply my-1;
+}
+.uw-markdown pre {
+  @apply bg-muted text-muted-foreground rounded-md p-3 my-2 overflow-x-auto text-xs font-mono;
+}
+.uw-markdown code {
+  @apply bg-muted text-muted-foreground rounded px-1 py-0.5 text-xs font-mono;
+}
+.uw-markdown pre code {
+  @apply bg-transparent p-0;
+}
+.uw-markdown h1,
+.uw-markdown h2,
+.uw-markdown h3 {
+  @apply font-semibold my-2;
+}
+.uw-markdown h1 { @apply text-base; }
+.uw-markdown h2 { @apply text-sm; }
+.uw-markdown h3 { @apply text-sm; }
+.uw-markdown ul,
+.uw-markdown ol {
+  @apply pl-5 my-1;
+}
+.uw-markdown li {
+  @apply my-0.5;
+}
+.uw-markdown a {
+  @apply text-primary underline underline-offset-2;
+}
+.uw-markdown table {
+  @apply my-2 border-collapse text-xs;
+}
+.uw-markdown th,
+.uw-markdown td {
+  @apply border border-border px-2 py-1;
+}
