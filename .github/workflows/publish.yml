@@ -53,7 +53,7 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: pypi
-      url: https://pypi.org/p/unwind
+      url: https://pypi.org/p/unwind-labs
     permissions:
       id-token: write
     steps:
