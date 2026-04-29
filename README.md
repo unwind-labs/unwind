@@ -1,6 +1,6 @@
 # unwind
 
-A web UI for [Claude Code](https://claude.ai/claude-code) sessions. Run it in any project folder; a browser tab opens showing every Claude Code session that's run there, the conversation for each one, and — when the [callstack](https://github.com/unwind-labs/agent-callstack) plugin's `/call` skill is used — the call hierarchy between sessions.
+A web UI for Claude Code sessions. Run it in any project folder; a browser tab opens showing every Claude Code session that's run there, the conversation for each one, and — when the [callstack](https://github.com/amolk/agent-callstack) plugin's `/call` skill is used — the call hierarchy between sessions.
 
 ## Install
 
@@ -24,7 +24,7 @@ A browser tab opens at `http://127.0.0.1:<port>/` with that project's sessions. 
 unwind never wraps or controls Claude Code. It reads:
 
 - `~/.claude/projects/<slug>/*.jsonl` — Claude Code's own session logs
-- `<project>/.claude/callstack/log/` — `/call` invocation reports written by the [callstack](https://github.com/unwind-labs/agent-callstack) plugin
+- `<project>/.claude/callstack/log/` — `/call` invocation reports written by the [callstack](https://github.com/amolk/agent-callstack) plugin
 
 …and renders them in a live-updating web UI. Loopback only (`127.0.0.1`); read-only.
 
