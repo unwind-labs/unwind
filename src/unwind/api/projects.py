@@ -70,7 +70,7 @@ def list_projects() -> list[ProjectSummary]:
         # in the call tree under their parent), so the picker count must do
         # the same — otherwise a project with 1 root + 10 forks advertises
         # "11 sessions" but only 1 actually appears when you open it.
-        fork_ids = _fork_ids_for(slug)
+        fork_ids = fork_ids_for(slug)
         visible = sum(1 for s in sessions if s.session_id not in fork_ids)
         out.append(
             ProjectSummary(
@@ -87,7 +87,7 @@ def list_projects() -> list[ProjectSummary]:
     return out
 
 
-def _fork_ids_for(slug: str) -> set[str]:
+def fork_ids_for(slug: str) -> set[str]:
     """Return the set of session_ids that ``GET /projects/{slug}/sessions``
     would hide as callstack forks. Mirrors the logic in
     ``sessions_api.list_sessions`` so picker counts match list counts."""

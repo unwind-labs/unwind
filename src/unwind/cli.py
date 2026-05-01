@@ -1,6 +1,10 @@
 """CLI entry point: ``unwind`` command.
 
-Single-command CLI. ``unwind [path] [--port 8765] [--no-browser] [--all]``.
+Noun-verb CLI:
+- ``unwind`` (no args) prints help.
+- ``unwind serve [PATH] [...flags]`` boots the FastAPI/uvicorn web UI.
+- ``unwind project|session|messages|task ...`` are read-only inspection commands
+  that call internal functions directly (no HTTP).
 """
 from __future__ import annotations
 
@@ -17,9 +21,24 @@ import typer
 import uvicorn
 from rich.console import Console
 
+from .cli_cmds import messages as messages_cmd
+from .cli_cmds import project as project_cmd
+from .cli_cmds import session as session_cmd
+from .cli_cmds import task as task_cmd
 from .projects import ProjectPaths, claude_projects_root
 
 console = Console()
+
+app = typer.Typer(
+    name="unwind",
+    help="Inspect Claude Code sessions, callstack call trees, and subagents.",
+    no_args_is_help=True,
+    add_completion=False,
+)
+app.add_typer(project_cmd.app, name="project", help="Inspect known projects.")
+app.add_typer(session_cmd.app, name="session", help="Inspect sessions in a project.")
+app.add_typer(messages_cmd.app, name="messages", help="Read session messages.")
+app.add_typer(task_cmd.app, name="task", help="Inspect callstack/subagent task trees.")
 
 
 def _pick_port(preferred: Optional[int]) -> int:
@@ -41,7 +60,8 @@ def _open_browser_later(url: str, delay_s: float = 0.4) -> None:
     threading.Thread(target=_go, daemon=True).start()
 
 
-def _run(
+@app.command("serve")
+def serve(
     path: Optional[str] = typer.Argument(
         None,
         help="Project folder to observe. Defaults to the current working directory.",
@@ -116,4 +136,4 @@ def _run(
 
 
 def main() -> None:
-    typer.run(_run)
+    app()
