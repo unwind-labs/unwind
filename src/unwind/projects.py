@@ -1,8 +1,11 @@
 """Resolve a filesystem path to Claude Code's on-disk project layout.
 
 Claude stores per-project session JSONLs under ``~/.claude/projects/<slug>/``,
-where ``<slug>`` is the absolute path with ``/``, ``.``, ``_`` all replaced by
-``-``. The callstack plugin additionally writes invocation logs under
+where ``<slug>`` is the absolute path with every character that isn't a
+letter, digit, or hyphen replaced by ``-``. That covers ``/``, ``.``, ``_``,
+spaces, parentheses, and other punctuation that can show up in real project
+paths (e.g. ``/Users/me/work/04. mcp`` → ``-Users-me-work-04--mcp``). The
+callstack plugin additionally writes invocation logs under
 ``<project>/.claude/callstack/log/<invoke_id>/``.
 """
 from __future__ import annotations
@@ -12,7 +15,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-_SLUG_RE = re.compile(r"[/._]")
+# Match Claude Code's slugging: anything that isn't [A-Za-z0-9-] becomes "-".
+# This matches the observed behavior across paths with dots, underscores,
+# spaces, and other punctuation. Hyphens already in the path are preserved.
+_SLUG_RE = re.compile(r"[^A-Za-z0-9-]")
 
 
 def slug_for(path: str | Path) -> str:

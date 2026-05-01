@@ -172,14 +172,19 @@ def get_messages(
 ) -> MessagesResponse:
     ci = callstack_for_slug(slug)
 
+    si = subagent_index_for_slug(slug)
+
     # Subagent traces resolve through a separate index.
     if session_id.startswith(SUBAGENT_PREFIX):
-        sa_path = subagent_index_for_slug(slug).resolve(session_id)
+        sa_path = si.resolve(session_id)
         if sa_path is None:
             raise HTTPException(status_code=404, detail="subagent not found")
         page = read_messages(sa_path, include_meta=include_meta)
         annotate_spawns(
-            page.messages, slug_callstack=ci, current_session_id=session_id
+            page.messages,
+            slug_callstack=ci,
+            current_session_id=session_id,
+            subagent_index=si,
         )
         return MessagesResponse(
             session_id=session_id,
@@ -196,7 +201,10 @@ def get_messages(
 
     page = read_messages(jsonl, include_meta=include_meta)
     annotate_spawns(
-        page.messages, slug_callstack=ci, current_session_id=session_id
+        page.messages,
+        slug_callstack=ci,
+        current_session_id=session_id,
+        subagent_index=si,
     )
 
     # Fork delta: when this session has callstack ancestors, the JSONL begins

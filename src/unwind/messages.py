@@ -125,6 +125,7 @@ def annotate_spawns(
     slug_callstack=None,
     *,
     current_session_id: Optional[str] = None,
+    subagent_index=None,
 ) -> None:
     """Tag tool_use messages that spawned children with ``spawn_session_ids``.
 
@@ -139,6 +140,12 @@ def annotate_spawns(
        don't want to mark inherited messages as spawning anything).
     2. Agent / Task tool calls: the result text contains
        ``agentId: <id>`` — synthesize an ``agent-<id>`` session_id.
+       If the tool_result hasn't arrived yet (the subagent is still
+       running), fall back to the on-disk subagent index: Claude Code
+       creates ``subagents/<session>/agent-<id>.jsonl`` + ``.meta.json``
+       as soon as the agent starts, so we can match the pending
+       tool_use to its trace by ``description``. Pass
+       ``subagent_index`` to enable this.
 
     Pass ``current_session_id`` whenever you have it (it's the session
     whose JSONL these messages came from). Without it the callstack
@@ -161,6 +168,8 @@ def annotate_spawns(
     # later in-flight tool_use can pick the NEXT unclaimed report instead of
     # double-counting.
     claimed_invoke_ids: set[str] = set()
+    # Same idea for subagent invocations matched by description.
+    claimed_agent_ids: set[str] = set()
 
     # Iterate callstack uses in chronological order so unclaimed-report
     # selection is stable.
@@ -262,6 +271,22 @@ def annotate_spawns(
             if agent_id:
                 use_msg.spawn_kind = "subagent"
                 use_msg.spawn_session_ids = [f"agent-{agent_id}"]
+                claimed_agent_ids.add(agent_id)
+            elif subagent_index is not None and current_session_id:
+                # In-flight: the tool_result hasn't been written yet. Match
+                # by description against the on-disk subagent invocations.
+                desc = ""
+                if isinstance(use_msg.tool_input, dict):
+                    raw = use_msg.tool_input.get("description")
+                    if isinstance(raw, str):
+                        desc = raw.strip()
+                if desc:
+                    pending_id = _claim_pending_subagent(
+                        subagent_index, current_session_id, desc, claimed_agent_ids
+                    )
+                    if pending_id:
+                        use_msg.spawn_kind = "subagent"
+                        use_msg.spawn_session_ids = [f"agent-{pending_id}"]
 
 
 def _requested_tasks(tool_input: Any) -> list[str]:
@@ -279,6 +304,34 @@ def _requested_tasks(tool_input: Any) -> list[str]:
     if isinstance(task, str):
         return [task]
     return []
+
+
+def _claim_pending_subagent(
+    subagent_index,
+    session_id: str,
+    description: str,
+    already_claimed: set[str],
+) -> Optional[str]:
+    """Match an in-flight Agent tool_use to its on-disk subagent trace.
+
+    Claude Code writes ``subagents/<session>/agent-<id>.meta.json`` as soon as
+    the subagent starts, well before the parent's ``tool_result`` lands. So
+    while the tool call is pending we can still surface the link by matching
+    the tool_use's ``description`` arg against the meta files. Two calls with
+    identical descriptions get distinct invocations because we track which
+    agent ids have already been claimed in this annotation pass.
+    """
+    try:
+        invocations = subagent_index.list_for_session(session_id)
+    except Exception:  # subagent index is best-effort
+        return None
+    for inv in invocations:
+        if inv.agent_id in already_claimed:
+            continue
+        if inv.description.strip() == description:
+            already_claimed.add(inv.agent_id)
+            return inv.agent_id
+    return None
 
 
 def _extract_invoke_id(result: Optional[Message]) -> Optional[str]:

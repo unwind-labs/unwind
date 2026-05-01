@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { pickFolder, useDefaultProject, useProjects } from "@/api/client";
 import { useUi } from "@/store/ui";
@@ -11,11 +11,12 @@ import {
 import { SessionListPane } from "@/panes/SessionListPane";
 import { CanvasPane } from "@/panes/CanvasPane";
 import { ProjectPicker } from "@/panes/ProjectPicker";
-import { FolderSearch } from "lucide-react";
+import { FolderSearch, FolderTree } from "lucide-react";
 
 export function App() {
   const slug = useUi((s) => s.slug);
   const setSlug = useUi((s) => s.setSlug);
+  const [showBrowser, setShowBrowser] = useState(false);
 
   const { data: defaultProject } = useDefaultProject();
   useLiveEvents(slug);
@@ -105,8 +106,9 @@ export function App() {
       <TopBar
         defaultSourcePath={defaultProject?.source_path ?? null}
         slug={slug}
+        onBrowse={() => setShowBrowser(true)}
       />
-      <div className="flex-1 overflow-hidden">
+      <div className="relative flex-1 overflow-hidden">
         {slug ? (
           <ResizablePanelGroup direction="horizontal">
             <ResizablePanel defaultSize={26} minSize={18}>
@@ -123,6 +125,16 @@ export function App() {
           </ResizablePanelGroup>
         ) : (
           <ProjectPicker />
+        )}
+        {showBrowser && slug && (
+          <div
+            className="absolute inset-0 z-20 bg-background/95 backdrop-blur-sm"
+            onMouseDown={(e) => {
+              if (e.target === e.currentTarget) setShowBrowser(false);
+            }}
+          >
+            <ProjectPicker onClose={() => setShowBrowser(false)} />
+          </div>
         )}
       </div>
     </div>
@@ -176,15 +188,19 @@ function useOpenFolderPicker() {
 function TopBar({
   defaultSourcePath,
   slug,
+  onBrowse,
 }: {
   defaultSourcePath: string | null;
   slug: string | null;
+  onBrowse: () => void;
 }) {
   const { data: projects } = useProjects();
   const openPicker = useOpenFolderPicker();
 
   // Prefer the source path of the currently-selected project. Falls back to
-  // the server's default-project hint, then the slug itself.
+  // the server's default-project hint, then the slug itself. The backend
+  // resolves source_path from the most recent session's ``cwd`` when the
+  // project was entered slug-only, so this is the real folder either way.
   const currentSourcePath =
     (slug && projects?.find((p) => p.slug === slug)?.source_path) ||
     defaultSourcePath;
@@ -211,6 +227,16 @@ function TopBar({
         >
           <FolderSearch className="h-3.5 w-3.5" />
         </button>
+        {slug && (
+          <button
+            type="button"
+            onClick={onBrowse}
+            title="browse known projects"
+            className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+          >
+            <FolderTree className="h-3.5 w-3.5" />
+          </button>
+        )}
       </div>
       <div className="ml-auto text-[10px] text-muted-foreground">
         observer · read-only

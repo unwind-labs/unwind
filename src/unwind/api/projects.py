@@ -57,10 +57,17 @@ def list_projects() -> list[ProjectSummary]:
             mtime = last_activity_for(slug)
             if mtime is not None:
                 last_ts = datetime.fromtimestamp(mtime, tz=timezone.utc)
+        # Slug-only projects (entered via the picker, never through a real
+        # path) carry a synthetic ``source_path`` that is just the directory
+        # under ``~/.claude/projects/``. Recover the real working directory
+        # from any session's ``cwd`` field so the UI can show a friendly
+        # folder name instead of the slugged path.
+        real_cwd = next((s.cwd for s in sessions if s.cwd), None)
+        source_path = real_cwd or str(source)
         out.append(
             ProjectSummary(
                 slug=slug,
-                source_path=str(source),
+                source_path=source_path,
                 last_activity=last_ts,
                 session_count=len(sessions),
             )
