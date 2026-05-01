@@ -73,7 +73,44 @@ def index_for_slug(slug: str) -> SessionIndex:
             paths = ProjectPaths.for_slug(slug)
         index = SessionIndex(paths)
         _indices[slug] = index
-        return index
+
+    # If we built the index from a synthetic slug (no real path registered
+    # yet), peek at any session's ``cwd`` and upgrade the registry. Without
+    # this the callstack log dir stays pinned at ``/dev/null/no-callstack``
+    # and ``report_for_invoke`` always returns None — so callstack invokes
+    # never resolve their children and the UI shows "resolving…" forever.
+    if source is None:
+        real_cwd = _peek_session_cwd(index)
+        if real_cwd is not None:
+            _upgrade_to_real_path(slug, real_cwd)
+            with _lock:
+                return _indices[slug]
+    return index
+
+
+def _peek_session_cwd(index: SessionIndex) -> Optional[Path]:
+    sessions = index.list_sessions()
+    for s in sessions:
+        if s.cwd:
+            return Path(s.cwd)
+    return None
+
+
+def _upgrade_to_real_path(slug: str, real_path: Path) -> None:
+    """Replace the synthetic-slug index with one rooted at the real cwd.
+
+    Drops any cached per-slug state so subsequent ``callstack_for_slug``,
+    ``fork_detector_for_slug`` etc. rebuild against the real
+    ``.claude/callstack/log`` directory under the project.
+    """
+    with _lock:
+        _indices.pop(slug, None)
+        _callstack.pop(slug, None)
+        _fork_detectors.pop(slug, None)
+        _subagents.pop(slug, None)
+        _slug_to_source[slug] = real_path
+        paths = ProjectPaths.for_path(real_path)
+        _indices[slug] = SessionIndex(paths)
 
 
 def callstack_for_slug(slug: str) -> CallstackIndex:
