@@ -174,6 +174,8 @@ def get_messages(
 
     si = subagent_index_for_slug(slug)
 
+    fd = fork_detector_for_slug(slug)
+
     # Subagent traces resolve through a separate index.
     if session_id.startswith(SUBAGENT_PREFIX):
         sa_path = si.resolve(session_id)
@@ -185,6 +187,7 @@ def get_messages(
             slug_callstack=ci,
             current_session_id=session_id,
             subagent_index=si,
+            fork_detector=fd,
         )
         return MessagesResponse(
             session_id=session_id,
@@ -205,6 +208,7 @@ def get_messages(
         slug_callstack=ci,
         current_session_id=session_id,
         subagent_index=si,
+        fork_detector=fd,
     )
 
     # Fork delta: when this session has callstack ancestors, the JSONL begins
@@ -228,13 +232,13 @@ def get_messages(
     # all non-root callstack children — they spawn via JSON envelope, not via
     # an MCP tool call).
     extra: list[SpawnCard] = []
+    anchored = {
+        sid
+        for m in page.messages
+        if m.spawn_kind == "call"
+        for sid in (m.spawn_session_ids or [])
+    }
     if ci.has_logs:
-        anchored = {
-            sid
-            for m in page.messages
-            if m.spawn_kind == "call"
-            for sid in (m.spawn_session_ids or [])
-        }
         # Walk every report's task tree for the node whose session_id matches.
         # Callstack writes one report per top-level invocation with nested
         # children, so non-root sessions' spawns are buried in the root's
@@ -258,13 +262,41 @@ def get_messages(
                     status=(
                         "running"
                         if any(
-                            (k.status or "").lower() in ("running", "in_progress")
+                            (k.status or "").lower()
+                            in ("running", "in_progress", "pending", "yielded")
                             for k in unanchored
                         )
                         else "complete"
                     ),
                     children=[k.session_id for k in unanchored if k.session_id],
                     tasks=[k.task for k in unanchored if k.task],
+                )
+            )
+    else:
+        # No ``.claude/callstack/log/`` for this project — but the fork
+        # detector still classifies sibling JSONLs that share this session's
+        # head uuid as forks (e.g. ``deep-rewrite`` runs that spawn
+        # ``claude --fork-session`` subprocesses without going through
+        # callstack's MCP tool). Surface them so the canvas can render the
+        # tree we know is there.
+        fork_sids = [s for s in fd.children_of(session_id) if s not in anchored]
+        if fork_sids:
+            tasks: list[str] = []
+            for fsid in fork_sids:
+                # Best-effort label: the divergent text the fork started with
+                # (for callstack forks this is "/task-x"; otherwise the first
+                # user message).
+                fd.find_session_by_divergence_text(session_id, "")  # warm cache
+                text = fd.divergence_text_for(fsid) or ""
+                tasks.append(text.strip() or fsid[:8])
+            extra.append(
+                SpawnCard(
+                    invoke_id="",
+                    started_at=None,
+                    ended_at=None,
+                    status="complete",
+                    children=fork_sids,
+                    tasks=tasks,
                 )
             )
 

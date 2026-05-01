@@ -67,6 +67,11 @@ export type Message = {
   spawn_kind: "call" | "subagent" | null;
   spawn_session_ids: string[];
   spawn_tasks: string[];
+  // Per-child completion derived from the callstack task status. Lets the
+  // caller card check off finished children individually before the parent
+  // ``invoke_parallel`` tool_result lands. ``null`` means unknown (fall
+  // back to the parent's tool_result).
+  spawn_done?: (boolean | null)[];
 };
 
 export type AncestorRef = {

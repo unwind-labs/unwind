@@ -94,14 +94,20 @@ export function deriveRows(messages: Message[], extras: ExtraSpawn[] = []): Row[
           ? m.spawn_tasks
           : m.spawn_session_ids.map((_, i) => labelFromInput(m, i));
       m.spawn_session_ids.forEach((childId, i) => {
+        // Prefer per-child status from the callstack report (set by the
+        // server via spawn_done). Falls back to the parent tool_result's
+        // arrival when the report doesn't know yet.
+        const perChild = m.spawn_done?.[i];
+        const done =
+          perChild != null
+            ? perChild && childId !== ""
+            : callDone && childId !== "";
         out.push({
           kind: "spawn",
           spawnKind: m.spawn_kind!,
           title: labels[i] || childId.slice(0, 8) || "(resolving)",
           childId,
-          // A child without a session_id is "in flight" and shouldn't render
-          // as done until something resolves it.
-          done: callDone && childId !== "",
+          done,
           handleId: `spawn-${tooluse}-${i}`,
         });
       });
@@ -118,14 +124,31 @@ export function deriveRows(messages: Message[], extras: ExtraSpawn[] = []): Row[
   // Re-check spawn `done`: a tool_use's done state depends on whether a
   // tool_result for it exists ANYWHERE in the message list. The above loop
   // sees results in order, so for tool_uses that came BEFORE their result
-  // we'd have missed it. Re-walk and patch.
+  // we'd have missed it. Re-walk and patch — but only when we don't have a
+  // per-child status from the callstack report (that's authoritative).
   const allResultIds = new Set(
     messages
       .filter((m) => m.role === "tool_result" && m.tool_result_for)
       .map((m) => m.tool_result_for!),
   );
+  // Build a lookup of per-child statuses keyed by handleId so the re-walk
+  // can preserve them.
+  const perChildByHandle: Record<string, boolean | null | undefined> = {};
+  for (const m of messages) {
+    if (m.role !== "tool_use" || !m.spawn_kind) continue;
+    if (!m.spawn_done) continue;
+    const tooluse = m.tool_use_id ?? m.uuid;
+    m.spawn_done.forEach((d, i) => {
+      perChildByHandle[`spawn-${tooluse}-${i}`] = d;
+    });
+  }
   for (const r of out) {
     if (r.kind === "spawn") {
+      const perChild = perChildByHandle[r.handleId];
+      if (perChild != null) {
+        r.done = perChild && r.childId !== "";
+        continue;
+      }
       // handleId is `spawn-<toolUseId>-<i>`; recover toolUseId.
       const m = r.handleId.match(/^spawn-(.+)-\d+$/);
       const toolUseId = m ? m[1] : "";

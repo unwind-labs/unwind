@@ -1,6 +1,7 @@
 from pathlib import Path
 import json
 
+from unwind.callstack import CallstackIndex
 from unwind.messages import annotate_spawns, read_messages
 from unwind.subagents import SubagentIndex
 
@@ -143,3 +144,271 @@ def test_in_flight_agent_matches_pending_subagent(tmp_path: Path):
     assert by_id["t1"].spawn_session_ids == ["agent-aaaa1111"]
     assert by_id["t2"].spawn_kind == "subagent"
     assert by_id["t2"].spawn_session_ids == ["agent-bbbb2222"]
+
+
+def test_sibling_callstack_invokes_dont_phantom_each_others_children(tmp_path: Path):
+    """When a session makes multiple ``invoke_parallel`` calls that all merge
+    into the same callstack report (current callstack behavior — nested invokes
+    write into the outermost invocation's report), each tool_use should only
+    surface its OWN requested children. Without per-tool_use claiming, the
+    leftover-task logic phantom-renders sibling tool_uses' children as extra
+    rows, producing the 11-row jumble we observed in the deep-rewrite trace.
+    """
+    session_id = "sess-fork"
+    log_dir = tmp_path / "callstack-log"
+    invoke_dir = log_dir / "20260101T000000-aaaa"
+    invoke_dir.mkdir(parents=True)
+
+    # Report has the parent fork's task containing all 9 sibling children
+    # (5 specialists + 3 meta + 1 re-author) — what callstack would write
+    # once Fix 2 lands. The bug is sensitive to all of them sharing one report.
+    report = {
+        "invoke_id": "20260101T000000-aaaa",
+        "parent_session": "root-sess",
+        "started_at": "2026-01-01T00:00:00+00:00",
+        "ended_at": "2026-01-01T00:10:00+00:00",
+        "status": "complete",
+        "tasks": [
+            {
+                "id": "fork0001",
+                "task": "fork driver",
+                "status": "complete",
+                "depth": 1,
+                "session_id": session_id,
+                "children": [
+                    *[
+                        {"id": f"sp{i}", "task": f"specialist {i}",
+                         "status": "complete", "depth": 2,
+                         "session_id": f"sp-sess-{i}"}
+                        for i in range(5)
+                    ],
+                    *[
+                        {"id": f"ma{i}", "task": f"meta-assessor {i}",
+                         "status": "complete", "depth": 2,
+                         "session_id": f"ma-sess-{i}"}
+                        for i in range(3)
+                    ],
+                    {"id": "ra0", "task": "re-author",
+                     "status": "complete", "depth": 2,
+                     "session_id": "ra-sess"},
+                ],
+            }
+        ],
+    }
+    import yaml as _yaml
+    (invoke_dir / "report.yaml").write_text(_yaml.safe_dump(report))
+
+    # Three sibling callstack tool_uses, all with tool_results pointing at
+    # the same invoke_id (matching the deep-rewrite scenario).
+    def _result(invoke_id: str) -> str:
+        return '{"invoke_id": "' + invoke_id + '"}'
+
+    parent = tmp_path / "parent.jsonl"
+    parent.write_text("\n".join(json.dumps(r) for r in [
+        {"type": "assistant", "uuid": "a1", "sessionId": session_id,
+         "timestamp": "2026-01-01T00:00:01.000Z",
+         "message": {"role": "assistant", "content": [
+             {"type": "tool_use", "id": "tu-spec",
+              "name": "mcp__plugin_callstack_call__invoke_parallel",
+              "input": {"tasks": [f"specialist {i}" for i in range(5)]}},
+         ]}},
+        {"type": "user", "uuid": "u1", "sessionId": session_id,
+         "timestamp": "2026-01-01T00:00:02.000Z",
+         "message": {"role": "user", "content": [
+             {"type": "tool_result", "tool_use_id": "tu-spec",
+              "content": _result("20260101T000000-aaaa")},
+         ]}},
+        {"type": "assistant", "uuid": "a2", "sessionId": session_id,
+         "timestamp": "2026-01-01T00:00:03.000Z",
+         "message": {"role": "assistant", "content": [
+             {"type": "tool_use", "id": "tu-meta",
+              "name": "mcp__plugin_callstack_call__invoke_parallel",
+              "input": {"tasks": [f"meta-assessor {i}" for i in range(3)]}},
+         ]}},
+        {"type": "user", "uuid": "u2", "sessionId": session_id,
+         "timestamp": "2026-01-01T00:00:04.000Z",
+         "message": {"role": "user", "content": [
+             {"type": "tool_result", "tool_use_id": "tu-meta",
+              "content": _result("20260101T000000-aaaa")},
+         ]}},
+        {"type": "assistant", "uuid": "a3", "sessionId": session_id,
+         "timestamp": "2026-01-01T00:00:05.000Z",
+         "message": {"role": "assistant", "content": [
+             {"type": "tool_use", "id": "tu-ra",
+              "name": "mcp__plugin_callstack_call__invoke",
+              "input": {"task": "re-author"}},
+         ]}},
+        {"type": "user", "uuid": "u3", "sessionId": session_id,
+         "timestamp": "2026-01-01T00:00:06.000Z",
+         "message": {"role": "user", "content": [
+             {"type": "tool_result", "tool_use_id": "tu-ra",
+              "content": _result("20260101T000000-aaaa")},
+         ]}},
+    ]) + "\n")
+
+    page = read_messages(parent)
+    ci = CallstackIndex(log_dir)
+    annotate_spawns(page.messages, slug_callstack=ci, current_session_id=session_id)
+
+    by_id = {m.tool_use_id: m for m in page.messages if m.role == "tool_use"}
+
+    # Each tool_use claims ONLY its requested children — no leftover phantom
+    # rows from sibling tool_uses' tasks.
+    assert by_id["tu-spec"].spawn_session_ids == [f"sp-sess-{i}" for i in range(5)]
+    assert by_id["tu-meta"].spawn_session_ids == [f"ma-sess-{i}" for i in range(3)]
+    assert by_id["tu-ra"].spawn_session_ids == ["ra-sess"]
+
+    # Total rows: 5 + 3 + 1 = 9, not the 11 (or 17) the buggy version emitted.
+    total = sum(len(m.spawn_session_ids) for m in by_id.values())
+    assert total == 9
+
+
+def test_in_flight_callstack_anchors_via_shared_report(tmp_path: Path):
+    """When the specialists tool_use has completed but the meta-assessor
+    tool_use is still in-flight (no tool_result yet), the in-flight branch
+    must fall back to the SAME merged report so name-matching can still
+    resolve meta-assessor session_ids. Without this, the meta tool_use
+    emits empty placeholders, the actual session_ids leak into the
+    extras_spawns path, and the UI renders a duplicate set of cards."""
+    session_id = "sess-inflight"
+    log_dir = tmp_path / "callstack-log"
+    invoke_dir = log_dir / "20260101T000000-aaaa"
+    invoke_dir.mkdir(parents=True)
+
+    # Merged report (Fix 2 callstack output): all children present, with
+    # meta-assessors marked running.
+    report = {
+        "invoke_id": "20260101T000000-aaaa",
+        "parent_session": "root-sess",
+        "started_at": "2026-01-01T00:00:00+00:00",
+        "ended_at": None,
+        "status": "mixed",
+        "tasks": [
+            {
+                "id": "fork0001",
+                "task": "fork driver",
+                "status": "running",
+                "depth": 1,
+                "session_id": session_id,
+                "children": [
+                    *[
+                        {"id": f"sp{i}", "task": f"specialist {i}",
+                         "status": "complete", "depth": 2,
+                         "session_id": f"sp-sess-{i}"}
+                        for i in range(5)
+                    ],
+                    *[
+                        {"id": f"ma{i}", "task": f"meta-assessor {i}",
+                         "status": "running", "depth": 2,
+                         "session_id": f"ma-sess-{i}"}
+                        for i in range(3)
+                    ],
+                ],
+            }
+        ],
+    }
+    import yaml as _yaml
+    (invoke_dir / "report.yaml").write_text(_yaml.safe_dump(report))
+
+    parent = tmp_path / "parent.jsonl"
+    parent.write_text("\n".join(json.dumps(r) for r in [
+        # Specialists: tool_use + tool_result (completed).
+        {"type": "assistant", "uuid": "a1", "sessionId": session_id,
+         "timestamp": "2026-01-01T00:00:01.000Z",
+         "message": {"role": "assistant", "content": [
+             {"type": "tool_use", "id": "tu-spec",
+              "name": "mcp__plugin_callstack_call__invoke_parallel",
+              "input": {"tasks": [f"specialist {i}" for i in range(5)]}},
+         ]}},
+        {"type": "user", "uuid": "u1", "sessionId": session_id,
+         "timestamp": "2026-01-01T00:00:02.000Z",
+         "message": {"role": "user", "content": [
+             {"type": "tool_result", "tool_use_id": "tu-spec",
+              "content": '{"invoke_id": "20260101T000000-aaaa"}'},
+         ]}},
+        # Meta-assessors: tool_use only, NO tool_result (in flight).
+        {"type": "assistant", "uuid": "a2", "sessionId": session_id,
+         "timestamp": "2026-01-01T00:00:03.000Z",
+         "message": {"role": "assistant", "content": [
+             {"type": "tool_use", "id": "tu-meta",
+              "name": "mcp__plugin_callstack_call__invoke_parallel",
+              "input": {"tasks": [f"meta-assessor {i}" for i in range(3)]}},
+         ]}},
+    ]) + "\n")
+
+    page = read_messages(parent)
+    ci = CallstackIndex(log_dir)
+    annotate_spawns(page.messages, slug_callstack=ci, current_session_id=session_id)
+
+    by_id = {m.tool_use_id: m for m in page.messages if m.role == "tool_use"}
+
+    # Both tool_uses anchor to their actual children — even though meta is
+    # in-flight and shares a report with the already-claimed specialists.
+    assert by_id["tu-spec"].spawn_session_ids == [f"sp-sess-{i}" for i in range(5)]
+    assert by_id["tu-meta"].spawn_session_ids == [f"ma-sess-{i}" for i in range(3)]
+
+
+def test_partial_completion_marks_done_per_child(tmp_path: Path):
+    """When 4 of 5 ``invoke_parallel`` children have completed but the 5th
+    is still running, the parent tool_use has no tool_result yet — but the
+    4 completed children should already show as done in the caller card.
+    Drives the spawn_done field from the callstack report's per-task status.
+    """
+    session_id = "sess-partial"
+    log_dir = tmp_path / "callstack-log"
+    invoke_dir = log_dir / "20260101T000000-bbbb"
+    invoke_dir.mkdir(parents=True)
+
+    # 4 of 5 specialists complete, one still running.
+    report = {
+        "invoke_id": "20260101T000000-bbbb",
+        "parent_session": "root-sess",
+        "started_at": "2026-01-01T00:00:00+00:00",
+        "ended_at": None,
+        "status": "mixed",
+        "tasks": [
+            {
+                "id": "fork0001",
+                "task": "fork driver",
+                "status": "running",
+                "depth": 1,
+                "session_id": session_id,
+                "children": [
+                    {"id": "sp0", "task": "specialist 0", "status": "complete",
+                     "depth": 2, "session_id": "sp-sess-0"},
+                    {"id": "sp1", "task": "specialist 1", "status": "complete",
+                     "depth": 2, "session_id": "sp-sess-1"},
+                    {"id": "sp2", "task": "specialist 2", "status": "complete",
+                     "depth": 2, "session_id": "sp-sess-2"},
+                    {"id": "sp3", "task": "specialist 3", "status": "complete",
+                     "depth": 2, "session_id": "sp-sess-3"},
+                    {"id": "sp4", "task": "specialist 4", "status": "running",
+                     "depth": 2, "session_id": "sp-sess-4"},
+                ],
+            }
+        ],
+    }
+    import yaml as _yaml
+    (invoke_dir / "report.yaml").write_text(_yaml.safe_dump(report))
+
+    parent = tmp_path / "parent.jsonl"
+    # In-flight: tool_use only, no tool_result yet (the parent invoke_parallel
+    # hasn't returned because specialist 4 is still running).
+    parent.write_text(json.dumps({
+        "type": "assistant", "uuid": "a1", "sessionId": session_id,
+        "timestamp": "2026-01-01T00:00:01.000Z",
+        "message": {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "tu-spec",
+             "name": "mcp__plugin_callstack_call__invoke_parallel",
+             "input": {"tasks": [f"specialist {i}" for i in range(5)]}},
+        ]},
+    }) + "\n")
+
+    page = read_messages(parent)
+    ci = CallstackIndex(log_dir)
+    annotate_spawns(page.messages, slug_callstack=ci, current_session_id=session_id)
+
+    spec = next(m for m in page.messages if m.role == "tool_use")
+    assert spec.spawn_session_ids == [f"sp-sess-{i}" for i in range(5)]
+    # First 4 individually marked done despite parent tool_result being absent.
+    assert spec.spawn_done == [True, True, True, True, False]

@@ -10,6 +10,8 @@ from pydantic import BaseModel
 from ..dialog import pick_folder
 from ..projects import slug_for
 from ..registry import (
+    callstack_for_slug,
+    fork_detector_for_slug,
     forget_slug,
     index_for_slug,
     last_activity_for,
@@ -64,18 +66,36 @@ def list_projects() -> list[ProjectSummary]:
         # folder name instead of the slugged path.
         real_cwd = next((s.cwd for s in sessions if s.cwd), None)
         source_path = real_cwd or str(source)
+        # The session list pane hides callstack forks (they show up nested
+        # in the call tree under their parent), so the picker count must do
+        # the same — otherwise a project with 1 root + 10 forks advertises
+        # "11 sessions" but only 1 actually appears when you open it.
+        fork_ids = _fork_ids_for(slug)
+        visible = sum(1 for s in sessions if s.session_id not in fork_ids)
         out.append(
             ProjectSummary(
                 slug=slug,
                 source_path=source_path,
                 last_activity=last_ts,
-                session_count=len(sessions),
+                session_count=visible,
             )
         )
     out.sort(
         key=lambda p: p.last_activity or datetime.fromtimestamp(0, tz=timezone.utc),
         reverse=True,
     )
+    return out
+
+
+def _fork_ids_for(slug: str) -> set[str]:
+    """Return the set of session_ids that ``GET /projects/{slug}/sessions``
+    would hide as callstack forks. Mirrors the logic in
+    ``sessions_api.list_sessions`` so picker counts match list counts."""
+    out: set[str] = set()
+    ci = callstack_for_slug(slug)
+    if ci.has_logs:
+        out |= ci.all_child_session_ids()
+    out |= fork_detector_for_slug(slug).fork_session_ids()
     return out
 
 

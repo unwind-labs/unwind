@@ -65,6 +65,11 @@ class Message:
     # entries whose session_id hasn't been resolved yet have an empty string
     # in spawn_session_ids but a real task name here.
     spawn_tasks: list[str] = field(default_factory=list)
+    # Per-child completion status (parallel to spawn_session_ids). Lets the
+    # caller card check off finished children individually, even when the
+    # parent ``invoke_parallel`` tool_use is still in flight waiting on
+    # slow siblings. ``None`` = unknown (fall back to parent tool_result).
+    spawn_done: list[Optional[bool]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -86,6 +91,7 @@ class Message:
             "spawn_kind": self.spawn_kind,
             "spawn_session_ids": list(self.spawn_session_ids),
             "spawn_tasks": list(self.spawn_tasks),
+            "spawn_done": list(self.spawn_done),
         }
 
 
@@ -126,6 +132,7 @@ def annotate_spawns(
     *,
     current_session_id: Optional[str] = None,
     subagent_index=None,
+    fork_detector=None,
 ) -> None:
     """Tag tool_use messages that spawned children with ``spawn_session_ids``.
 
@@ -150,6 +157,12 @@ def annotate_spawns(
     Pass ``current_session_id`` whenever you have it (it's the session
     whose JSONL these messages came from). Without it the callstack
     parent-match check is skipped and inherited spawns will be tagged.
+
+    Pass ``fork_detector`` to resolve placeholder session_ids when the
+    callstack report doesn't (yet) contain the spawned tasks. The fork
+    detector matches each fork's first divergent user message against the
+    tool_use's requested task names — robust to callstack reports being
+    overwritten by sibling invocations or not yet flushed to disk.
     """
     by_use_id: dict[str, Message] = {}
     by_result_for: dict[str, Message] = {}
@@ -168,6 +181,12 @@ def annotate_spawns(
     # later in-flight tool_use can pick the NEXT unclaimed report instead of
     # double-counting.
     claimed_invoke_ids: set[str] = set()
+    # Track session_ids already attributed to a prior callstack tool_use.
+    # Multiple nested ``invoke*`` calls from the same fork share one report
+    # (callstack merges them), so without this each tool_use sees the union
+    # of every prior invocation's children — and the leftover-task logic
+    # below would phantom-render them.
+    claimed_child_sids: set[str] = set()
     # Same idea for subagent invocations matched by description.
     claimed_agent_ids: set[str] = set()
 
@@ -204,8 +223,8 @@ def annotate_spawns(
                         report, current_session_id
                     )
             elif current_session_id is not None and slug_callstack is not None:
-                # Find the first report for this session that hasn't been
-                # claimed by a prior tool_use.
+                # In-flight (no tool_result yet) — try the first unclaimed
+                # report first (legacy: each invocation got its own report).
                 for rep in slug_callstack.reports_with_session_node(
                     current_session_id
                 ):
@@ -217,6 +236,38 @@ def annotate_spawns(
                         rep, current_session_id
                     )
                     break
+                # If no unclaimed report exists, fall back to whichever
+                # report contains this session — modern callstack merges
+                # sibling invocations into one report, so the prior tool_use
+                # already claimed it. ``claimed_child_sids`` below filters
+                # tasks already attributed to siblings, so name-matching
+                # below still resolves THIS tool_use's children.
+                if not tasks:
+                    for rep in slug_callstack.reports_with_session_node(
+                        current_session_id
+                    ):
+                        chosen_report = rep
+                        tasks = slug_callstack.children_in_report(
+                            rep, current_session_id
+                        )
+                        break
+
+            # Strip tasks already claimed by an earlier tool_use so we don't
+            # double-count children when the report is shared across multiple
+            # nested invokes.
+            if claimed_child_sids:
+                tasks = [
+                    t for t in tasks
+                    if not (t.session_id and t.session_id in claimed_child_sids)
+                ]
+
+            # Index per-child completion status by session_id so the caller
+            # card can mark individual children done before the parent
+            # ``invoke_parallel`` tool_result lands.
+            status_by_sid: dict[str, str] = {
+                t.session_id: (t.status or "").lower()
+                for t in tasks if t.session_id
+            }
 
             # Build per-child (session_id, task) pairs, preserving the order
             # requested in the tool_input so unresolved children render as
@@ -234,30 +285,48 @@ def annotate_spawns(
                 # Bucket tasks by name (preserves duplicates so two requests
                 # for "/task-b" each get their own session_id in order).
                 by_name: dict[str, list[str]] = {}
-                leftover: list[tuple[str, str]] = []
                 for t in tasks:
                     name = t.task or ""
                     sid = t.session_id or ""
                     if name:
                         by_name.setdefault(name, []).append(sid)
-                    else:
-                        leftover.append((sid, name))
                 for t_name in requested:
                     bucket = by_name.get(t_name)
                     sid = bucket.pop(0) if bucket else ""
                     child_pairs.append((sid, t_name))
-                # Any extra tasks the report has but the request didn't list
-                # (rare) get appended at the end to avoid losing them.
-                for name, sids in by_name.items():
-                    for sid in sids:
-                        child_pairs.append((sid, name))
-                for sid, name in leftover:
-                    child_pairs.append((sid, name))
+                # NOTE: we deliberately do NOT append unmatched report tasks
+                # as leftovers here. With callstack's merged-frame model, a
+                # single report often contains tasks from sibling tool_uses
+                # (5 specialists + 3 meta-assessors + 1 re-author all share
+                # one report). Appending leftovers would emit phantom rows
+                # for tasks that belong to a different tool_use. Sibling
+                # tool_uses surface their own children when the loop
+                # processes them.
             else:
                 # No requested tasks (e.g. Skill-style invoke) — fall back to
                 # whatever the chosen report has.
                 for t in tasks:
                     child_pairs.append((t.session_id or "", t.task or ""))
+
+            # Fork-detector fallback: any pair still missing a session_id
+            # gets resolved by matching the fork's first divergent user text
+            # against the requested task name. This survives callstack
+            # reports being overwritten by sibling invocations and works for
+            # in-flight invocations whose tool_result hasn't landed yet.
+            if fork_detector is not None and current_session_id is not None:
+                resolved: list[tuple[str, str]] = []
+                for sid, t_name in child_pairs:
+                    if sid or not t_name:
+                        resolved.append((sid, t_name))
+                        continue
+                    found = fork_detector.find_session_by_divergence_text(
+                        current_session_id, t_name
+                    )
+                    if found and found not in claimed_child_sids:
+                        resolved.append((found, t_name))
+                    else:
+                        resolved.append((sid, t_name))
+                child_pairs = resolved
 
             # Drop empty placeholders.
             child_pairs = [(s, t) for s, t in child_pairs if s or t]
@@ -265,6 +334,13 @@ def annotate_spawns(
                 use_msg.spawn_kind = "call"
                 use_msg.spawn_session_ids = [s for s, _ in child_pairs]
                 use_msg.spawn_tasks = [t for _, t in child_pairs]
+                use_msg.spawn_done = [
+                    _done_from_status(status_by_sid.get(s)) if s else None
+                    for s, _ in child_pairs
+                ]
+                for sid, _t in child_pairs:
+                    if sid:
+                        claimed_child_sids.add(sid)
             _ = chosen_report  # (silences unused; kept for future debug)
         elif name in SUBAGENT_TOOL_NAMES:
             agent_id = _extract_agent_id(result_msg)
@@ -287,6 +363,26 @@ def annotate_spawns(
                     if pending_id:
                         use_msg.spawn_kind = "subagent"
                         use_msg.spawn_session_ids = [f"agent-{pending_id}"]
+
+
+def _done_from_status(status: Optional[str]) -> Optional[bool]:
+    """Map a callstack task status into the spawn-row done flag.
+
+    Returns True for terminal-success states, False for in-flight states,
+    None when unknown — the UI falls back to the parent's tool_result for
+    None entries.
+    """
+    if not status:
+        return None
+    s = status.lower()
+    if s in ("complete",):
+        return True
+    if s in ("running", "in_progress", "pending", "yielded"):
+        return False
+    # ``error``/``failed`` count as terminal so the row stops pulsing.
+    if s in ("error", "failed"):
+        return True
+    return None
 
 
 def _requested_tasks(tool_input: Any) -> list[str]:
