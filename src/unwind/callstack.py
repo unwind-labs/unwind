@@ -149,6 +149,155 @@ class CallstackIndex:
                     return hit
         return None
 
+    def _latest_view(
+        self,
+    ) -> tuple[
+        dict[str, TaskNode],
+        dict[str, list[str]],
+        dict[str, str],
+    ]:
+        """Build a ``latest report wins`` view of all sessions ever recorded.
+
+        Each call to ``invoke``/``invoke_parallel`` writes its own
+        ``report.yaml``. Re-running the same workflow produces multiple
+        reports that describe the same chain at different points in time —
+        e.g. an old report says ``yielded`` while the latest says
+        ``complete``. Walking every report indiscriminately resurrects the
+        old ``yielded``; deduping by ``session_id`` and keeping the entry
+        from the most recent report yields the right current snapshot.
+
+        Returns:
+          - ``canonical``: ``{session_id: TaskNode}`` — the TaskNode from the
+            most-recent report that mentioned this session.
+          - ``children_sids``: ``{session_id: [child_sid, ...]}`` — direct
+            children, deduped (a sid appears once in insertion order across
+            reports) so each child renders as exactly one row even when
+            multiple reports record the same parent→child edge.
+          - ``root_status``: ``{parent_session: report_status}`` — the
+            report-level status from the most recent report whose
+            ``parent_session`` is this id (i.e. the status visible to a
+            "root caller" that itself never appears as a task).
+        """
+        canonical: dict[str, TaskNode] = {}
+        canonical_ts: dict[str, Optional[datetime]] = {}
+        children_sids: dict[str, list[str]] = {}
+        children_seen: dict[str, set[str]] = {}
+        root_status: dict[str, str] = {}
+        root_status_ts: dict[str, Optional[datetime]] = {}
+
+        epoch = datetime.fromtimestamp(0, timezone.utc)
+
+        def newer(a: Optional[datetime], b: Optional[datetime]) -> bool:
+            return (a or epoch) > (b or epoch)
+
+        def absorb(node: TaskNode, ts: Optional[datetime]) -> None:
+            sid = node.session_id
+            if sid:
+                prev_ts = canonical_ts.get(sid)
+                if prev_ts is None or newer(ts, prev_ts):
+                    canonical[sid] = node
+                    canonical_ts[sid] = ts
+                seen = children_seen.setdefault(sid, set())
+                order = children_sids.setdefault(sid, [])
+                for c in node.children:
+                    csid = c.session_id
+                    if csid and csid not in seen:
+                        seen.add(csid)
+                        order.append(csid)
+            for c in node.children:
+                absorb(c, ts)
+
+        for rep in self.all_reports():
+            ts = rep.started_at
+            psid = rep.parent_session
+            if psid:
+                if rep.status:
+                    prev_ts = root_status_ts.get(psid)
+                    if prev_ts is None or newer(ts, prev_ts):
+                        root_status[psid] = rep.status.lower()
+                        root_status_ts[psid] = ts
+                seen = children_seen.setdefault(psid, set())
+                order = children_sids.setdefault(psid, [])
+                for t in rep.tasks:
+                    csid = t.session_id
+                    if csid and csid not in seen:
+                        seen.add(csid)
+                        order.append(csid)
+            for t in rep.tasks:
+                absorb(t, ts)
+
+        return canonical, children_sids, root_status
+
+    def is_callstack_task(self, session_id: str) -> bool:
+        """Whether ``session_id`` appears as a TaskNode in any report.
+
+        A session can appear in callstack data in two distinct ways:
+
+        1. **Task** — it's the ``session_id`` of a TaskNode somewhere in a
+           report's task tree. Means callstack tracks this session's
+           lifecycle precisely (it was spawned via ``invoke``/
+           ``invoke_resume``).
+        2. **Root only** — it's only ever the ``parent_session`` of reports
+           it spawned, never a task. This is the user's main Claude Code
+           session: it spawned callstack invocations, but callstack has no
+           opinion on the session's own lifecycle. Status for these must
+           come from process detection / JSONL mtime, not from
+           ``aggregate_status_for_session`` (which would aggregate the
+           descendants' statuses and falsely report ``done`` once all
+           invocations terminate).
+        """
+        canonical, _, _ = self._latest_view()
+        return session_id in canonical
+
+    def aggregate_status_for_session(self, session_id: str) -> Optional[str]:
+        """Like ``task_status_for_session``, but propagates the status of the
+        most-active descendant up.
+
+        A parent that's ``awaiting_child`` for a yielded grandchild should
+        itself surface as yielded so the whole chain lights up in the UI.
+
+        Priority (highest first): ``yielded`` > ``running`` / ``in_progress``
+        / ``pending`` > the session's own terminal status (``complete`` /
+        ``failed`` / ``error``). Returns ``None`` if this session doesn't
+        appear in any report.
+
+        Uses ``_latest_view`` so a stale yielded snapshot from an older
+        report doesn't override the current ``complete`` from a newer one.
+        """
+        canonical, children_sids, root_status = self._latest_view()
+        if session_id not in canonical and session_id not in root_status:
+            return None
+
+        statuses: list[str] = []
+        own = canonical.get(session_id)
+        if own is not None and own.status:
+            statuses.append(own.status.lower())
+        if session_id in root_status:
+            statuses.append(root_status[session_id])
+
+        visited: set[str] = {session_id}
+        queue: list[str] = list(children_sids.get(session_id, []))
+        while queue:
+            sid = queue.pop()
+            if sid in visited:
+                continue
+            visited.add(sid)
+            node = canonical.get(sid)
+            if node is not None and node.status:
+                statuses.append(node.status.lower())
+            if sid in root_status:
+                statuses.append(root_status[sid])
+            queue.extend(children_sids.get(sid, []))
+
+        if any(s == "yielded" for s in statuses):
+            return "yielded"
+        if any(s in ("running", "in_progress", "pending") for s in statuses):
+            return "running"
+        for s in statuses:
+            if s in ("complete", "failed", "error"):
+                return s
+        return statuses[0] if statuses else None
+
     def reports_with_session_node(self, session_id: str) -> list[InvokeReport]:
         """Reports whose task tree contains a node with ``session_id``.
 
@@ -200,34 +349,17 @@ class CallstackIndex:
     def direct_children_of(self, session_id: str) -> list["TaskNode"]:
         """Find this session's direct children across every report.
 
-        Two cases:
-
-        1. ``session_id`` is the root caller of an invocation (i.e. matches
-           ``rep.parent_session``). Return ``rep.tasks`` — the top-level
-           tasks of that invocation. This is the LIVE-friendly path: the
-           report.yaml is updated incrementally as children spawn, and we
-           don't need to wait for the parent's tool_result to come back.
-
-        2. ``session_id`` appears as a node deeper in some report's task
-           tree (e.g. /task-c inside root's report). Return that node's
-           children.
+        Children are deduped by ``session_id`` via ``_latest_view`` — when
+        the same parent→child edge is recorded in multiple reports (e.g.
+        the workflow ran twice), each child appears exactly once and uses
+        the most recent report's snapshot for its status.
         """
-        out: list[TaskNode] = []
-
-        def visit(node: TaskNode) -> None:
-            if node.session_id == session_id:
-                out.extend(node.children)
-                return  # don't recurse into already-found subtree
-            for c in node.children:
-                visit(c)
-
-        for rep in self.all_reports():
-            if rep.parent_session == session_id:
-                out.extend(rep.tasks)
-                continue
-            for t in rep.tasks:
-                visit(t)
-        return out
+        canonical, children_sids, _ = self._latest_view()
+        return [
+            canonical[c]
+            for c in children_sids.get(session_id, [])
+            if c in canonical
+        ]
 
     def all_child_session_ids(self) -> set[str]:
         """Every session_id that appears as a child task in any report."""
@@ -274,58 +406,50 @@ class CallstackIndex:
         return chain
 
     def build_subtree(self, root_session_id: str) -> list[TaskNode]:
-        """Return direct children of ``root_session_id``, with descendants."""
-        by_parent = self.reports_by_parent()
-        return self._descend(root_session_id, by_parent, visited=set())
+        """Return direct children of ``root_session_id``, with descendants.
 
-    def _descend(
-        self,
-        session_id: str,
-        by_parent: dict[str, list[InvokeReport]],
-        visited: set[str],
-    ) -> list[TaskNode]:
-        if session_id in visited:
-            return []
-        visited.add(session_id)
+        Uses ``_latest_view`` so each session appears once with its most
+        recent snapshot. Re-running the same workflow won't duplicate
+        cards/edges in the canvas tree.
+        """
+        canonical, children_sids, _ = self._latest_view()
+        visited: set[str] = {root_session_id}
+
+        def build(sid: str) -> Optional[TaskNode]:
+            node = canonical.get(sid)
+            if node is None:
+                return None
+            kids: list[TaskNode] = []
+            for c_sid in children_sids.get(sid, []):
+                if c_sid in visited:
+                    continue
+                visited.add(c_sid)
+                child = build(c_sid)
+                if child is not None:
+                    kids.append(child)
+            return TaskNode(
+                session_id=node.session_id,
+                task=node.task,
+                status=node.status,
+                depth=node.depth,
+                duration_seconds=node.duration_seconds,
+                summary=node.summary,
+                error=node.error,
+                children=kids,
+                invoke_id=node.invoke_id,
+                started_at=node.started_at,
+                ended_at=node.ended_at,
+            )
+
         out: list[TaskNode] = []
-        for report in by_parent.get(session_id, []):
-            for task in report.tasks:
-                # The YAML already nests descendants from this invocation. We
-                # also descend into sessions' own later invocations.
-                merged = self._merge_task_with_later_invocations(
-                    task, by_parent, visited
-                )
-                out.append(merged)
+        for child_sid in children_sids.get(root_session_id, []):
+            if child_sid in visited:
+                continue
+            visited.add(child_sid)
+            built = build(child_sid)
+            if built is not None:
+                out.append(built)
         return out
-
-    def _merge_task_with_later_invocations(
-        self,
-        task: TaskNode,
-        by_parent: dict[str, list[InvokeReport]],
-        visited: set[str],
-    ) -> TaskNode:
-        own_children = [
-            self._merge_task_with_later_invocations(c, by_parent, visited)
-            for c in task.children
-        ]
-        if task.session_id:
-            # If this session kicked off its own independent invocations later,
-            # merge those in as additional children.
-            later = self._descend(task.session_id, by_parent, visited)
-            own_children.extend(later)
-        return TaskNode(
-            session_id=task.session_id,
-            task=task.task,
-            status=task.status,
-            depth=task.depth,
-            duration_seconds=task.duration_seconds,
-            summary=task.summary,
-            error=task.error,
-            children=own_children,
-            invoke_id=task.invoke_id,
-            started_at=task.started_at,
-            ended_at=task.ended_at,
-        )
 
     # --- parsing ----------------------------------------------------------
 

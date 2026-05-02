@@ -30,14 +30,22 @@ def _row_for(summary, ci, project_path: Optional[str]) -> SessionRow:
         )
     else:
         tlc = 0
+    # See sessions_api.list_sessions for the rationale behind this priority
+    # — short version: terminal callstack status on a "root only" (main)
+    # session must defer to live process detection so a session the user is
+    # still driving doesn't get marked done after its last invoke completes.
     status = "done"
-    cs_status = ci.task_status_for_session(summary.session_id) if ci.has_logs else None
+    cs_status = ci.aggregate_status_for_session(summary.session_id) if ci.has_logs else None
     if cs_status is not None:
         cs_norm = cs_status.lower()
-        if cs_norm in ("running", "in_progress", "yielded"):
+        if cs_norm == "yielded":
+            status = "yield"
+        elif cs_norm in ("running", "in_progress"):
             status = "live"
-        else:
+        elif ci.is_callstack_task(summary.session_id):
             status = "done"
+        else:
+            status = session_status(summary.cwd or project_path, last_epoch)
     else:
         status = session_status(summary.cwd or project_path, last_epoch)
     return SessionRow(
@@ -60,7 +68,7 @@ def list_sessions(
     harness: str = typer.Option("claude", "--harness"),
     include_forks: bool = typer.Option(False, "--include-forks"),
     status: str = typer.Option(
-        "all", "--status", help="Filter by status: live | done | all."
+        "all", "--status", help="Filter by status: live | yield | done | all."
     ),
     limit: Optional[int] = typer.Option(None, "--limit", min=1),
     sort: str = typer.Option(
@@ -69,8 +77,8 @@ def list_sessions(
     json_out: bool = typer.Option(False, "--json"),
 ) -> None:
     """List sessions in a project."""
-    if status not in ("live", "done", "all"):
-        raise _common.usage_error("--status must be one of: live, done, all")
+    if status not in ("live", "yield", "done", "all"):
+        raise _common.usage_error("--status must be one of: live, yield, done, all")
     if sort not in ("recent", "created"):
         raise _common.usage_error("--sort must be one of: recent, created")
 

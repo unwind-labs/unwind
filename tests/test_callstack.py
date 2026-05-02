@@ -111,3 +111,64 @@ def test_missing_log_dir(tmp_path: Path):
     ci = CallstackIndex(tmp_path / "does-not-exist")
     assert not ci.has_logs
     assert ci.build_subtree("ANYTHING") == []
+
+
+def test_is_callstack_task_distinguishes_main_session_from_forks(tmp_path: Path):
+    """The user's main session is a ``parent_session`` in callstack reports
+    but never a ``TaskNode``. Forks are the opposite. ``is_callstack_task``
+    must say False for the main session and True for any fork — the sessions
+    API uses this to decide whether to trust callstack's terminal status or
+    fall through to live process detection.
+    """
+    log = tmp_path / "log"
+    _write_report(
+        log,
+        "20260101T000000-root",
+        {
+            "invoke_id": "20260101T000000-root",
+            "parent_session": "MAIN",
+            "status": "complete",
+            "tasks": [
+                {
+                    "task": "/task-a",
+                    "status": "complete",
+                    "depth": 1,
+                    "session_id": "FORK-A",
+                }
+            ],
+        },
+    )
+    ci = CallstackIndex(log)
+    assert ci.is_callstack_task("FORK-A") is True
+    # MAIN never appears as a task — it's only a parent_session.
+    assert ci.is_callstack_task("MAIN") is False
+    # Unknown sessions also return False.
+    assert ci.is_callstack_task("UNRELATED") is False
+
+
+def test_aggregate_status_returns_terminal_for_main_when_chain_complete(tmp_path: Path):
+    """Sanity check that ``aggregate_status_for_session`` DOES return
+    ``complete`` for a main session whose entire fork chain is done — this
+    is the situation the sessions-api caller has to override (so a still-
+    running main session shows live, not done)."""
+    log = tmp_path / "log"
+    _write_report(
+        log,
+        "20260101T000000-root",
+        {
+            "invoke_id": "20260101T000000-root",
+            "parent_session": "MAIN",
+            "status": "complete",
+            "tasks": [
+                {
+                    "task": "/task-a",
+                    "status": "complete",
+                    "depth": 1,
+                    "session_id": "FORK-A",
+                }
+            ],
+        },
+    )
+    ci = CallstackIndex(log)
+    assert ci.aggregate_status_for_session("MAIN") == "complete"
+    assert ci.is_callstack_task("MAIN") is False

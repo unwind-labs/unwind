@@ -1,4 +1,4 @@
-export type SessionStatus = "live" | "idle" | "done";
+export type SessionStatus = "live" | "yield" | "idle" | "done";
 
 export type SessionRow = {
   session_id: string;

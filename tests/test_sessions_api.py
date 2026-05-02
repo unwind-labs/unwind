@@ -142,3 +142,85 @@ def test_messages_surfaces_forks_when_no_callstack_log_dir(app_client):
     assert set(card["children"]) == set(forks)
     # Each fork should have a non-empty label (its divergent user text).
     assert all(t for t in card["tasks"]), card["tasks"]
+
+
+def test_main_session_with_completed_forks_uses_process_detection(
+    app_client, monkeypatch: pytest.MonkeyPatch
+):
+    """A main session whose entire fork chain has completed should NOT be
+    marked done if a claude process is still running for the project. This
+    is the bug the user hit: callstack's terminal status overrode the live
+    process detection for the user's top-level Claude Code session."""
+    import yaml
+
+    client, home, projects_mod, _ = app_client
+
+    # Project setup: one main session, one fork session, one callstack log.
+    real_cwd = home.parent / "work" / "live-proj"
+    real_cwd.mkdir(parents=True)
+    slug = projects_mod.slug_for(real_cwd)
+
+    main_sid = "11111111-aaaa-bbbb-cccc-111111111111"
+    fork_sid = "22222222-aaaa-bbbb-cccc-222222222222"
+
+    # Write minimal session JSONLs (single user record each).
+    proj_dir = home / ".claude" / "projects" / slug
+    base = {
+        "uuid": "u-1",
+        "type": "user",
+        "timestamp": "2026-04-24T09:00:00.000Z",
+        "message": {"role": "user", "content": "hi"},
+        "cwd": str(real_cwd),
+    }
+    _write_session(proj_dir, main_sid, [{**base, "sessionId": main_sid}])
+    _write_session(
+        proj_dir, fork_sid, [{**base, "sessionId": fork_sid, "uuid": "u-2"}]
+    )
+
+    # Callstack report: MAIN spawned FORK, FORK is complete, report itself
+    # is complete. ``aggregate_status_for_session(MAIN)`` will return
+    # "complete" → the fix must override that with process detection.
+    cs_log = real_cwd / ".claude" / "callstack" / "log" / "20260101T000000-x"
+    cs_log.mkdir(parents=True)
+    (cs_log / "report.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "invoke_id": "20260101T000000-x",
+                "parent_session": main_sid,
+                "status": "complete",
+                "tasks": [
+                    {
+                        "task": "/some-task",
+                        "status": "complete",
+                        "depth": 1,
+                        "session_id": fork_sid,
+                    }
+                ],
+            }
+        )
+    )
+
+    # Mock process detection to claim a claude process is running for the
+    # project. Without the fix, the main session would still show "done".
+    import unwind.api.sessions_api as api_sessions_mod
+
+    def fake_session_status(project_path, last_epoch):
+        del project_path, last_epoch
+        return "live"
+
+    monkeypatch.setattr(
+        api_sessions_mod, "session_status", fake_session_status
+    )
+
+    # ``include_forks=true`` so the fork (a callstack task) is also returned
+    # — we want to assert its status independently from the main session.
+    resp = client.get(f"/api/projects/{slug}/sessions?include_forks=true")
+    assert resp.status_code == 200, resp.text
+    rows = {r["session_id"]: r for r in resp.json()}
+
+    # Main session: callstack says complete, but it's NOT a callstack task,
+    # and process detection says live → should be live.
+    assert rows[main_sid]["status"] == "live", rows[main_sid]
+    # Fork: callstack says complete AND it IS a callstack task → done,
+    # regardless of live process state.
+    assert rows[fork_sid]["status"] == "done", rows[fork_sid]

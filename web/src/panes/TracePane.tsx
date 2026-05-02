@@ -16,6 +16,7 @@ import {
 import { useMessages } from "@/api/client";
 import type { Message, SpawnCardData } from "@/api/types";
 import { useUi } from "@/store/ui";
+import { filterMessagesByWindow } from "@/panes/instances";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import {
   Collapsible,
@@ -31,7 +32,18 @@ import { cn, shortId } from "@/lib/utils";
  * trace, indented and recursive. A "calls only" toggle hides regular
  * messages so the call structure stands out.
  */
-export function TracePane({ sessionIdOverride }: { sessionIdOverride?: string } = {}) {
+export type TraceWindow = { start: string | null; end: string | null };
+
+export function TracePane({
+  sessionIdOverride,
+  windowOverride,
+}: {
+  sessionIdOverride?: string;
+  /** When set, the trace shows only messages whose timestamp falls in
+   *  ``[start, end)``. Used by the canvas detail overlay so a windowed
+   *  node opens only the slice of the session it represents. */
+  windowOverride?: TraceWindow | null;
+} = {}) {
   const slug = useUi((s) => s.slug);
   const rootSessionId = useUi((s) => s.rootSessionId);
   const sessionId = sessionIdOverride ?? rootSessionId;
@@ -91,6 +103,10 @@ export function TracePane({ sessionIdOverride }: { sessionIdOverride?: string } 
     );
   }
 
+  const windowed =
+    windowOverride && (windowOverride.start || windowOverride.end)
+      ? windowOverride
+      : null;
   return (
     <Shell>
       <header className="flex items-center justify-between border-b border-border px-3 py-2">
@@ -98,8 +114,17 @@ export function TracePane({ sessionIdOverride }: { sessionIdOverride?: string } 
           <div className="text-[11px] uppercase tracking-wider text-muted-foreground">
             trace
           </div>
-          <div className="text-xs text-muted-foreground">
-            {shortId(sessionId)}
+          <div className="flex items-center gap-2 text-xs text-muted-foreground">
+            <span>{shortId(sessionId)}</span>
+            {windowed ? (
+              <Badge
+                variant="outline"
+                className="border-amber-500/40 text-[9px] uppercase text-amber-300"
+                title={`window: ${windowed.start ?? "(begin)"} – ${windowed.end ?? "(open)"}`}
+              >
+                window {fmtTime(windowed.start)} – {fmtTime(windowed.end)}
+              </Badge>
+            ) : null}
           </div>
         </div>
         <div className="flex items-center gap-3">
@@ -134,11 +159,18 @@ export function TracePane({ sessionIdOverride }: { sessionIdOverride?: string } 
             depth={0}
             includeMeta={includeMeta}
             callsOnly={callsOnly}
+            window={windowed}
           />
         </div>
       </ScrollArea>
     </Shell>
   );
+}
+
+function fmtTime(iso: string | null): string {
+  if (!iso) return "(open)";
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? "?" : d.toLocaleTimeString();
 }
 
 function Shell({ children }: { children: React.ReactNode }) {
@@ -157,6 +189,7 @@ function SessionTrace({
   includeMeta,
   callsOnly,
   autoOpen = false,
+  window: traceWindow = null,
 }: {
   slug: string;
   sessionId: string;
@@ -165,12 +198,34 @@ function SessionTrace({
   callsOnly: boolean;
   /** If true, default-expand any spawn cards so the user sees the whole sub-tree. */
   autoOpen?: boolean;
+  /** When set, filter this session's messages to ``[start, end)``. Only
+   *  applied at the OUTER call (depth 0) — recursive renders for spawned
+   *  children always show the child's full session. */
+  window?: TraceWindow | null;
 }) {
   const { data, isLoading, error } = useMessages(slug, sessionId, includeMeta);
 
+  // Apply the window only at the outermost render; nested spawn expansions
+  // call SessionTrace recursively and should show the child's full trace.
+  const windowed = useMemo(() => {
+    if (!data) return null;
+    if (!traceWindow || (!traceWindow.start && !traceWindow.end)) return data;
+    return {
+      ...data,
+      messages: filterMessagesByWindow(
+        data.messages,
+        traceWindow.start,
+        traceWindow.end,
+      ),
+      // ``extra_spawns`` have no per-window anchor — pin them to the latest
+      // (open-ended) window so resume-bounded slices don't repeat them.
+      extra_spawns: traceWindow.end === null ? data.extra_spawns ?? [] : [],
+    };
+  }, [data, traceWindow]);
+
   const groups = useMemo(
-    () => (data ? groupMessages(data.messages) : []),
-    [data],
+    () => (windowed ? groupMessages(windowed.messages) : []),
+    [windowed],
   );
 
   // Place extra spawn cards immediately after the last assistant message in
@@ -178,9 +233,9 @@ function SessionTrace({
   // parsed to fire the children. Callstack's report timestamps inherit from
   // the outer invoke, so we can't trust them for in-session positioning.
   const items = useMemo<OrderedItem[]>(() => {
-    if (!data) return [];
+    if (!windowed) return [];
     const result: OrderedItem[] = [];
-    const extras = data.extra_spawns ?? [];
+    const extras = windowed.extra_spawns ?? [];
     if (extras.length === 0) {
       return groups.map((g) => ({ kind: "group", group: g, ts: 0 }));
     }
@@ -207,7 +262,7 @@ function SessionTrace({
       for (const s of extras) result.push({ kind: "extra", spawn: s, ts: 0 });
     }
     return result;
-  }, [data, groups]);
+  }, [windowed, groups]);
 
   const visibleItems = useMemo(() => {
     if (!callsOnly) return items;

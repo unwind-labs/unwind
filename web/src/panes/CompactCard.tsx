@@ -1,24 +1,19 @@
 import { useEffect, useMemo, useRef } from "react";
 import { Handle, Position, useUpdateNodeInternals } from "reactflow";
-import { GitFork, Sparkles, Activity, CheckCircle2 } from "lucide-react";
+import {
+  GitFork,
+  Sparkles,
+  Activity,
+  CheckCircle2,
+  ChevronRight,
+} from "lucide-react";
 import { useMessages } from "@/api/client";
-import type { Message, SpawnCardData as ExtraSpawn } from "@/api/types";
 import { cn, shortId } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
+import { filterMessagesByWindow } from "./instances";
+import { deriveRows, type Row } from "./derive-rows";
 
-/** A single row inside a compact session card. ONE row per child — for
- *  invoke_parallel with N children we emit N spawn rows so each child has
- *  its own anchor. */
-type Row =
-  | { kind: "activity"; count: number; spanSeconds: number }
-  | {
-      kind: "spawn";
-      spawnKind: "call" | "subagent";
-      title: string;
-      childId: string; // empty string while resolving
-      done: boolean;
-      handleId: string;
-    };
+export { deriveRows } from "./derive-rows";
 
 export const COMPACT_CARD_WIDTH = 340;
 const ACTIVITY_HEIGHT = 28;
@@ -35,171 +30,80 @@ export function estimateCardHeight(rows: Row[]): number {
   return Math.max(h, HEADER_HEIGHT + PADDING_Y * 2);
 }
 
+export type ResolvedSpawn = {
+  handleId: string;
+  childId: string;
+  label: string;
+  spawnKind: "call" | "subagent";
+  done: boolean;
+  parentToolUseTs: string | null;
+  isResume: boolean;
+  userReply?: string;
+};
+
 export type CompactCardData = {
   slug: string;
+  /** Underlying Claude session id — what ``useMessages`` is keyed by, and
+   *  what ``onOpenDetail`` opens. Multiple cards on the canvas can share
+   *  the same ``sessionId`` (one per ``invoke`` / ``invoke_resume``); they
+   *  differ by their unique ReactFlow node id. */
   sessionId: string;
   /** Display label — task name from parent if known, else session id prefix. */
   label: string;
   isRoot: boolean;
   selected: boolean;
-  /** Called whenever this card discovers spawn rows so the canvas can add child nodes. */
-  onSpawnsResolved: (
-    cardId: string,
-    spawns: { handleId: string; childId: string; label: string; spawnKind: "call" | "subagent"; done: boolean }[],
-  ) => void;
+  /** Called whenever this card discovers spawn rows so the canvas can add child nodes.
+   *  ``cardNodeId`` is the parent card's ReactFlow node id (NOT its sessionId
+   *  — instances of the same session have distinct node ids). */
+  onSpawnsResolved: (cardNodeId: string, spawns: ResolvedSpawn[]) => void;
   /** Called when the user wants the full session view. */
   onOpenDetail: (sessionId: string) => void;
-  /** Called when the rendered card height changes (for dagre re-layout). */
-  onMeasure: (sessionId: string, height: number) => void;
-  status: "live" | "done";
+  /** Called when the rendered card height changes (for re-layout). Keyed by
+   *  node id so two cards for the same session don't trample. */
+  onMeasure: (cardNodeId: string, height: number) => void;
+  status: "live" | "yield" | "done";
   /** True when the keyboard cursor is on this card (arrow-key navigation
    *  with the right pane focused). Distinct from `selected`, which means
    *  the detail overlay is currently open for this session. */
   keyboardFocused?: boolean;
+  /** Unique ReactFlow node id (handleId for child instances; sessionId for
+   *  the root). Forwarded back through ``onSpawnsResolved`` and ``onMeasure``
+   *  so the canvas keys its state per-instance. */
+  nodeId: string;
+  /** Inclusive ISO start of this instance's activity window. ``null`` for
+   *  the root and for the first instance with no parent timestamp. */
+  windowStart: string | null;
+  /** Exclusive ISO end of this instance's activity window. ``null`` for the
+   *  latest instance (open-ended). */
+  windowEnd: string | null;
+  /** True for invoke_resume windows or any non-first window of a session
+   *  under one parent. Drives the "↻ resumed" pill. */
+  isResumeInstance: boolean;
 };
-
-export function deriveRows(messages: Message[], extras: ExtraSpawn[] = []): Row[] {
-  const out: Row[] = [];
-  let bucketCount = 0;
-  let bucketStart: string | null = null;
-  let bucketEnd: string | null = null;
-
-  const flushBucket = () => {
-    if (bucketCount === 0) return;
-    const span =
-      bucketStart && bucketEnd
-        ? Math.max(0, (Date.parse(bucketEnd) - Date.parse(bucketStart)) / 1000)
-        : 0;
-    out.push({ kind: "activity", count: bucketCount, spanSeconds: span });
-    bucketCount = 0;
-    bucketStart = null;
-    bucketEnd = null;
-  };
-
-  // Group messages so tool_use and its tool_result are paired (they're not
-  // counted as 2 messages in activity buckets — they're one logical event).
-  const seenResultFor = new Set<string>();
-  for (const m of messages) {
-    if (m.role === "tool_result" && m.tool_result_for) {
-      seenResultFor.add(m.tool_result_for);
-      continue;
-    }
-    if (m.role === "tool_use" && m.spawn_kind && m.spawn_session_ids?.length) {
-      flushBucket();
-      const tooluse = m.tool_use_id ?? m.uuid;
-      const callDone =
-        m.tool_use_id !== null && seenResultFor.has(m.tool_use_id ?? "");
-      const labels =
-        m.spawn_tasks && m.spawn_tasks.length === m.spawn_session_ids.length
-          ? m.spawn_tasks
-          : m.spawn_session_ids.map((_, i) => labelFromInput(m, i));
-      m.spawn_session_ids.forEach((childId, i) => {
-        // Prefer per-child status from the callstack report (set by the
-        // server via spawn_done). Falls back to the parent tool_result's
-        // arrival when the report doesn't know yet.
-        const perChild = m.spawn_done?.[i];
-        const done =
-          perChild != null
-            ? perChild && childId !== ""
-            : callDone && childId !== "";
-        out.push({
-          kind: "spawn",
-          spawnKind: m.spawn_kind!,
-          title: labels[i] || childId.slice(0, 8) || "(resolving)",
-          childId,
-          done,
-          handleId: `spawn-${tooluse}-${i}`,
-        });
-      });
-      continue;
-    }
-    bucketCount += 1;
-    if (m.timestamp) {
-      if (!bucketStart) bucketStart = m.timestamp;
-      bucketEnd = m.timestamp;
-    }
-  }
-  flushBucket();
-
-  // Re-check spawn `done`: a tool_use's done state depends on whether a
-  // tool_result for it exists ANYWHERE in the message list. The above loop
-  // sees results in order, so for tool_uses that came BEFORE their result
-  // we'd have missed it. Re-walk and patch — but only when we don't have a
-  // per-child status from the callstack report (that's authoritative).
-  const allResultIds = new Set(
-    messages
-      .filter((m) => m.role === "tool_result" && m.tool_result_for)
-      .map((m) => m.tool_result_for!),
-  );
-  // Build a lookup of per-child statuses keyed by handleId so the re-walk
-  // can preserve them.
-  const perChildByHandle: Record<string, boolean | null | undefined> = {};
-  for (const m of messages) {
-    if (m.role !== "tool_use" || !m.spawn_kind) continue;
-    if (!m.spawn_done) continue;
-    const tooluse = m.tool_use_id ?? m.uuid;
-    m.spawn_done.forEach((d, i) => {
-      perChildByHandle[`spawn-${tooluse}-${i}`] = d;
-    });
-  }
-  for (const r of out) {
-    if (r.kind === "spawn") {
-      const perChild = perChildByHandle[r.handleId];
-      if (perChild != null) {
-        r.done = perChild && r.childId !== "";
-        continue;
-      }
-      // handleId is `spawn-<toolUseId>-<i>`; recover toolUseId.
-      const m = r.handleId.match(/^spawn-(.+)-\d+$/);
-      const toolUseId = m ? m[1] : "";
-      const callDone = allResultIds.has(toolUseId);
-      r.done = callDone && r.childId !== "";
-    }
-  }
-
-  // Append extra spawn cards (callstack-derived spawns that don't have a
-  // tool_use anchor — e.g. /task-c spawning /task-e/f via callstack:call
-  // Skill that emits a JSON envelope instead of an MCP tool call). These
-  // sit at the end of the row list since we don't know exactly when they
-  // happened relative to messages.
-  extras.forEach((s, ei) => {
-    s.children.forEach((childId, i) => {
-      const callDone = s.status !== "running" && s.status !== "in_progress";
-      const taskName = s.tasks[i] ?? `child ${i + 1}`;
-      out.push({
-        kind: "spawn",
-        spawnKind: "call",
-        title: taskName || childId.slice(0, 8) || "(call)",
-        childId,
-        done: callDone && childId !== "",
-        handleId: `extra-${ei}-${i}`,
-      });
-    });
-  });
-
-  return out;
-}
-
-function labelFromInput(m: Message, i: number): string {
-  const input = m.tool_input as Record<string, unknown> | null;
-  if (input && typeof input === "object") {
-    const tasks = (input as { tasks?: unknown }).tasks;
-    if (Array.isArray(tasks) && tasks[i] != null) return String(tasks[i]);
-    if (typeof (input as { task?: unknown }).task === "string") {
-      return (input as { task: string }).task;
-    }
-    if (typeof (input as { description?: unknown }).description === "string") {
-      return (input as { description: string }).description;
-    }
-  }
-  return m.tool_name ?? "call";
-}
-
 
 export function CompactCardNode({ data }: { data: CompactCardData }) {
   const { data: messages } = useMessages(data.slug, data.sessionId, false);
-  const rows: Row[] = messages
-    ? deriveRows(messages.messages, messages.extra_spawns ?? [])
+  // ``windowEnd === null`` means this is the open-ended (latest) view of the
+  // session — same shape as the root node, which has both ends null.
+  const isLatest = data.windowEnd === null;
+  // Filter the child's full message stream to this window so each card on
+  // the canvas only shows what happened during its own slice of the session.
+  // Earlier slices stop at the next invoke_resume; the latest is open-ended.
+  const windowed = useMemo(() => {
+    if (!messages) return null;
+    const filtered = filterMessagesByWindow(
+      messages.messages,
+      data.windowStart,
+      data.windowEnd,
+    );
+    // ``extra_spawns`` (callstack-Skill spawns without a parent tool_use)
+    // have no per-window anchor — pin them to the latest window so we
+    // don't fan them out across every resume.
+    const extras = isLatest ? messages.extra_spawns ?? [] : [];
+    return { messages: filtered, extras };
+  }, [messages, data.windowStart, data.windowEnd, isLatest]);
+  const rows: Row[] = windowed
+    ? deriveRows(windowed.messages, windowed.extras)
     : [];
   const cardRef = useRef<HTMLDivElement | null>(null);
 
@@ -217,45 +121,53 @@ export function CompactCardNode({ data }: { data: CompactCardData }) {
     return ids.join("|");
   }, [rows]);
   useEffect(() => {
-    updateNodeInternals(data.sessionId);
-  }, [handleSignature, data.sessionId, updateNodeInternals]);
+    updateNodeInternals(data.nodeId);
+  }, [handleSignature, data.nodeId, updateNodeInternals]);
   // Status priority:
-  //   1. Authoritative session status from canvas (process detection + JSONL
-  //      mtime fallback). If "live", trust it — even if no in-flight calls.
-  //   2. Otherwise, infer from spawn rows: any unfinished call → live.
-  //   3. Otherwise → done.
-  const selfStatus: "live" | "done" =
-    data.status === "live"
-      ? "live"
-      : messages && rows.some((r) => r.kind === "spawn" && !r.done)
+  //   1. Bounded window (``windowEnd != null``) — always ``done``: this slice
+  //      ended when the next invoke_resume started.
+  //   2. Authoritative session status from canvas (process detection + JSONL
+  //      mtime fallback). If "yield" or "live", trust it.
+  //   3. Otherwise, infer from spawn rows: any unfinished call → live.
+  //   4. Otherwise → done.
+  const selfStatus: "live" | "yield" | "done" = !isLatest
+    ? "done"
+    : data.status === "yield"
+      ? "yield"
+      : data.status === "live"
         ? "live"
-        : "done";
+        : windowed && rows.some((r) => r.kind === "spawn" && !r.done)
+          ? "live"
+          : "done";
 
   // When spawn rows are discovered, tell the canvas so it can add child cards.
   useEffect(() => {
-    if (!messages) return;
-    const spawns: {
-      handleId: string;
-      childId: string;
-      label: string;
-      spawnKind: "call" | "subagent";
-      done: boolean;
-    }[] = [];
+    if (!windowed) return;
+    const spawns: ResolvedSpawn[] = [];
     for (const r of rows) {
       if (r.kind !== "spawn") continue;
       // Skip rows whose child hasn't resolved yet — no card to draw.
       if (!r.childId) continue;
+      // Defensive: a spawn whose handleId matches our own nodeId would
+      // create a self-loop in spawnsByParent and infinite-recurse the
+      // layout walk. This shouldn't happen (handleIds are derived from
+      // tool_use_ids unique to each session), but inherited-tool-use
+      // edge cases can produce it; drop them rather than crashing.
+      if (r.handleId === data.nodeId) continue;
       spawns.push({
         handleId: r.handleId,
         childId: r.childId,
         label: r.title,
         spawnKind: r.spawnKind,
         done: r.done,
+        parentToolUseTs: r.parentToolUseTs,
+        isResume: r.isResume,
+        userReply: r.userReply,
       });
     }
-    data.onSpawnsResolved(data.sessionId, spawns);
+    data.onSpawnsResolved(data.nodeId, spawns);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [messages]);
+  }, [windowed]);
 
   // Report measured height up so dagre can re-layout.
   useEffect(() => {
@@ -263,7 +175,7 @@ export function CompactCardNode({ data }: { data: CompactCardData }) {
     if (!el) return;
     const obs = new ResizeObserver((entries) => {
       for (const e of entries) {
-        data.onMeasure(data.sessionId, e.contentRect.height);
+        data.onMeasure(data.nodeId, e.contentRect.height);
       }
     });
     obs.observe(el);
@@ -296,6 +208,13 @@ export function CompactCardNode({ data }: { data: CompactCardData }) {
         // Currently-open state: primary border + subtle fill.
         data.selected && "border-primary bg-primary/10 hover:border-primary",
         selfStatus === "live" && "border-t-emerald-500",
+        // Yielded: bold amber background so it pops in the canvas — the
+        // session is paused waiting for user input.
+        selfStatus === "yield" &&
+          "border-t-amber-400 bg-amber-500/25 hover:bg-amber-500/30",
+        selfStatus === "yield" &&
+          data.selected &&
+          "bg-amber-500/35 hover:bg-amber-500/35",
       )}
       style={{
         width: COMPACT_CARD_WIDTH,
@@ -314,17 +233,31 @@ export function CompactCardNode({ data }: { data: CompactCardData }) {
       />
       <header className="flex items-center justify-between gap-2 border-b border-border px-3 py-2">
         <div className="min-w-0 flex-1">
-          <div className="truncate text-[12px] font-medium text-foreground">
-            {data.label}
+          <div className="flex items-center gap-1.5">
+            {data.isResumeInstance ? (
+              <ChevronRight
+                className="h-3.5 w-3.5 shrink-0 text-amber-400"
+                aria-label="continued"
+                strokeWidth={2.5}
+              />
+            ) : null}
+            <div className="truncate text-[12px] font-medium text-foreground">
+              {data.label}
+            </div>
           </div>
           <div className="font-mono text-[10px] text-muted-foreground">
             {data.isRoot ? "root · " : ""}
             {data.sessionId.startsWith("agent-")
               ? data.sessionId.slice(6, 14)
               : shortId(data.sessionId)}
+            {data.isResumeInstance ? (
+              <span className="ml-1 text-amber-400/80">· continued</span>
+            ) : null}
           </div>
         </div>
-        {selfStatus === "live" ? (
+        {selfStatus === "yield" ? (
+          <Badge variant="warn">yield</Badge>
+        ) : selfStatus === "live" ? (
           <Badge variant="warn">live</Badge>
         ) : (
           <CheckCircle2 className="h-3 w-3 text-emerald-500/70" />

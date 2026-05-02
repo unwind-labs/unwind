@@ -14,6 +14,11 @@ interface UiState {
   /** When set, the right pane shows the linear TracePane for this session
    *  as a takeover overlay, with a back-to-canvas link. */
   detailSessionId: string | null;
+  /** When the detail overlay was opened from a windowed canvas node
+   *  (an invoke/invoke_resume slice rather than the whole session),
+   *  ``detailWindow`` records the slice's ``[start, end)`` so the trace
+   *  shows only that range. ``null`` = show the full session. */
+  detailWindow: { start: string | null; end: string | null } | null;
   setSlug: (slug: string | null) => void;
   selectRootSession: (id: string | null) => void;
   selectThreadSession: (id: string | null) => void;
@@ -21,7 +26,10 @@ interface UiState {
   setSessionFilter: (v: string) => void;
   setShowForks: (v: boolean) => void;
   setCallsOnly: (v: boolean) => void;
-  openDetail: (id: string) => void;
+  openDetail: (
+    id: string,
+    window?: { start: string | null; end: string | null } | null,
+  ) => void;
   closeDetail: () => void;
   focusPane: (p: PaneKey) => void;
   rotateFocus: (dir: 1 | -1) => void;
@@ -38,6 +46,7 @@ export const useUi = create<UiState>((set, get) => ({
   showForks: false,
   callsOnly: false,
   detailSessionId: null,
+  detailWindow: null,
   focusedPane: "sessions",
   setSlug: (slug) =>
     set({
@@ -46,16 +55,23 @@ export const useUi = create<UiState>((set, get) => ({
       threadSessionId: null,
       sessionFilter: "",
       detailSessionId: null,
+      detailWindow: null,
     }),
   selectRootSession: (id) =>
-    set({ rootSessionId: id, threadSessionId: id, detailSessionId: null }),
+    set({
+      rootSessionId: id,
+      threadSessionId: id,
+      detailSessionId: null,
+      detailWindow: null,
+    }),
   selectThreadSession: (id) => set({ threadSessionId: id }),
   setIncludeMeta: (v) => set({ includeMeta: v }),
   setSessionFilter: (v) => set({ sessionFilter: v }),
   setShowForks: (v) => set({ showForks: v }),
   setCallsOnly: (v) => set({ callsOnly: v }),
-  openDetail: (id) => set({ detailSessionId: id }),
-  closeDetail: () => set({ detailSessionId: null }),
+  openDetail: (id, window) =>
+    set({ detailSessionId: id, detailWindow: window ?? null }),
+  closeDetail: () => set({ detailSessionId: null, detailWindow: null }),
   focusPane: (p) => set({ focusedPane: p }),
   rotateFocus: (dir) => {
     const cur = get().focusedPane;

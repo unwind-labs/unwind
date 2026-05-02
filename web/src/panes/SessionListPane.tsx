@@ -19,9 +19,11 @@ function StatusDot({ status }: { status: SessionStatus }) {
   const cls =
     status === "live"
       ? "bg-emerald-500 animate-pulse"
-      : status === "idle"
-        ? "bg-amber-500"
-        : "bg-muted-foreground/40";
+      : status === "yield"
+        ? "bg-amber-400 animate-pulse"
+        : status === "idle"
+          ? "bg-amber-500"
+          : "bg-muted-foreground/40";
   return (
     <span
       className={cn("inline-block h-2 w-2 shrink-0 rounded-full", cls)}
@@ -169,6 +171,7 @@ function SessionItem({
   const startedAgo = formatTimeAgo(session.first_timestamp);
   const updatedAgo = formatTimeAgo(session.last_timestamp);
   const sameTimes = session.first_timestamp === session.last_timestamp;
+  const isYield = session.status === "yield";
 
   // Scroll the selected row into view (only if not already visible) so
   // keyboard navigation, URL-deep-links, and long lists all keep the
@@ -189,6 +192,9 @@ function SessionItem({
           "flex w-full flex-col gap-1 border-l-2 border-transparent px-3 py-2 text-left transition-colors",
           "hover:bg-accent/60",
           selected && "bg-accent border-l-primary",
+          isYield &&
+            "bg-amber-500/25 hover:bg-amber-500/30 border-l-amber-500",
+          isYield && selected && "bg-amber-500/40 hover:bg-amber-500/40",
         )}
       >
         <div className="flex items-center gap-2">

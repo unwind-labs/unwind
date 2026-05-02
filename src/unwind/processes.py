@@ -15,7 +15,12 @@ from typing import Optional
 import psutil
 
 
-LIVE_MTIME_WINDOW_SEC = 300.0  # 5 minutes
+# Tight window: only meant to bridge the brief gap between a claude session
+# starting and its process becoming visible to ``project_activity`` via cwd.
+# Anything wider misleads after the user exits — process detection has gone
+# away but JSONL mtime is still recent. Aligned with the frontend's 30s
+# polling cadence so the UI flips to done within one refresh of exit.
+LIVE_MTIME_WINDOW_SEC = 30.0
 
 
 @dataclass(frozen=True)
@@ -40,14 +45,11 @@ def project_activity(project_path: str) -> ProjectActivity:
     for proc in psutil.process_iter(attrs=["name", "cmdline"]):
         try:
             info = proc.info
-            name = (info.get("name") or "").lower()
-            cmdline = info.get("cmdline") or []
-            if name == "claude" or any(
-                isinstance(c, str) and c.endswith("/claude") for c in cmdline
-            ):
-                cwd = _safe_cwd(proc)
-                if cwd == key:
-                    pids += 1
+            if not _is_claude_process(info.get("name"), info.get("cmdline")):
+                continue
+            cwd = _safe_cwd(proc)
+            if cwd == key:
+                pids += 1
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             continue
     result = ProjectActivity(
@@ -55,6 +57,34 @@ def project_activity(project_path: str) -> ProjectActivity:
     )
     _cache[key] = (now, result)
     return result
+
+
+def _is_claude_process(
+    name: Optional[str], cmdline: Optional[list]
+) -> bool:
+    """Whether a process appears to be a Claude Code CLI invocation.
+
+    macOS quirk: ``psutil.name()`` for the bare ``claude`` CLI sometimes
+    returns the version string (e.g. ``"2.1.126"``) rather than ``claude``,
+    so we can't rely on ``name`` alone. Match on the cmdline's argv[0]
+    basename too — that catches both ``claude`` (PATH-resolved) and
+    ``/Users/.../claude.app/Contents/MacOS/claude`` (full path).
+    """
+    n = (name or "").lower()
+    if n == "claude":
+        return True
+    if not cmdline:
+        return False
+    head = cmdline[0] if isinstance(cmdline[0], str) else None
+    if not head:
+        return False
+    # Direct command name (PATH-resolved).
+    if head == "claude":
+        return True
+    # Absolute or relative path ending in ``/claude``.
+    if head.endswith("/claude"):
+        return True
+    return False
 
 
 def session_status(

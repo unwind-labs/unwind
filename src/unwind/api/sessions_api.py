@@ -76,21 +76,34 @@ def list_sessions(
         else:
             tlc = 0
 
-        # Prefer callstack's per-task status when this session appears in a
-        # report (= it's a fork or a callstack root). callstack tracks each
-        # task's lifecycle precisely, so a completed fork shows "done" even
-        # when the parent claude process is still running for the same project.
+        # Status priority — designed so the user's *main* session (the one
+        # they're driving in the terminal) shows live, while completed forks
+        # still show done even if a claude process is alive for the project:
+        #
+        # 1. callstack ``yielded`` → ``yield``: a child is paused waiting
+        #    for the user; trust this regardless of process state.
+        # 2. callstack ``running``/``in_progress`` → ``live``.
+        # 3. callstack ``complete``/``failed``/``error``:
+        #     a. If this session IS a callstack task (a fork) → ``done``.
+        #        callstack tracked its lifecycle precisely; trust the
+        #        terminal verdict even with a live project process.
+        #     b. Otherwise (main session — only ever a ``parent_session``) →
+        #        defer to process detection. The descendants finished but
+        #        the user's claude process is still active.
+        # 4. No callstack entry at all → defer to process detection.
         status = "done"
-        cs_status = ci.task_status_for_session(s.session_id) if ci.has_logs else None
+        cs_status = ci.aggregate_status_for_session(s.session_id) if ci.has_logs else None
         if cs_status is not None:
             cs_norm = cs_status.lower()
-            if cs_norm in ("running", "in_progress", "yielded"):
+            if cs_norm == "yielded":
+                status = "yield"
+            elif cs_norm in ("running", "in_progress"):
                 status = "live"
-            else:
+            elif ci.is_callstack_task(s.session_id):
                 status = "done"
+            else:
+                status = session_status(s.cwd or project_path, last_epoch)
         else:
-            # No callstack task entry — fall back to project-wide claude
-            # detection + JSONL mtime.
             status = session_status(s.cwd or project_path, last_epoch)
 
         rows.append(

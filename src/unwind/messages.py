@@ -114,6 +114,7 @@ def base_uuid(message_uuid: str) -> str:
 CALLSTACK_TOOL_NAMES = {
     "mcp__plugin_callstack_call__invoke",
     "mcp__plugin_callstack_call__invoke_parallel",
+    "mcp__plugin_callstack_call__invoke_resume",
 }
 SUBAGENT_TOOL_NAMES = {"Agent", "Task"}
 
@@ -213,6 +214,13 @@ def annotate_spawns(
             #     for this session in chronological order.
             tasks: list = []
             chosen_report = None
+            # ``exact_match`` = we found this tool_use's specific report via
+            # invoke_id. In that case the report belongs uniquely to this
+            # tool_use, so we don't need the ``claimed_child_sids`` defense
+            # against shared/merged reports — and we shouldn't trip it
+            # either, since a later ``invoke_resume`` legitimately points at
+            # the same child the original ``invoke`` did.
+            exact_match = False
             invoke_id = _extract_invoke_id(result_msg)
             if invoke_id and slug_callstack is not None:
                 report = slug_callstack.report_for_invoke(invoke_id)
@@ -222,6 +230,7 @@ def annotate_spawns(
                     tasks = slug_callstack.children_in_report(
                         report, current_session_id
                     )
+                    exact_match = True
             elif current_session_id is not None and slug_callstack is not None:
                 # In-flight (no tool_result yet) — try the first unclaimed
                 # report first (legacy: each invocation got its own report).
@@ -254,8 +263,10 @@ def annotate_spawns(
 
             # Strip tasks already claimed by an earlier tool_use so we don't
             # double-count children when the report is shared across multiple
-            # nested invokes.
-            if claimed_child_sids:
+            # nested invokes. Skip when we matched a unique report by
+            # invoke_id — an ``invoke_resume`` legitimately re-targets the
+            # same child the original ``invoke`` spawned.
+            if claimed_child_sids and not exact_match:
                 tasks = [
                     t for t in tasks
                     if not (t.session_id and t.session_id in claimed_child_sids)
@@ -334,13 +345,33 @@ def annotate_spawns(
                 use_msg.spawn_kind = "call"
                 use_msg.spawn_session_ids = [s for s, _ in child_pairs]
                 use_msg.spawn_tasks = [t for _, t in child_pairs]
-                use_msg.spawn_done = [
-                    _done_from_status(status_by_sid.get(s)) if s else None
-                    for s, _ in child_pairs
-                ]
-                for sid, _t in child_pairs:
-                    if sid:
-                        claimed_child_sids.add(sid)
+                # Prefer the LATEST known status across all reports, not the
+                # snapshot in the report bound to this specific invoke_id.
+                # When a parent re-invokes a yielded chain, the original
+                # call's report stays frozen at "running"/"yielded"; the
+                # later resume's report records "complete". Surfacing the
+                # latest status flips the original call's row to done once
+                # the resume lands.
+                done_list: list[Optional[bool]] = []
+                for s, _t in child_pairs:
+                    if not s:
+                        done_list.append(None)
+                        continue
+                    latest_status: Optional[str] = None
+                    if slug_callstack is not None:
+                        latest_status = slug_callstack.aggregate_status_for_session(s)
+                    if latest_status is None:
+                        latest_status = status_by_sid.get(s)
+                    done_list.append(_done_from_status(latest_status))
+                use_msg.spawn_done = done_list
+                # Only register children as "claimed" when we did NOT match
+                # the report by invoke_id. Exact-match tool_uses each own
+                # their own report and should not block siblings or
+                # ``invoke_resume`` from targeting the same child.
+                if not exact_match:
+                    for sid, _t in child_pairs:
+                        if sid:
+                            claimed_child_sids.add(sid)
             _ = chosen_report  # (silences unused; kept for future debug)
         elif name in SUBAGENT_TOOL_NAMES:
             agent_id = _extract_agent_id(result_msg)
