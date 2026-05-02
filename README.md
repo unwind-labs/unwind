@@ -4,7 +4,7 @@ Inspect Claude Code sessions, callstack call trees, and subagents.
 
 Run `unwind serve` in any project folder; a browser tab opens showing every Claude Code session that's run there, the conversation for each one, and — when the [callstack](https://github.com/amolk/agent-callstack) plugin's `/call` skill is used — the call hierarchy between sessions and any spawned subagents.
 
-<iframe width="1233" height="716" src="https://www.youtube.com/embed/MkNRVCShII8" title="unwind - Inspect Claude Code sessions, callstack call trees, and subagents." frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" referrerpolicy="strict-origin-when-cross-origin" allowfullscreen></iframe>
+[![unwind - Inspect Claude Code sessions, callstack call trees, and subagents.](assets/unwind-thumbnail.png)](https://www.youtube.com/watch?v=MkNRVCShII8)
 
 ## Install
 
