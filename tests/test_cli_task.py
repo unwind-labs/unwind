@@ -143,3 +143,126 @@ def test_task_kind_validation(
         ["task", "list", "ROOT", "--project", str(real_cwd), "--kind", "weird"],
     )
     assert result.exit_code == 2
+
+
+# --- Regression: nested invoke_parallel renders as tree, not flat list ----
+
+def _scaffold_two_level_parallel(home: Path, tmp_path: Path) -> Path:
+    """Mirror the parallel_calls example: ROOT does invoke_parallel for three
+    children, and one of those children itself does invoke_parallel for two
+    grandchildren. Expected canvas shape:
+
+        ROOT
+        ├── CHILD-A (deeper child)
+        │   ├── GRAND-A1
+        │   └── GRAND-A2
+        ├── CHILD-B
+        └── CHILD-C
+
+    Regression: at one point grandchildren rendered as siblings of CHILD-A
+    (under ROOT), flattening the tree.
+    """
+    real_cwd = tmp_path / "work" / "parallel"
+    real_cwd.mkdir(parents=True)
+    import unwind.projects as projects_mod
+    importlib.reload(projects_mod)
+    slug = projects_mod.slug_for(real_cwd)
+    proj_dir = home / ".claude" / "projects" / slug
+    for sid in ["ROOT", "CHILD-A", "CHILD-B", "CHILD-C", "GRAND-A1", "GRAND-A2"]:
+        _write_session(proj_dir, sid, str(real_cwd), head_uuid=f"head-{sid}")
+
+    log_dir = real_cwd / ".claude" / "callstack" / "log"
+    # Outer report: ROOT's invoke_parallel for three tasks. CHILD-A is recorded
+    # with its OWN children inline.
+    outer = log_dir / "20260101T120000-outer"
+    outer.mkdir(parents=True)
+    (outer / "report.yaml").write_text(yaml.safe_dump({
+        "invoke_id": "20260101T120000-outer",
+        "parent_session": "ROOT",
+        "kind": "invoke_parallel",
+        "status": "complete",
+        "tasks": [
+            {
+                "task": "/task-a",
+                "status": "complete",
+                "depth": 1,
+                "session_id": "CHILD-A",
+                "children": [
+                    {
+                        "task": "/grand-a1",
+                        "status": "complete",
+                        "depth": 2,
+                        "session_id": "GRAND-A1",
+                    },
+                    {
+                        "task": "/grand-a2",
+                        "status": "complete",
+                        "depth": 2,
+                        "session_id": "GRAND-A2",
+                    },
+                ],
+            },
+            {
+                "task": "/task-b",
+                "status": "complete",
+                "depth": 1,
+                "session_id": "CHILD-B",
+            },
+            {
+                "task": "/task-c",
+                "status": "complete",
+                "depth": 1,
+                "session_id": "CHILD-C",
+            },
+        ],
+    }))
+    return real_cwd
+
+
+def test_task_tree_preserves_two_level_nesting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Grandchildren must nest under their direct parent, not float up to
+    the root as siblings. Captures the parallel_calls regression."""
+    home = _setup(tmp_path, monkeypatch)
+    real_cwd = _scaffold_two_level_parallel(home, tmp_path)
+    app = _reload_app()
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        ["task", "tree", "ROOT", "--project", str(real_cwd), "--json"],
+    )
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+
+    # ROOT has exactly 3 direct children.
+    assert payload["session_id"] == "ROOT"
+    direct = {c["session_id"]: c for c in payload["children"]}
+    assert set(direct.keys()) == {"CHILD-A", "CHILD-B", "CHILD-C"}, direct
+
+    # Grandchildren live under CHILD-A — NOT as siblings under ROOT.
+    grand = {c["session_id"] for c in direct["CHILD-A"]["children"]}
+    assert grand == {"GRAND-A1", "GRAND-A2"}, direct["CHILD-A"]
+    assert direct["CHILD-B"]["children"] == [], direct["CHILD-B"]
+    assert direct["CHILD-C"]["children"] == [], direct["CHILD-C"]
+
+
+def test_session_tree_preserves_two_level_nesting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``unwind session tree`` must agree with ``unwind task tree`` —
+    grandchildren stay nested under their direct parent."""
+    home = _setup(tmp_path, monkeypatch)
+    real_cwd = _scaffold_two_level_parallel(home, tmp_path)
+    app = _reload_app()
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        ["session", "tree", "ROOT", "--project", str(real_cwd), "--json"],
+    )
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    direct = {c["session_id"]: c for c in payload["children"]}
+    assert set(direct.keys()) == {"CHILD-A", "CHILD-B", "CHILD-C"}
+    grand_a = {c["session_id"] for c in direct["CHILD-A"]["children"]}
+    assert grand_a == {"GRAND-A1", "GRAND-A2"}

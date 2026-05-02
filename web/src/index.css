@@ -147,6 +147,38 @@
   stroke-dasharray: 4 3;
 }
 
+/* Zoom / fit Controls — match the dark canvas theme. Default React Flow
+   styling is a white card with light-grey buttons that clashes badly. */
+.react-flow__controls {
+  box-shadow: none;
+  background: transparent;
+  border: none;
+  gap: 2px;
+}
+.react-flow__controls-button {
+  background-color: hsl(var(--card));
+  border: 1px solid hsl(var(--border));
+  color: hsl(var(--muted-foreground));
+  border-radius: 4px;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  transition: background-color 120ms, border-color 120ms, color 120ms;
+}
+.react-flow__controls-button + .react-flow__controls-button {
+  margin-top: 4px;
+}
+.react-flow__controls-button:hover {
+  background-color: hsl(var(--accent));
+  border-color: hsl(var(--primary) / 0.6);
+  color: hsl(var(--foreground));
+}
+.react-flow__controls-button svg {
+  fill: currentColor;
+  max-width: 12px;
+  max-height: 12px;
+}
+
 /* Markdown rendering inside message bubbles. */
 .uw-markdown {
   @apply text-sm leading-relaxed;
