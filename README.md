@@ -2,7 +2,7 @@
 
 Inspect Claude Code sessions, callstack call trees, and subagents.
 
-Run `unwind serve` in any project folder; a browser tab opens showing every Claude Code session that's run there, the conversation for each one, and — when the [callstack](https://github.com/amolk/agent-callstack) plugin's `/call` skill is used — the call hierarchy between sessions and any spawned subagents.
+Run `unwind serve` in any project folder; a browser tab opens showing every Claude Code session that's run there, the conversation for each one, and — when the [callstack](https://github.com/unwind-labs/callstack) plugin's `/call` skill is used — the call hierarchy between sessions and any spawned subagents.
 
 [![unwind - Inspect Claude Code sessions, callstack call trees, and subagents.](assets/unwind-thumbnail.png)](https://www.youtube.com/watch?v=MkNRVCShII8)
 
@@ -11,6 +11,8 @@ Run `unwind serve` in any project folder; a browser tab opens showing every Clau
 ```bash
 pip install unwind-labs
 ```
+
+(PyPI distribution name is `unwind-labs`; the installed command is `unwind` and the Python import is `unwind`.)
 
 ## Web UI
 
@@ -44,7 +46,7 @@ The same data the web UI shows is also available from the CLI. Run any of them w
 unwind reads:
 
 - `~/.claude/projects/<slug>/*.jsonl` — Claude Code's own session logs
-- `<project>/.claude/callstack/log/` — `/call` invocation reports written by the [callstack](https://github.com/amolk/agent-callstack) plugin
+- `<project>/.claude/callstack/log/` — `/call` invocation reports written by the [callstack](https://github.com/unwind-labs/callstack) plugin
 
 …and renders them in a live-updating web UI (or prints them via the CLI). Loopback only (`127.0.0.1`).
 

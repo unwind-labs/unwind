@@ -34,8 +34,8 @@ dependencies = [
 unwind = "unwind.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/amolk/agent-callstack"
-Repository = "https://github.com/amolk/agent-callstack"
+Homepage = "https://github.com/unwind-labs/unwind"
+Repository = "https://github.com/unwind-labs/unwind"
 
 [tool.poetry]
 packages = [{ include = "unwind", from = "src" }]

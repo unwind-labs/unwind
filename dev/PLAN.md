@@ -52,9 +52,9 @@ This document describes the current implementation as built, plus the v1 release
 
 ## v1 release polish (open)
 
-1. **Doc sweep** — verify every README/PRD/PLAN reference matches the current package name `unwind` and module path `src/unwind/`.
+1. **Doc sweep** — verify every README/PRD/PLAN reference matches the current PyPI distribution name `unwind-labs`, console script `unwind`, and Python module path `src/unwind/`.
 2. **License field** — `LICENSE` is in place; ensure the PyPI metadata picks it up correctly on first build.
-3. **PyPI name reservation** — claim `unwind` on PyPI and configure GitHub trusted publishing for `pypi.org/p/unwind`.
+3. **PyPI name reservation** — `unwind-labs` claimed on PyPI; trusted publishing configured for `pypi.org/p/unwind-labs`. (The bare `unwind` name is taken by an unrelated package; we ship as `unwind-labs` but the console script and Python import remain `unwind`.)
 4. **Smoke test in CI** — `dev/smoke.sh` currently runs locally; consider lifting it into the publish workflow as a pre-publish gate.
 5. **Pagination for very large JSONLs** — sessions reaching tens of MB load the full thread today (Phase 7 in the original plan, not yet landed).
 6. **Per-session live PID mapping** — Claude Code doesn't expose a session id on its process; status is project-scoped. Watch upstream for this; if exposed, narrow the live signal.

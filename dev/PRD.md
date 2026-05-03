@@ -9,7 +9,7 @@ The user launches Claude Code however they normally do. Separately, they run `un
 `unwind` never touches the Claude Code process, never proxies its I/O, never renders its terminal. Everything it shows is derived from on-disk artifacts:
 
 - `~/.claude/projects/<slug>/*.jsonl` — Claude Code's own session logs.
-- `<project>/.claude/callstack/log/**` — [callstack](https://github.com/amolk/agent-callstack) plugin invocation artifacts.
+- `<project>/.claude/callstack/log/**` — [callstack](https://github.com/unwind-labs/callstack) plugin invocation artifacts.
 - `meta` events inside the JSONLs — used to detect Claude Code's native `/fork` and subagent invocations even when callstack isn't installed.
 
 ## 2. Problem
