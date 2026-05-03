@@ -186,11 +186,14 @@ export function CompactCardNode({ data }: { data: CompactCardData }) {
   //   1. selected (detail open)  — Tailwind class chain below.
   //   2. keyboardFocused         — color(srgb 0 0.54 0.8 / 0.8) (sky blue)
   //   3. default border-border.
+  // The outline gets the same color so the visual edge thickens to 2px
+  // without any layout shift (see hover comment below).
   // No background changes from hover/focus — only border + shadow.
+  const focusBlue = "color(srgb 0 0.54 0.8 / 0.8)";
   const borderColor =
-    !data.selected && data.keyboardFocused
-      ? "color(srgb 0 0.54 0.8 / 0.8)"
-      : undefined;
+    !data.selected && data.keyboardFocused ? focusBlue : undefined;
+  const outlineColor =
+    !data.selected && data.keyboardFocused ? focusBlue : undefined;
 
   return (
     <div
@@ -200,13 +203,19 @@ export function CompactCardNode({ data }: { data: CompactCardData }) {
         // doesn't preventDefault on mousedown and break ReactFlow's
         // onNodeClick (which is what restores pointer-events on the
         // wrapper).
-        // border-2 is always-on so toggling thickness on hover/focus
-        // doesn't shift the card's layout.
-        "nopan nodrag overflow-hidden rounded-md border-2 border-border bg-card text-card-foreground shadow-sm transition-[border-color,box-shadow]",
-        // Hover: border emphasis + drop shadow, no background change.
-        "hover:border-primary/60 hover:shadow-lg",
-        // Currently-open state: primary border + subtle fill.
-        data.selected && "border-primary bg-primary/10 hover:border-primary",
+        // 1px border always, plus a 1px outline on hover/selected to
+        // visually thicken to 2px. Outline doesn't affect layout, so the
+        // card's bounding box is identical across states and React Flow
+        // doesn't reflow neighbours.
+        "nopan nodrag overflow-hidden rounded-2xl border border-border bg-card text-card-foreground shadow-sm transition-[border-color,box-shadow,outline-color]",
+        "outline outline-1 outline-transparent",
+        // Hover/focus: outline picks up the primary tint + drop shadow.
+        // Focus styling is driven by a CSS rule in index.css that targets
+        // the React Flow node wrapper (which is what actually receives
+        // keyboard focus), not this inner div.
+        "uw-compact-card hover:border-primary/60 hover:outline-primary/60 hover:shadow-lg",
+        // Currently-open state: solid primary border + matching outline + subtle fill.
+        data.selected && "border-primary outline-primary bg-primary/10 hover:border-primary hover:outline-primary",
         selfStatus === "live" && "border-t-emerald-500",
         // Yielded: bold amber background so it pops in the canvas — the
         // session is paused waiting for user input.
@@ -220,6 +229,7 @@ export function CompactCardNode({ data }: { data: CompactCardData }) {
         width: COMPACT_CARD_WIDTH,
         cursor: "pointer",
         ...(borderColor ? { borderColor } : null),
+        ...(outlineColor ? { outlineColor } : null),
       }}
     >
       {/* Incoming edge target on the left side, vertically centered with the header. */}
@@ -231,7 +241,7 @@ export function CompactCardNode({ data }: { data: CompactCardData }) {
         className="!h-2 !w-2 !border-0 !bg-muted-foreground/40"
         style={{ top: HEADER_HEIGHT / 2 }}
       />
-      <header className="flex items-center justify-between gap-2 border-b border-border px-3 py-2">
+      <header className="flex items-center justify-between gap-2 border-b border-border px-4 py-3">
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-1.5">
             {data.isResumeInstance ? (
@@ -263,7 +273,7 @@ export function CompactCardNode({ data }: { data: CompactCardData }) {
           <CheckCircle2 className="h-3 w-3 text-emerald-500/70" />
         )}
       </header>
-      <ul className="flex flex-col gap-1 p-2">
+      <ul className="flex flex-col gap-1 p-3">
         {!messages && (
           <li className="px-2 py-1 text-[10px] italic text-muted-foreground">
             loading…

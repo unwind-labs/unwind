@@ -32,7 +32,7 @@
     --input: 214 32% 91%;
     --ring: 222 47% 11%;
 
-    --radius: 0.5rem;
+    --radius: 1rem;
   }
 
   .dark {
@@ -147,36 +147,54 @@
   stroke-dasharray: 4 3;
 }
 
-/* Zoom / fit Controls — match the dark canvas theme. Default React Flow
-   styling is a white card with light-grey buttons that clashes badly. */
-.react-flow__controls {
-  box-shadow: none;
-  background: transparent;
-  border: none;
-  gap: 2px;
+/* React Flow puts the tabIndex on the .react-flow__node wrapper, so the
+   inner card div never sees :focus-visible. Mirror the hover styling on
+   the card when the wrapper is keyboard-focused, and suppress React
+   Flow's default focus outline (which would render outside our card). */
+.react-flow__node:focus,
+.react-flow__node:focus-visible {
+  outline: none;
 }
-.react-flow__controls-button {
+.react-flow__node:focus-visible .uw-compact-card {
+  border-color: hsl(var(--primary) / 0.6);
+  outline-color: hsl(var(--primary) / 0.6);
+  box-shadow:
+    0 10px 15px -3px hsl(0 0% 0% / 0.3),
+    0 4px 6px -4px hsl(0 0% 0% / 0.3);
+}
+
+/* Zoom / fit Controls — single pill-shaped container with internal
+   dividers, matching the dark canvas theme. */
+.react-flow__controls {
+  box-shadow: 0 1px 2px hsl(0 0% 0% / 0.4);
   background-color: hsl(var(--card));
   border: 1px solid hsl(var(--border));
+  border-radius: 16px;
+  overflow: hidden;
+  gap: 0;
+}
+.react-flow__controls-button {
+  background-color: transparent;
+  border: none;
   color: hsl(var(--muted-foreground));
-  border-radius: 4px;
-  width: 26px;
-  height: 26px;
+  border-radius: 0;
+  width: 36px;
+  height: 36px;
   padding: 0;
-  transition: background-color 120ms, border-color 120ms, color 120ms;
+  transition: background-color 120ms, color 120ms;
 }
 .react-flow__controls-button + .react-flow__controls-button {
-  margin-top: 4px;
+  margin-top: 0;
+  border-top: 1px solid hsl(var(--border));
 }
 .react-flow__controls-button:hover {
   background-color: hsl(var(--accent));
-  border-color: hsl(var(--primary) / 0.6);
   color: hsl(var(--foreground));
 }
 .react-flow__controls-button svg {
   fill: currentColor;
-  max-width: 12px;
-  max-height: 12px;
+  max-width: 14px;
+  max-height: 14px;
 }
 
 /* Markdown rendering inside message bubbles. */
