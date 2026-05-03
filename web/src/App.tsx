@@ -64,6 +64,11 @@ export function App() {
   // picker. Per-pane up/down handlers live in the panes themselves.
   const rotateFocus = useUi((s) => s.rotateFocus);
   const openPicker = useOpenFolderPicker();
+  // focusedPane via ref so the keydown effect doesn't have to re-attach
+  // on every focus change.
+  const focusedPaneFromStore = useUi((s) => s.focusedPane);
+  const focusedPaneRef = useRef(focusedPaneFromStore);
+  focusedPaneRef.current = focusedPaneFromStore;
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;
@@ -86,12 +91,19 @@ export function App() {
         return;
       }
       if (typing) return;
-      if (e.key === "ArrowLeft") {
+      // When the canvas pane is focused, it owns ←/→ for tree
+      // navigation (parent/child) and only falls through to pane focus
+      // rotation when there's nowhere to go in that direction. Skipping
+      // here lets the canvas handler decide.
+      if (focusedPaneRef.current === "thread") return;
+      if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
         e.preventDefault();
-        rotateFocus(-1);
-      } else if (e.key === "ArrowRight") {
-        e.preventDefault();
-        rotateFocus(1);
+        // Prevent the canvas's own ←/→ handler from also running on
+        // this event after we rotate focus into it — otherwise pressing
+        // → from the sessions pane would BOTH switch panes AND jump the
+        // canvas cursor to the root's first child in a single keystroke.
+        e.stopImmediatePropagation();
+        rotateFocus(e.key === "ArrowLeft" ? -1 : 1);
       }
     };
     window.addEventListener("keydown", onKey);
@@ -153,12 +165,20 @@ function PaneFrame({
   children: React.ReactNode;
 }) {
   const focused = focusedPane === paneKey;
+  // Focus signal lives in the pane background only — not the content —
+  // so mouse-only users (who won't necessarily use ←/→ to switch focus)
+  // aren't punished with dimmed cards. The focused pane keeps its full
+  // ambient radial wash; the blurred pane drops the wash and shows a
+  // flat surface (CSS rule on .uw-pane-blurred in index.css). A faint
+  // inset ring on the focused pane adds an explicit accent.
   return (
     <div
       onMouseDown={() => onFocus(paneKey)}
       className={
         "relative h-full transition-shadow " +
-        (focused ? "ring-1 ring-inset ring-primary/40" : "")
+        (focused
+          ? "uw-pane-focused ring-1 ring-inset ring-primary/30"
+          : "uw-pane-blurred")
       }
     >
       {children}
@@ -215,7 +235,10 @@ function TopBar({
       >
         unwind
       </button>
-      <div className="flex min-w-0 items-center gap-1.5">
+      <div className="text-xs text-muted-foreground">
+        View Claude Code sessions with sub agent trees
+      </div>
+      <div className="ml-auto flex min-w-0 items-center gap-1.5">
         <div className="truncate text-xs text-muted-foreground">
           {currentSourcePath ?? slug ?? "no project selected"}
         </div>
@@ -237,9 +260,6 @@ function TopBar({
             <FolderTree className="h-3.5 w-3.5" />
           </button>
         )}
-      </div>
-      <div className="ml-auto text-[10px] text-muted-foreground">
-        observer · read-only
       </div>
     </header>
   );

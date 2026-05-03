@@ -17,8 +17,12 @@ def test_lone_session_is_not_a_fork(tmp_path: Path):
     assert fd.fork_session_ids() == set()
 
 
-def test_two_sessions_sharing_head_uuid(tmp_path: Path):
-    # parent (older) — first uuid u-head
+def test_two_sessions_sharing_head_uuid_without_marker(tmp_path: Path):
+    """Sharing a head uuid is no longer sufficient to classify as a fork —
+    the callstack runtime's fork prologue must be present. This protects
+    against false positives when independent runs happen to begin with the
+    same first message, or when ``claude --resume`` clones a parent.
+    """
     p = tmp_path / "parent.jsonl"
     _write(
         p,
@@ -27,7 +31,6 @@ def test_two_sessions_sharing_head_uuid(tmp_path: Path):
             {"uuid": "u-2", "timestamp": "2026-04-24T09:00:01Z", "type": "assistant"},
         ],
     )
-    # fork (newer) — first uuid u-head (cloned from parent)
     f = tmp_path / "fork.jsonl"
     _write(
         f,
@@ -37,21 +40,36 @@ def test_two_sessions_sharing_head_uuid(tmp_path: Path):
         ],
     )
     fd = ForkDetector(tmp_path)
-    forks = fd.fork_session_ids()
-    assert forks == {"fork"}
+    assert fd.fork_session_ids() == set()
 
 
-def test_oldest_in_family_is_root_not_fork(tmp_path: Path):
-    """When timestamps are equal, lexicographic session_id breaks the tie."""
-    a = tmp_path / "AAA.jsonl"
-    b = tmp_path / "BBB.jsonl"
-    same_ts = "2026-04-24T10:00:00Z"
-    _write(a, [{"uuid": "u-head", "timestamp": same_ts, "type": "user"}])
-    _write(b, [{"uuid": "u-head", "timestamp": same_ts, "type": "user"}])
+def test_marked_sibling_is_classified_as_fork(tmp_path: Path):
+    """The same shared-head-uuid pair, but with the callstack fork
+    prologue present in the child, IS a fork.
+    """
+    p = tmp_path / "parent.jsonl"
+    _write(
+        p,
+        [
+            {"uuid": "u-head", "timestamp": "2026-04-24T09:00:00Z", "type": "user"},
+        ],
+    )
+    f = tmp_path / "fork.jsonl"
+    _write(
+        f,
+        [
+            {
+                "type": "queue-operation",
+                "operation": "enqueue",
+                "content": "You are running in a forked session — execute /task-a",
+                "timestamp": "2026-04-24T10:00:00Z",
+            },
+            {"uuid": "u-head", "timestamp": "2026-04-24T09:00:00Z", "type": "user"},
+            {"uuid": "u-fork-own", "timestamp": "2026-04-24T10:00:01Z", "type": "user"},
+        ],
+    )
     fd = ForkDetector(tmp_path)
-    forks = fd.fork_session_ids()
-    assert "AAA" not in forks
-    assert "BBB" in forks
+    assert fd.fork_session_ids() == {"fork"}
 
 
 def test_unrelated_sessions_dont_classify_as_forks(tmp_path: Path):
@@ -119,11 +137,20 @@ def test_cache_is_invalidated_on_growth(tmp_path: Path):
     fd = ForkDetector(tmp_path)
     fd.fork_session_ids()  # warm cache
     time.sleep(0.01)
-    # Append a second session that should now be classified relative to s.
+    # Append a marker-bearing fork sibling. The fork classification must
+    # see the new file even though the original probe set was cached.
     f = tmp_path / "fork.jsonl"
     _write(
         f,
-        [{"uuid": "u1", "timestamp": "2026-04-24T10:00:00Z", "type": "user"}],
+        [
+            {
+                "type": "queue-operation",
+                "operation": "enqueue",
+                "content": "You are running in a forked session — execute /task-a",
+                "timestamp": "2026-04-24T10:00:00Z",
+            },
+            {"uuid": "u1", "timestamp": "2026-04-24T10:00:00Z", "type": "user"},
+        ],
     )
     forks = fd.fork_session_ids()
     assert forks == {"fork"}

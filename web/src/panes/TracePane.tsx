@@ -122,7 +122,7 @@ export function TracePane({
                 className="border-amber-500/40 text-[9px] uppercase text-amber-300"
                 title={`window: ${windowed.start ?? "(begin)"} – ${windowed.end ?? "(open)"}`}
               >
-                window {fmtTime(windowed.start)} – {fmtTime(windowed.end)}
+                {fmtTime(windowed.start) ?? "start"} – {fmtTime(windowed.end) ?? "now"}
               </Badge>
             ) : null}
           </div>
@@ -147,7 +147,7 @@ export function TracePane({
               onChange={(e) => setIncludeMeta(e.target.checked)}
               className="h-3 w-3"
             />
-            meta
+            details
           </label>
         </div>
       </header>
@@ -167,8 +167,8 @@ export function TracePane({
   );
 }
 
-function fmtTime(iso: string | null): string {
-  if (!iso) return "(open)";
+function fmtTime(iso: string | null): string | null {
+  if (!iso) return null;
   const d = new Date(iso);
   return Number.isNaN(d.getTime()) ? "?" : d.toLocaleTimeString();
 }

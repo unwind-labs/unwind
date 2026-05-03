@@ -74,9 +74,13 @@ export const useUi = create<UiState>((set, get) => ({
   closeDetail: () => set({ detailSessionId: null, detailWindow: null }),
   focusPane: (p) => set({ focusedPane: p }),
   rotateFocus: (dir) => {
+    // Clamp at the ends rather than wrapping — pressing ← from the
+    // leftmost pane (or → from the rightmost) should be a no-op, not
+    // jump to the opposite side of the layout.
     const cur = get().focusedPane;
     const i = PANE_ORDER.indexOf(cur);
-    const next = (i + dir + PANE_ORDER.length) % PANE_ORDER.length;
+    const next = Math.max(0, Math.min(PANE_ORDER.length - 1, i + dir));
+    if (next === i) return;
     set({ focusedPane: PANE_ORDER[next] });
   },
 }));

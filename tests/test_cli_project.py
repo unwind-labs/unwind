@@ -150,6 +150,15 @@ def test_project_list_excludes_forks_from_count(
     fork_path = proj_dir / f"{fork_sid}.jsonl"
     fork_path.write_text(
         "\n".join([
+            # The callstack runtime injects this prologue into a forked
+            # child's first queue-op enqueue. ``ForkDetector`` keys off
+            # the prefix to classify the session as a fork.
+            json.dumps({
+                "type": "queue-operation",
+                "operation": "enqueue",
+                "content": "You are running in a forked session — execute /task-x",
+                "timestamp": "2026-04-24T10:00:00.000Z",
+            }),
             json.dumps(head),  # inherited
             json.dumps({
                 "uuid": "fork-own-0",

@@ -137,6 +137,7 @@ function CanvasInner({
 }) {
   const detailSessionId = useUi((s) => s.detailSessionId);
   const focusedPane = useUi((s) => s.focusedPane);
+  const rotateFocus = useUi((s) => s.rotateFocus);
   // Keyboard cursor on the canvas — a *node id*, distinct from detailSessionId
   // (which is a session id and means the overlay is open). Up/Down move it,
   // Enter opens detail (which routes by sessionId).
@@ -417,6 +418,26 @@ function CanvasInner({
       .map((n) => n.id);
   }, [nodes]);
 
+  // Tree maps for left/right navigation. Derived from the edge list:
+  //   parentByNode[child]   → parent nodeId
+  //   childrenByNode[parent] → ordered child nodeIds (top-to-bottom by Y)
+  const { parentByNode, childrenByNode } = useMemo(() => {
+    const parent: Record<string, string> = {};
+    const children: Record<string, string[]> = {};
+    for (const e of edges) {
+      parent[e.target] = e.source;
+      (children[e.source] ??= []).push(e.target);
+    }
+    // Sort siblings by their on-canvas Y so ArrowRight lands on the
+    // top-most child consistently with the visual layout.
+    const yOf = (id: string) =>
+      nodes.find((n) => n.id === id)?.position.y ?? 0;
+    for (const k in children) {
+      children[k].sort((a, b) => yOf(a) - yOf(b));
+    }
+    return { parentByNode: parent, childrenByNode: children };
+  }, [edges, nodes]);
+
   // Latest values for the keydown handler — avoids re-attaching the
   // listener on every keystroke / state tick.
   const reactFlow = useReactFlow();
@@ -426,6 +447,10 @@ function CanvasInner({
     orderedNodeIds,
     canvasFocusedNodeId,
     nodes,
+    parentByNode,
+    childrenByNode,
+    rotateFocus,
+    rootSessionId,
   });
   navStateRef.current = {
     focusedPane,
@@ -433,6 +458,10 @@ function CanvasInner({
     orderedNodeIds,
     canvasFocusedNodeId,
     nodes,
+    parentByNode,
+    childrenByNode,
+    rotateFocus,
+    rootSessionId,
   };
 
   useEffect(() => {
@@ -450,9 +479,11 @@ function CanvasInner({
 
       const isUp = e.key === "ArrowUp" || e.key === "k";
       const isDown = e.key === "ArrowDown" || e.key === "j";
+      const isLeft = e.key === "ArrowLeft" || e.key === "h";
+      const isRight = e.key === "ArrowRight" || e.key === "l";
       const isEnter = e.key === "Enter";
       const isEsc = e.key === "Escape";
-      if (!isUp && !isDown && !isEnter && !isEsc) return;
+      if (!isUp && !isDown && !isLeft && !isRight && !isEnter && !isEsc) return;
 
       if (isEsc) {
         if (s.canvasFocusedNodeId) {
@@ -482,6 +513,70 @@ function CanvasInner({
         return;
       }
 
+      // Pan + zoom so the newly-focused node sits centered at a
+      // comfortable reading zoom. We don't always force the zoom — if
+      // the user has already zoomed in past the target, leave it alone
+      // so keyboard nav doesn't yank them back out.
+      const FOCUS_ZOOM = 1;
+      const focusAndPan = (nextId: string) => {
+        setCanvasFocusedNodeId(nextId);
+        const node = s.nodes.find((n) => n.id === nextId);
+        if (!node) return;
+        const w = COMPACT_CARD_WIDTH;
+        const h = measuredHeights[nextId] ?? DEFAULT_NODE_HEIGHT;
+        const cx = node.position.x + w / 2;
+        const cy = node.position.y + h / 2;
+        const currentZoom = reactFlow.getZoom();
+        const targetZoom = currentZoom < FOCUS_ZOOM ? FOCUS_ZOOM : currentZoom;
+        programmaticMoveRef.current = true;
+        reactFlow.setCenter(cx, cy, {
+          zoom: targetZoom,
+          duration: 200,
+        });
+        window.setTimeout(() => {
+          programmaticMoveRef.current = false;
+        }, 250);
+      };
+
+      // Left/Right walk the call tree along edges instead of rotating
+      // pane focus. Falls back to pane rotation when there's nowhere to
+      // go in that direction (left from root → sessions pane). Right
+      // from a leaf jumps to the top-most node in the next column over,
+      // so leaf cards aren't dead-ends visually.
+      if (isLeft || isRight) {
+        e.preventDefault();
+        const current = s.canvasFocusedNodeId ?? s.rootSessionId;
+        if (isLeft) {
+          const parent = s.parentByNode[current];
+          if (parent) {
+            focusAndPan(parent);
+          } else {
+            s.rotateFocus(-1);
+          }
+        } else {
+          const kids = s.childrenByNode[current];
+          if (kids && kids.length > 0) {
+            focusAndPan(kids[0]);
+          } else {
+            // Leaf: hop to the next column. Find the smallest x strictly
+            // greater than ours, then the top-most node in that column.
+            const cur = s.nodes.find((n) => n.id === current);
+            if (cur) {
+              const rightNodes = s.nodes.filter(
+                (n) => n.position.x > cur.position.x,
+              );
+              if (rightNodes.length > 0) {
+                const nextX = Math.min(...rightNodes.map((n) => n.position.x));
+                const col = rightNodes.filter((n) => n.position.x === nextX);
+                col.sort((a, b) => a.position.y - b.position.y);
+                focusAndPan(col[0].id);
+              }
+            }
+          }
+        }
+        return;
+      }
+
       if (s.orderedNodeIds.length === 0) return;
       e.preventDefault();
       const idx = s.canvasFocusedNodeId
@@ -490,26 +585,7 @@ function CanvasInner({
       const next = isDown
         ? Math.min(s.orderedNodeIds.length - 1, idx < 0 ? 0 : idx + 1)
         : Math.max(0, idx < 0 ? 0 : idx - 1);
-      const nextId = s.orderedNodeIds[next];
-      setCanvasFocusedNodeId(nextId);
-
-      // Pan so the newly-focused node stays on screen. Use the node's
-      // measured center; setCenter respects the current zoom.
-      const node = s.nodes.find((n) => n.id === nextId);
-      if (node) {
-        const w = COMPACT_CARD_WIDTH;
-        const h = measuredHeights[nextId] ?? DEFAULT_NODE_HEIGHT;
-        const cx = node.position.x + w / 2;
-        const cy = node.position.y + h / 2;
-        programmaticMoveRef.current = true;
-        reactFlow.setCenter(cx, cy, {
-          zoom: reactFlow.getZoom(),
-          duration: 200,
-        });
-        window.setTimeout(() => {
-          programmaticMoveRef.current = false;
-        }, 250);
-      }
+      focusAndPan(s.orderedNodeIds[next]);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -980,6 +1056,7 @@ function buildGraph(args: {
       windowStart: cn.windowStart,
       windowEnd: cn.windowEnd,
       isResumeInstance: cn.isResumeInstance,
+      spawnKind: cn.spawnKind,
     };
     return {
       id: nodeId,

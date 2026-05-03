@@ -100,14 +100,18 @@ def app_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.undo()
 
 
-def test_messages_surfaces_forks_when_no_callstack_log_dir(app_client):
-    """deep-rewrite-style spawn: 10 forks share parent's head uuid, project
-    has no ``.claude/callstack/log/`` — the messages endpoint should still
-    return them as an extra_spawns card so the canvas can render the tree."""
+def test_messages_does_not_surface_unmarked_forks(app_client):
+    """deep-rewrite-style spawn: 10 sessions share the parent's head uuid,
+    project has no ``.claude/callstack/log/`` and none of the children
+    carry the callstack fork prologue.
+
+    Under the marker-only fork policy these are NOT classified as forks —
+    they show up as their own top-level sessions instead of being grouped
+    under the parent. This is an intentional trade-off to avoid false
+    positives where independent runs happen to begin with the same first
+    user message (or where ``claude --resume`` clones a parent's head)."""
     client, home, projects_mod, _ = app_client
 
-    # Build a real project dir at <tmp>/work/proj WITHOUT a callstack log
-    # subdirectory (the bug case).
     real_cwd = home.parent / "work" / "proj"
     real_cwd.mkdir(parents=True)
     slug = projects_mod.slug_for(real_cwd)
@@ -116,15 +120,12 @@ def test_messages_surfaces_forks_when_no_callstack_log_dir(app_client):
     forks = [f"{i:08d}-dead-beef-cafe-{i:012d}" for i in range(10)]
     _hydrate_fork_family(home, slug, parent, forks)
 
-    # Patch the parent's first record's cwd so the registry can recover the
-    # real path from a slug-only entry.
     proj_dir = home / ".claude" / "projects" / slug
     parent_path = proj_dir / f"{parent}.jsonl"
     lines = parent_path.read_text().strip().split("\n")
     head_rec = json.loads(lines[0])
     head_rec["cwd"] = str(real_cwd)
     lines[0] = json.dumps(head_rec)
-    # Forks must keep the same head record verbatim — copy the cwd over too.
     parent_path.write_text("\n".join(lines) + "\n")
     for fsid in forks:
         fp = proj_dir / f"{fsid}.jsonl"
@@ -137,11 +138,7 @@ def test_messages_surfaces_forks_when_no_callstack_log_dir(app_client):
     body = resp.json()
 
     extra = body.get("extra_spawns", [])
-    assert len(extra) == 1, f"expected 1 extra_spawn card, got {len(extra)}"
-    card = extra[0]
-    assert set(card["children"]) == set(forks)
-    # Each fork should have a non-empty label (its divergent user text).
-    assert all(t for t in card["tasks"]), card["tasks"]
+    assert extra == [], f"expected no extra_spawn cards, got {extra}"
 
 
 def test_main_session_with_completed_forks_uses_process_detection(

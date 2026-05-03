@@ -5,17 +5,14 @@ so during in-flight ``/call`` work we can't rely on it to classify newly-spawned
 sessions. Fortunately ``claude --fork-session`` copies the parent's JSONL
 verbatim into the new session's file, including the very first message uuid.
 
-Two-tier classification, since "shares head uuid with an older session" is
-necessary but not sufficient (``claude --resume`` also produces a new JSONL
-with the parent's head uuid):
-
-1. If a callstack runtime is in use, every spawned child's first
-   ``queue-operation`` enqueue carries a fork-prologue ("You are running in a
-   forked session..."). Only those marked sessions are classified as forks;
-   unmarked siblings are session resumes and remain visible.
-2. If no member of the family carries the marker (e.g. ``deep-rewrite`` runs
-   that spawn ``claude --fork-session`` directly without callstack), fall back
-   to the original heuristic: oldest member is the root, every other is a fork.
+Marker-only classification: a session is a fork iff its first ``queue-operation``
+enqueue begins with the callstack runtime's fork-prologue ("You are running in a
+forked session..."). Sessions that merely share a head uuid via ``claude
+--resume`` (or via ``--fork-session`` invoked outside callstack) are NOT
+classified as forks — they remain visible in the top-level session list. This
+trades a small amount of duplication (a non-callstack fork shows up as its own
+root) for a much lower false-positive rate, which would otherwise hide many
+legitimate independent runs whose first user message happens to be identical.
 
 This is run on demand and cached by JSONL (mtime, size).
 """
@@ -73,65 +70,74 @@ class ForkDetector:
         self._divergence_resolved: set[str] = set()
 
     def fork_session_ids(self) -> set[str]:
-        """Return the set of session_ids classified as forks (non-root in their family)."""
+        """Return the set of session_ids classified as forks.
+
+        Only callstack-prologue-marked sessions count. Sharing a head uuid
+        with another session is NOT sufficient — that catches ``claude
+        --resume`` continuations and any project where multiple independent
+        runs happen to begin with the same first message.
+        """
         self._refresh()
-        out: set[str] = set()
         with self._lock:
-            families = self._families_locked()
-            for head, members in families.items():
-                if len(members) <= 1 or not head:
-                    continue
-                # If any family member has the callstack fork-prologue marker,
-                # only the marked sessions are true ``/call`` children; the
-                # rest are ``claude --resume`` continuations that just happen
-                # to share the head uuid and should remain visible.
-                marked = [s for s in members if self._probes[s].is_callstack_fork]
-                if marked:
-                    out.update(marked)
-                    continue
-                # No markers anywhere — fall back to the file-birth-time
-                # heuristic. Forks copy the parent's first record verbatim, so
-                # the in-record timestamp is identical across the family;
-                # ``st_birthtime`` is the only reliable ordering signal.
-                members.sort(key=lambda sid: (self._probes[sid].birth_ts, sid))
-                for sid in members[1:]:
-                    out.add(sid)
-        return out
+            return {
+                sid
+                for sid, probe in self._probes.items()
+                if probe.is_callstack_fork
+            }
 
     def is_fork(self, session_id: str) -> Optional[bool]:
         """Return True/False if known, None if we have no data on this session."""
         return session_id in self.fork_session_ids() if self._probes else None
 
     def family_root(self, session_id: str) -> Optional[str]:
-        """Return the canonical root of ``session_id``'s family, or None."""
+        """Return the canonical root of ``session_id``'s family, or None.
+
+        With marker-only fork classification, the "root" is the single
+        unmarked member of the family (the parent that did the ``/call``).
+        Returns ``None`` if ``session_id`` is unknown or no unmarked
+        sibling exists.
+        """
         self._refresh()
         with self._lock:
             probe = self._probes.get(session_id)
             if probe is None or probe.head is None:
                 return None
             head = probe.head
-            members = [
-                sid for sid, p in self._probes.items() if p.head == head
+            unmarked = [
+                sid
+                for sid, p in self._probes.items()
+                if p.head == head and not p.is_callstack_fork
             ]
-            members.sort(key=lambda sid: (self._probes[sid].birth_ts, sid))
-            return members[0] if members else None
+            if not unmarked:
+                return None
+            unmarked.sort(key=lambda sid: (self._probes[sid].birth_ts, sid))
+            return unmarked[0]
 
     def children_of(self, session_id: str) -> list[str]:
-        """Return fork session_ids whose root is ``session_id``."""
+        """Return fork session_ids whose root is ``session_id``.
+
+        Only marker-bearing siblings count as forks (see
+        ``fork_session_ids``). ``session_id`` is treated as the family root
+        if it shares the head uuid with at least one marked sibling and
+        is itself unmarked.
+        """
         self._refresh()
         out: list[str] = []
         with self._lock:
             target = self._probes.get(session_id)
             if target is None or target.head is None:
                 return out
-            head = target.head
-            members = [
-                sid for sid, p in self._probes.items() if p.head == head
-            ]
-            members.sort(key=lambda sid: (self._probes[sid].birth_ts, sid))
-            if not members or members[0] != session_id:
+            if target.is_callstack_fork:
+                # A fork can't be the root of other forks in this scheme.
                 return out
-            return members[1:]
+            head = target.head
+            marked = [
+                sid
+                for sid, p in self._probes.items()
+                if p.head == head and p.is_callstack_fork
+            ]
+            marked.sort(key=lambda sid: (self._probes[sid].birth_ts, sid))
+            return marked
 
     def divergence_text_for(self, session_id: str) -> Optional[str]:
         """Return the cached divergence text for a fork, if known."""

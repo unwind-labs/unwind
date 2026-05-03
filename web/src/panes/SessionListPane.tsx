@@ -38,12 +38,19 @@ export function SessionListPane() {
   const select = useUi((s) => s.selectRootSession);
   const filter = useUi((s) => s.sessionFilter);
   const setFilter = useUi((s) => s.setSessionFilter);
-  const showForks = useUi((s) => s.showForks);
-  const setShowForks = useUi((s) => s.setShowForks);
-
-  const { data, isLoading, error } = useSessions(slug, showForks);
+  const { data, isLoading, error } = useSessions(slug, false);
   const searchRef = useRef<HTMLInputElement>(null);
   useTicker(5_000);
+
+  // Auto-select the most recent session whenever the project changes
+  // and nothing is selected yet (e.g., user just picked a new folder).
+  // The URL-restore flow in App.tsx sets rootSessionId before sessions
+  // load, so we won't trample a deep link.
+  useEffect(() => {
+    if (selectedId) return;
+    if (!data || data.length === 0) return;
+    select(data[0].session_id);
+  }, [data, selectedId, select]);
 
   const filtered = useMemo(() => {
     if (!data) return [];
@@ -93,32 +100,17 @@ export function SessionListPane() {
   }, [filtered, selectedId, select, focusedPane]);
 
   return (
-    <div className="flex h-full flex-col">
-      <header className="border-b border-border px-3 py-2">
-        <div className="flex items-center justify-between gap-2">
-          <div>
-            <div className="text-[11px] uppercase tracking-wider text-muted-foreground">
-              sessions
-            </div>
-            <div className="text-xs text-muted-foreground">
-              {data ? `${filtered.length} / ${data.length}` : "—"}
-              {!showForks ? " · forks hidden" : ""}
-            </div>
+    <div className="uw-session-pane flex h-full flex-col">
+      <header className="border-b border-border/60 px-3 py-3">
+        <div className="flex items-baseline gap-2">
+          <div className="text-[10px] font-bold uppercase tracking-[0.2em] text-muted-foreground">
+            sessions
           </div>
-          <label
-            className="flex items-center gap-1.5 text-[10px] text-muted-foreground"
-            title="Show callstack-forked child sessions in this list"
-          >
-            <input
-              type="checkbox"
-              checked={showForks}
-              onChange={(e) => setShowForks(e.target.checked)}
-              className="h-3 w-3"
-            />
-            forks
-          </label>
+          <div className="font-mono text-[10px] text-muted-foreground/70">
+            {data ? `${filtered.length} / ${data.length}` : "—"}
+          </div>
         </div>
-        <div className="mt-2 flex items-center gap-1.5 rounded-md border border-border bg-background px-2 py-1 text-xs focus-within:border-ring">
+        <div className="mt-3 flex items-center gap-1.5 rounded-xl border border-border/70 bg-background/60 px-3 py-1.5 text-xs focus-within:border-ring">
           <Search className="h-3 w-3 text-muted-foreground" />
           <input
             ref={searchRef}
@@ -189,11 +181,16 @@ function SessionItem({
         type="button"
         onClick={onSelect}
         className={cn(
-          "flex w-full flex-col gap-1 border-l-2 border-transparent px-3 py-2 text-left transition-colors",
-          "hover:bg-accent/60",
-          selected && "bg-accent border-l-primary",
+          // Flat list row: background-only hover/selection treatment so
+          // the list reads as one continuous surface, not a stack of
+          // boxes. A 2px accent bar on the left edge marks the selected
+          // row without thickening the row's footprint.
+          "relative flex w-full flex-col gap-1 px-4 py-2 text-left transition-colors",
+          "before:pointer-events-none before:absolute before:inset-y-1 before:left-0 before:w-[2px] before:rounded-r before:bg-transparent before:transition-colors",
+          "hover:bg-foreground/[0.04]",
+          selected && "bg-foreground/[0.07] before:bg-primary",
           isYield &&
-            "bg-amber-500/25 hover:bg-amber-500/30 border-l-amber-500",
+            "bg-amber-500/25 hover:bg-amber-500/30 before:bg-amber-500",
           isYield && selected && "bg-amber-500/40 hover:bg-amber-500/40",
         )}
       >

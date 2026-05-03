@@ -15,7 +15,8 @@ import { deriveRows, type Row } from "./derive-rows";
 
 export { deriveRows } from "./derive-rows";
 
-export const COMPACT_CARD_WIDTH = 340;
+export const COMPACT_CARD_WIDTH = 380;
+const RAIL_WIDTH = 42;
 const ACTIVITY_HEIGHT = 28;
 const SPAWN_HEIGHT = 36;
 const HEADER_HEIGHT = 40;
@@ -79,6 +80,10 @@ export type CompactCardData = {
   /** True for invoke_resume windows or any non-first window of a session
    *  under one parent. Drives the "↻ resumed" pill. */
   isResumeInstance: boolean;
+  /** Spawn kind from the parent's perspective: ``"call"`` if launched
+   *  through ``/call``, ``"subagent"`` if launched as a Claude Code
+   *  subagent. ``null`` for the root. Drives the rail's tint and label. */
+  spawnKind: "call" | "subagent" | null;
 };
 
 export function CompactCardNode({ data }: { data: CompactCardData }) {
@@ -184,16 +189,37 @@ export function CompactCardNode({ data }: { data: CompactCardData }) {
 
   // Border color priority (highest wins):
   //   1. selected (detail open)  — Tailwind class chain below.
-  //   2. keyboardFocused         — color(srgb 0 0.54 0.8 / 0.8) (sky blue)
+  //   2. keyboardFocused         — primary tint (light foreground in dark)
   //   3. default border-border.
+  // Hover uses the saturated sky-blue accent (set via Tailwind classes
+  // below). Keyboard cursor uses the calmer primary tint so the two
+  // signals stay distinguishable.
   // The outline gets the same color so the visual edge thickens to 2px
   // without any layout shift (see hover comment below).
   // No background changes from hover/focus — only border + shadow.
-  const focusBlue = "color(srgb 0 0.54 0.8 / 0.8)";
+  const cursorColor = "hsl(var(--primary) / 0.7)";
   const borderColor =
-    !data.selected && data.keyboardFocused ? focusBlue : undefined;
+    !data.selected && data.keyboardFocused ? cursorColor : undefined;
   const outlineColor =
-    !data.selected && data.keyboardFocused ? focusBlue : undefined;
+    !data.selected && data.keyboardFocused ? cursorColor : undefined;
+
+  // Kind drives the rail tint and the rotated label. Resume wins over
+  // spawnKind so users immediately see "this is a continuation" in the
+  // rail label rather than buried in a sub-line.
+  const kind: "root" | "call" | "subagent" | "resume" = data.isRoot
+    ? "root"
+    : data.isResumeInstance
+      ? "resume"
+      : (data.spawnKind ?? "call");
+  const railTintClass = {
+    root: "from-slate-500/10 to-slate-500/0",
+    call: "from-sky-500/10 to-sky-500/0",
+    subagent: "from-violet-500/10 to-violet-500/0",
+    resume: "from-amber-500/10 to-amber-500/0",
+  }[kind];
+  const shortSessionId = data.sessionId.startsWith("agent-")
+    ? data.sessionId.slice(6, 14)
+    : shortId(data.sessionId);
 
   return (
     <div
@@ -207,23 +233,21 @@ export function CompactCardNode({ data }: { data: CompactCardData }) {
         // visually thicken to 2px. Outline doesn't affect layout, so the
         // card's bounding box is identical across states and React Flow
         // doesn't reflow neighbours.
-        "nopan nodrag overflow-hidden rounded-2xl border border-border bg-card text-card-foreground shadow-sm transition-[border-color,box-shadow,outline-color]",
+        "nopan nodrag flex overflow-hidden rounded-2xl border border-border bg-card text-card-foreground shadow-sm transition-[border-color,box-shadow,outline-color]",
         "outline outline-1 outline-transparent",
         // Hover/focus: outline picks up the primary tint + drop shadow.
         // Focus styling is driven by a CSS rule in index.css that targets
         // the React Flow node wrapper (which is what actually receives
         // keyboard focus), not this inner div.
-        "uw-compact-card hover:border-primary/60 hover:outline-primary/60 hover:shadow-lg",
+        "uw-compact-card hover:border-sky-400/70 hover:outline-sky-400/70 hover:shadow-lg",
         // Currently-open state: solid primary border + matching outline + subtle fill.
         data.selected && "border-primary outline-primary bg-primary/10 hover:border-primary hover:outline-primary",
-        selfStatus === "live" && "border-t-emerald-500",
-        // Yielded: bold amber background so it pops in the canvas — the
-        // session is paused waiting for user input.
-        selfStatus === "yield" &&
-          "border-t-amber-400 bg-amber-500/25 hover:bg-amber-500/30",
-        selfStatus === "yield" &&
-          data.selected &&
-          "bg-amber-500/35 hover:bg-amber-500/35",
+        // Yielded: bold amber background so the whole card pops in the
+        // canvas — the session is paused waiting for user input. The
+        // amber wash is applied via the .uw-card-yield CSS rule (see
+        // index.css) because the dark gradient surface uses the
+        // ``background`` shorthand and would stomp Tailwind bg-* classes.
+        selfStatus === "yield" && "uw-card-yield",
       )}
       style={{
         width: COMPACT_CARD_WIDTH,
@@ -241,9 +265,28 @@ export function CompactCardNode({ data }: { data: CompactCardData }) {
         className="!h-2 !w-2 !border-0 !bg-muted-foreground/40"
         style={{ top: HEADER_HEIGHT / 2 }}
       />
-      <header className="flex items-center justify-between gap-2 border-b border-border px-4 py-3">
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-1.5">
+      {/* Left accent rail: status dot at top, rotated kind label in the
+          middle, short session id at the bottom. The rail is tinted by
+          a kind-specific gradient that matches the edge palette
+          (sky=call, violet=subagent, amber=resume, neutral=root). */}
+      <div
+        className={cn(
+          "flex shrink-0 flex-col items-center gap-2 border-r border-border/60 bg-gradient-to-b py-4",
+          railTintClass,
+        )}
+        style={{ width: RAIL_WIDTH }}
+      >
+        <RailStatus status={selfStatus} />
+        <span
+          className="text-[8.5px] font-bold uppercase tracking-[0.32em] text-foreground/70"
+          style={{ writingMode: "vertical-rl", transform: "rotate(180deg)" }}
+        >
+          {kind}
+        </span>
+      </div>
+      <div className="min-w-0 flex-1">
+        <header className="flex items-center justify-between gap-2 border-b border-border/60 px-4 py-3">
+          <div className="flex min-w-0 flex-1 items-center gap-1.5">
             {data.isResumeInstance ? (
               <ChevronRight
                 className="h-3.5 w-3.5 shrink-0 text-amber-400"
@@ -255,45 +298,49 @@ export function CompactCardNode({ data }: { data: CompactCardData }) {
               {data.label}
             </div>
           </div>
-          <div className="font-mono text-[10px] text-muted-foreground">
-            {data.isRoot ? "root · " : ""}
-            {data.sessionId.startsWith("agent-")
-              ? data.sessionId.slice(6, 14)
-              : shortId(data.sessionId)}
-            {data.isResumeInstance ? (
-              <span className="ml-1 text-amber-400/80">· continued</span>
-            ) : null}
-          </div>
-        </div>
-        {selfStatus === "yield" ? (
-          <Badge variant="warn">yield</Badge>
-        ) : selfStatus === "live" ? (
-          <Badge variant="warn">live</Badge>
-        ) : (
-          <CheckCircle2 className="h-3 w-3 text-emerald-500/70" />
-        )}
-      </header>
-      <ul className="flex flex-col gap-1 p-3">
-        {!messages && (
-          <li className="px-2 py-1 text-[10px] italic text-muted-foreground">
-            loading…
-          </li>
-        )}
-        {rows.map((r, i) =>
-          r.kind === "activity" ? (
-            <ActivityRow key={i} count={r.count} spanSeconds={r.spanSeconds} />
-          ) : (
-            <SpawnRowDisplay key={i} row={r} />
-          ),
-        )}
-        {messages && rows.length === 0 && (
-          <li className="px-2 py-1 text-[10px] italic text-muted-foreground">
-            (empty)
-          </li>
-        )}
-      </ul>
+          <span className="font-mono text-[10px] text-muted-foreground/70">
+            {shortSessionId}
+          </span>
+        </header>
+        <ul className="flex flex-col gap-1 p-3">
+          {!messages && (
+            <li className="px-2 py-1 text-[10px] italic text-muted-foreground">
+              loading…
+            </li>
+          )}
+          {rows.map((r, i) =>
+            r.kind === "activity" ? (
+              <ActivityRow key={i} count={r.count} spanSeconds={r.spanSeconds} />
+            ) : (
+              <SpawnRowDisplay key={i} row={r} />
+            ),
+          )}
+          {messages && rows.length === 0 && (
+            <li className="px-2 py-1 text-[10px] italic text-muted-foreground">
+              (empty)
+            </li>
+          )}
+        </ul>
+      </div>
     </div>
   );
+}
+
+/** Small status indicator at the top of the rail. Replaces the
+ *  pre-rail top-border-color trick (border-t-emerald, border-t-amber). */
+function RailStatus({ status }: { status: "live" | "yield" | "done" }) {
+  if (status === "live") {
+    return (
+      <span className="relative inline-flex h-2 w-2">
+        <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-60" />
+        <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-400" />
+      </span>
+    );
+  }
+  if (status === "yield") {
+    return <span className="inline-block h-2 w-2 rounded-full bg-amber-400" />;
+  }
+  return <CheckCircle2 className="h-3 w-3 text-emerald-500/60" />;
 }
 
 function ActivityRow({ count, spanSeconds }: { count: number; spanSeconds: number }) {
