@@ -63,6 +63,56 @@ def test_unrelated_sessions_dont_classify_as_forks(tmp_path: Path):
     assert fd.fork_session_ids() == set()
 
 
+def test_resume_in_callstack_family_is_not_a_fork(tmp_path: Path):
+    """A ``--resume`` continuation shares the parent's head uuid but lacks the
+    callstack fork-prologue. When at least one sibling carries the prologue
+    (i.e. callstack runtime is in use), unmarked siblings must remain visible.
+    """
+    parent = tmp_path / "parent.jsonl"
+    _write(
+        parent,
+        [
+            {"uuid": "u-head", "timestamp": "2026-04-24T09:00:00Z", "type": "user"},
+        ],
+    )
+    # User resumed parent — Claude Code rewrites the session into a new file
+    # with the parent's head uuid, but the first queue-op carries the user's
+    # own prompt, not the runtime fork-prologue.
+    resume = tmp_path / "resume.jsonl"
+    _write(
+        resume,
+        [
+            {
+                "type": "queue-operation",
+                "operation": "enqueue",
+                "content": "Continue working on README updates",
+                "timestamp": "2026-04-24T10:00:00Z",
+            },
+            {"uuid": "u-head", "timestamp": "2026-04-24T09:00:00Z", "type": "user"},
+            {"uuid": "u-resume-own", "timestamp": "2026-04-24T10:00:01Z", "type": "user"},
+        ],
+    )
+    # True callstack fork spawned from the resume — first queue-op content
+    # begins with the runtime prologue.
+    fork = tmp_path / "fork.jsonl"
+    _write(
+        fork,
+        [
+            {
+                "type": "queue-operation",
+                "operation": "enqueue",
+                "content": "You are running in a forked session — execute /task-a",
+                "timestamp": "2026-04-24T11:00:00Z",
+            },
+            {"uuid": "u-head", "timestamp": "2026-04-24T09:00:00Z", "type": "user"},
+            {"uuid": "u-fork-own", "timestamp": "2026-04-24T11:00:01Z", "type": "user"},
+        ],
+    )
+    fd = ForkDetector(tmp_path)
+    forks = fd.fork_session_ids()
+    assert forks == {"fork"}, forks
+
+
 def test_cache_is_invalidated_on_growth(tmp_path: Path):
     s = tmp_path / "g.jsonl"
     _write(s, [{"uuid": "u1", "timestamp": "2026-04-24T09:00:00Z", "type": "user"}])

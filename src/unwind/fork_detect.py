@@ -4,11 +4,18 @@ The callstack plugin writes ``report.yaml`` only when an invocation completes,
 so during in-flight ``/call`` work we can't rely on it to classify newly-spawned
 sessions. Fortunately ``claude --fork-session`` copies the parent's JSONL
 verbatim into the new session's file, including the very first message uuid.
-So:
 
-    Sessions sharing the same head uuid are a fork family. The oldest
-    session in that family (by ``first_timestamp``) is the parent / root;
-    every other member is a fork.
+Two-tier classification, since "shares head uuid with an older session" is
+necessary but not sufficient (``claude --resume`` also produces a new JSONL
+with the parent's head uuid):
+
+1. If a callstack runtime is in use, every spawned child's first
+   ``queue-operation`` enqueue carries a fork-prologue ("You are running in a
+   forked session..."). Only those marked sessions are classified as forks;
+   unmarked siblings are session resumes and remain visible.
+2. If no member of the family carries the marker (e.g. ``deep-rewrite`` runs
+   that spawn ``claude --fork-session`` directly without callstack), fall back
+   to the original heuristic: oldest member is the root, every other is a fork.
 
 This is run on demand and cached by JSONL (mtime, size).
 """
@@ -26,6 +33,15 @@ from .jsonl import iter_lines
 # How many leading uuids to sample from each JSONL.
 PROBE_N = 5
 
+# Number of leading records to scan for the callstack fork-prologue marker.
+# The marker, when present, sits in the very first ``queue-operation`` enqueue
+# (typically record 0); a small window keeps probing cheap.
+PROBE_PROLOGUE_N = 4
+
+# The exact prefix the callstack runtime injects into a forked child's first
+# queued message. See agent-callstack/agent_callstack/protocol.py.
+_CALLSTACK_FORK_PROLOGUE = "You are running in a forked session"
+
 
 @dataclass
 class _Probe:
@@ -33,6 +49,10 @@ class _Probe:
     birth_ts: float
     mtime: float
     size: int
+    # True iff the JSONL begins with a callstack-runtime fork prologue. Lets
+    # ``fork_session_ids`` distinguish true ``/call`` children from sessions
+    # that merely share a head uuid via ``claude --resume``.
+    is_callstack_fork: bool = False
 
     @property
     def head(self) -> Optional[str]:
@@ -61,10 +81,18 @@ class ForkDetector:
             for head, members in families.items():
                 if len(members) <= 1 or not head:
                     continue
-                # File birth time is the only reliable ordering signal. Forks
-                # copy the parent's first record verbatim, so the in-record
-                # timestamp is identical across the family. ``st_birthtime``
-                # reflects when each JSONL was actually created on disk.
+                # If any family member has the callstack fork-prologue marker,
+                # only the marked sessions are true ``/call`` children; the
+                # rest are ``claude --resume`` continuations that just happen
+                # to share the head uuid and should remain visible.
+                marked = [s for s in members if self._probes[s].is_callstack_fork]
+                if marked:
+                    out.update(marked)
+                    continue
+                # No markers anywhere — fall back to the file-birth-time
+                # heuristic. Forks copy the parent's first record verbatim, so
+                # the in-record timestamp is identical across the family;
+                # ``st_birthtime`` is the only reliable ordering signal.
                 members.sort(key=lambda sid: (self._probes[sid].birth_ts, sid))
                 for sid in members[1:]:
                     out.add(sid)
@@ -215,14 +243,31 @@ class ForkDetector:
 
 def _build_probe(path: Path, mtime: float, size: int) -> _Probe:
     uuids: list[str] = []
+    is_callstack_fork = False
+    scanned = 0
     for rec in iter_lines(path):
+        scanned += 1
+        if (
+            not is_callstack_fork
+            and rec.get("type") == "queue-operation"
+            and rec.get("operation") == "enqueue"
+        ):
+            content = rec.get("content")
+            if isinstance(content, str) and content.startswith(_CALLSTACK_FORK_PROLOGUE):
+                is_callstack_fork = True
         u = rec.get("uuid")
         if isinstance(u, str):
             uuids.append(u)
-            if len(uuids) >= PROBE_N:
-                break
+        if len(uuids) >= PROBE_N and scanned >= PROBE_PROLOGUE_N:
+            break
     birth = _file_birth_ts(path, fallback=mtime)
-    return _Probe(first_uuids=uuids, birth_ts=birth, mtime=mtime, size=size)
+    return _Probe(
+        first_uuids=uuids,
+        birth_ts=birth,
+        mtime=mtime,
+        size=size,
+        is_callstack_fork=is_callstack_fork,
+    )
 
 
 def _file_birth_ts(path: Path, fallback: float) -> float:
