@@ -96,3 +96,22 @@ export type MessagesResponse = {
   ancestors: AncestorRef[];
   extra_spawns: SpawnCardData[];
 };
+
+/** One slice of a session's activity = one card on the canvas. */
+export type WindowNode = {
+  window_id: string;
+  session_id: string;
+  label: string;
+  window_start: string | null;
+  window_end: string | null;
+  status: "done" | "live" | "yield";
+  kind: "root" | "call" | "subagent" | "resume";
+  parent_window_id: string | null;
+  window_index: number;
+  children: WindowNode[];
+};
+
+export type CanvasTreeResponse = {
+  root: WindowNode;
+  all_windows: WindowNode[];
+};

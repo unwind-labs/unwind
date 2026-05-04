@@ -210,6 +210,8 @@ function SessionTrace({
   const windowed = useMemo(() => {
     if (!data) return null;
     if (!traceWindow || (!traceWindow.start && !traceWindow.end)) return data;
+    const startMs = traceWindow.start ? Date.parse(traceWindow.start) : -Infinity;
+    const endMs = traceWindow.end ? Date.parse(traceWindow.end) : Infinity;
     return {
       ...data,
       messages: filterMessagesByWindow(
@@ -217,9 +219,16 @@ function SessionTrace({
         traceWindow.start,
         traceWindow.end,
       ),
-      // ``extra_spawns`` have no per-window anchor — pin them to the latest
-      // (open-ended) window so resume-bounded slices don't repeat them.
-      extra_spawns: traceWindow.end === null ? data.extra_spawns ?? [] : [],
+      // Mirror the canvas card's behaviour: each extra represents one
+      // callstack invocation and has its own ``started_at``. Keep the
+      // ones whose anchor falls inside this window. Extras without a
+      // ``started_at`` (legacy / fork-fallback) pin to the latest
+      // window only.
+      extra_spawns: (data.extra_spawns ?? []).filter((s) => {
+        if (!s.started_at) return traceWindow.end === null;
+        const t = Date.parse(s.started_at);
+        return t >= startMs && t < endMs;
+      }),
     };
   }, [data, traceWindow]);
 

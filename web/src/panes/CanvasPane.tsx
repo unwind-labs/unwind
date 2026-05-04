@@ -20,8 +20,8 @@ import {
 } from "@/panes/CompactCard";
 import { ElbowEdge } from "@/panes/ElbowEdge";
 import { TracePane } from "@/panes/TracePane";
-import { useMessages, useSessions } from "@/api/client";
-import { windowsForParent, type SpawnEdgeInfo } from "@/panes/instances";
+import { useCanvasTree, useMessages } from "@/api/client";
+import type { WindowNode } from "@/api/types";
 
 const nodeTypes: NodeTypes = { compact: CompactCardNode };
 const edgeTypes = { elbow: ElbowEdge };
@@ -60,9 +60,8 @@ export function CanvasPane() {
   }
 
   // Render the canvas always — never unmount it when the detail overlay
-  // opens, otherwise CanvasInner's local state (knownIds, spawnsByParent,
-  // labels, FitOnGrowth's "last seen count" ref, user-interacted ref) all
-  // reset on close, causing a refit and apparent loss of nodes.
+  // opens, otherwise CanvasInner's local state (measured heights, user-
+  // interacted ref, focused-node) all reset on close.
   return (
     <Shell>
       <div className="relative h-full w-full">
@@ -138,85 +137,68 @@ function CanvasInner({
   const detailSessionId = useUi((s) => s.detailSessionId);
   const focusedPane = useUi((s) => s.focusedPane);
   const rotateFocus = useUi((s) => s.rotateFocus);
-  // Keyboard cursor on the canvas — a *node id*, distinct from detailSessionId
-  // (which is a session id and means the overlay is open). Up/Down move it,
-  // Enter opens detail (which routes by sessionId).
+
+  // Keyboard cursor on the canvas — a *node id* (window_id), distinct
+  // from detailSessionId (which is a session id and means the overlay
+  // is open). Up/Down move it, Enter opens detail.
   const [canvasFocusedNodeId, setCanvasFocusedNodeId] = useState<string | null>(
-    rootSessionId,
+    null,
   );
   useEffect(() => {
-    setCanvasFocusedNodeId(rootSessionId);
+    setCanvasFocusedNodeId(null);
   }, [rootSessionId]);
-  // Per-card spawn metadata, keyed by parent NODE id (not session id —
-  // multiple cards can share a sessionId across invoke + invoke_resume; each
-  // gets its own entry here keyed by its handle-id-as-nodeId).
-  const [spawnsByParent, setSpawnsByParent] = useState<
-    Record<string, SpawnEdgeInfo[]>
-  >({});
 
-  // Reset whenever the root changes.
+  // Per-node measured heights — fed back from each card's ResizeObserver.
+  const [measuredHeights, setMeasuredHeights] = useState<Record<string, number>>(
+    {},
+  );
   useEffect(() => {
-    setSpawnsByParent({});
-    // Drop stale measurements from the previous session so heightsSignature
-    // isn't polluted with phantom entries (which would otherwise trigger
-    // extra fits on the new session for nodes that aren't on the canvas).
     setMeasuredHeights({});
   }, [rootSessionId]);
+  const handleMeasure = useCallback((id: string, h: number) => {
+    setMeasuredHeights((prev) => {
+      if (Math.abs((prev[id] ?? 0) - h) < 4) return prev;
+      return { ...prev, [id]: h };
+    });
+  }, []);
 
-  // If the selected session has no children at all (no callstack forks, no
-  // subagents), the canvas would just show one card on its own. In that case,
-  // jump straight into the session's full trace view — the user can still
-  // press ESC to return to the (single-card) canvas.
-  //
-  // We have to be careful here: useMessages can return cached/partial data
-  // before all children have been discovered, and `rows.some(spawn)` can
-  // briefly read false for a session that actually has children. If we
-  // auto-opened on that first reading, the user would see a flash of the
-  // canvas and then the trace overlay would hide it — exactly the
-  // "momentary render and then it goes away" symptom. To avoid that:
-  //   1. Wait until the messages query is settled (not fetching).
-  //   2. Wait an additional settle window. If a child is discovered during
-  //      the window (knownIds grows past 1), cancel the auto-open and mark
-  //      the decision as "no, has children".
+  // The canvas tree — single source of truth. Backend computes it from
+  // session JSONLs + callstack reports in one deterministic pass; we
+  // just render the result.
+  const { data: canvasTree } = useCanvasTree(slug, rootSessionId);
+
+  // Auto-open the trace overlay when the root has no children (single-
+  // card canvas would be a wasted view). We only do this once per root,
+  // and only after the tree query has settled — without that gate, the
+  // first render of an empty tree would auto-open and then the real
+  // tree would arrive a beat later, producing a jarring open-then-close.
   const { data: rootMessages, isFetching: rootFetching } = useMessages(
     slug,
     rootSessionId,
     false,
   );
-  // Number of known node ids — used as a "has children" signal for auto-open.
-  // We can't compute this from spawnsByParent alone before the canvas builds
-  // its graph, so derive a quick lower bound: 1 (root) + total spawn entries
-  // with a resolved childSessionId.
-  const knownNodeCount = useMemo(() => {
-    let n = 1;
-    for (const list of Object.values(spawnsByParent)) {
-      for (const sp of list) if (sp.childSessionId) n += 1;
-    }
-    return n;
-  }, [spawnsByParent]);
-
   const autoOpenedForRef = useRef<string | null>(null);
   useEffect(() => {
+    if (!canvasTree) return;
     if (!rootMessages || rootFetching) return;
     if (autoOpenedForRef.current === rootSessionId) return;
-    if (knownNodeCount > 1) {
-      // Children already on the canvas — definitely not single-node.
+    if (canvasTree.all_windows.length > 1) {
       autoOpenedForRef.current = rootSessionId;
       return;
     }
     const rows = deriveRows(
       rootMessages.messages,
       rootMessages.extra_spawns ?? [],
+      rootMessages.messages,
     );
-    const hasSpawns = rows.some((r) => r.kind === "spawn");
-    if (hasSpawns) {
-      // Spawns visible in messages but child cards not yet added (race with
-      // CompactCard's onSpawnsResolved). Bail out; the deps will re-run this
-      // effect when spawnsByParent grows.
+    if (rows.some((r) => r.kind === "spawn")) {
+      // The tree query says one window but the message stream knows
+      // about a spawn — wait for the next tree refresh rather than
+      // auto-opening too eagerly.
       return;
     }
     const t = window.setTimeout(() => {
-      if (knownNodeCount > 1) {
+      if (canvasTree.all_windows.length > 1) {
         autoOpenedForRef.current = rootSessionId;
         return;
       }
@@ -225,192 +207,53 @@ function CanvasInner({
     }, 400);
     return () => window.clearTimeout(t);
   }, [
+    canvasTree,
     rootMessages,
     rootFetching,
     rootSessionId,
-    knownNodeCount,
     onOpenDetail,
   ]);
 
-  // Pull session list to surface friendly titles for root.
-  const { data: sessions } = useSessions(slug, true);
-  const rootTitle = useMemo(() => {
-    const row = sessions?.find((s) => s.session_id === rootSessionId);
-    return row?.title ?? rootSessionId.slice(0, 8);
-  }, [sessions, rootSessionId]);
-
-  // Per-session status from the sessions API. Real Claude sessions
-  // (non-subagent) are LIVE if a claude process is running for the project
-  // OR the JSONL was touched in the last 5 minutes; DONE otherwise. The
-  // backend computes this in processes.session_status.
-  const apiStatuses = useMemo(() => {
-    const out: Record<string, "live" | "yield" | "done"> = {};
-    for (const s of sessions ?? []) {
-      out[s.session_id] =
-        s.status === "yield"
-          ? "yield"
-          : s.status === "live"
-            ? "live"
-            : "done";
-    }
-    return out;
-  }, [sessions]);
-
-  // Sessions in spawnsByParent that are LIVE (no result yet) — used as a
-  // fallback for ids the sessions API doesn't know about (e.g. ``agent-<id>``
-  // synthetic subagent ids). Keyed by SESSION id, not node id, since this
-  // feeds the per-session status badge.
-  const liveSessionIds = useMemo(() => {
-    const out = new Set<string>();
-    for (const list of Object.values(spawnsByParent)) {
-      for (const sp of list) {
-        if (!sp.done && sp.childSessionId) out.add(sp.childSessionId);
-      }
-    }
-    return out;
-  }, [spawnsByParent]);
-
-  const handleSpawnsResolved = useCallback<CompactCardData["onSpawnsResolved"]>(
-    (parentNodeId, spawns) => {
-      setSpawnsByParent((prev) => {
-        const incoming: SpawnEdgeInfo[] = spawns.map((s) => ({
-          parent: parentNodeId,
-          child: s.handleId,
-          childSessionId: s.childId,
-          handleId: s.handleId,
-          spawnKind: s.spawnKind,
-          done: s.done,
-          label: s.label || s.childId.slice(0, 8),
-          parentToolUseTs: s.parentToolUseTs,
-          isResume: s.isResume,
-          userReply: s.userReply,
-        }));
-        // MERGE rather than replace. callstack mid-flight can reorder or
-        // temporarily lose entries (e.g., when a tool_use's claimed report
-        // shifts as new reports are written). A pure replace would leave
-        // any previously-known children as orphans on the canvas. We dedupe
-        // by handleId — a stable per-(tool_use, child-index) key — so
-        // status updates flow through (later entry wins) but we never lose
-        // a child once observed.
-        const existing = prev[parentNodeId] ?? [];
-        const map = new Map<string, SpawnEdgeInfo>();
-        for (const sp of existing) map.set(sp.handleId, sp);
-        for (const sp of incoming) map.set(sp.handleId, sp);
-
-        // Preserve order: incoming order first (current request order from
-        // the parent's tool_use), then any leftover from existing not in
-        // incoming (preserved in their original relative order).
-        const incomingHandles = new Set(incoming.map((s) => s.handleId));
-        const tail = existing.filter((s) => !incomingHandles.has(s.handleId));
-        const ordered = [
-          ...incoming.map((s) => map.get(s.handleId)!),
-          ...tail.map((s) => map.get(s.handleId)!),
-        ];
-
-        // Skip update if nothing meaningful changed.
-        const same =
-          existing.length === ordered.length &&
-          existing.every((b, i) => {
-            const m = ordered[i];
-            return (
-              m &&
-              b.childSessionId === m.childSessionId &&
-              b.handleId === m.handleId &&
-              b.done === m.done &&
-              b.label === m.label &&
-              b.parentToolUseTs === m.parentToolUseTs &&
-              b.isResume === m.isResume
-            );
-          });
-        if (same) return prev;
-        return { ...prev, [parentNodeId]: ordered };
-      });
-    },
-    [],
-  );
-
-  // Track measured heights per node, reported by each card via ResizeObserver
-  // (in CompactCardNode → handleSpawnsResolved doesn't carry size, so we read
-  // them via a separate handleMeasure callback).
-  const [measuredHeights, setMeasuredHeights] = useState<Record<string, number>>(
-    {},
-  );
-  const handleMeasure = useCallback((id: string, h: number) => {
-    setMeasuredHeights((prev) => {
-      if (Math.abs((prev[id] ?? 0) - h) < 4) return prev;
-      return { ...prev, [id]: h };
-    });
-  }, []);
-
-  // Per-session start timestamp, used to order siblings chronologically
-  // top-to-bottom within each rank (depth column).
-  const startTimes = useMemo(() => {
-    const out: Record<string, number> = {};
-    for (const s of sessions ?? []) {
-      if (s.first_timestamp) out[s.session_id] = Date.parse(s.first_timestamp);
-    }
-    return out;
-  }, [sessions]);
-
+  // Build ReactFlow nodes + edges from the tree.
   const { nodes, edges } = useMemo(() => {
-    return buildGraph({
+    if (!canvasTree) return { nodes: [], edges: [] };
+    return treeToReactFlow({
       slug,
-      rootSessionId,
-      rootTitle,
-      spawnsByParent,
+      tree: canvasTree.root,
+      allWindows: canvasTree.all_windows,
       heights: measuredHeights,
-      liveSessionIds,
-      apiStatuses,
-      startTimes,
       selectedSessionId: detailSessionId,
       keyboardFocusedNodeId: canvasFocusedNodeId,
-      onSpawnsResolved: handleSpawnsResolved,
       onOpenDetail,
       onMeasure: handleMeasure,
     });
   }, [
     slug,
-    rootSessionId,
-    rootTitle,
-    spawnsByParent,
+    canvasTree,
     measuredHeights,
-    liveSessionIds,
-    apiStatuses,
-    startTimes,
     detailSessionId,
     canvasFocusedNodeId,
-    handleSpawnsResolved,
     onOpenDetail,
     handleMeasure,
   ]);
 
-  // Track whether the user has panned/zoomed. Once they have, we stop
-  // auto-fitting on every node addition. Reset on session switch so the
-  // fresh tree gets framed properly.
+  // Track whether the user has panned/zoomed so AutoFit can defer to them.
   const userInteractedRef = useRef(false);
-  // Programmatic-move guard. ReactFlow's onMoveStart fires for our OWN
-  // fitView/setCenter calls (the `event` arg is non-null for those too in
-  // some versions), so without this flag the very first auto-fit would
-  // mark `userInteractedRef = true` and lock out every subsequent auto-fit
-  // — leaving newly-discovered child nodes off-screen indefinitely.
   const programmaticMoveRef = useRef(false);
   useEffect(() => {
     userInteractedRef.current = false;
   }, [rootSessionId]);
 
-  // Compact signature of all measured heights so the auto-fit re-runs once
-  // the actual rendered sizes settle (cards initially render at default
-  // height, then ResizeObserver feeds back the real size — without this,
-  // fitView would frame the estimated layout and miss bottom rows).
+  // Compact signature of measured heights so AutoFit re-runs once real
+  // sizes settle (cards initially render at default height; ResizeObserver
+  // feeds back the real size).
   const heightsSignature = useMemo(() => {
     const ids = Object.keys(measuredHeights).sort();
     return ids.map((id) => `${id}:${Math.round(measuredHeights[id])}`).join("|");
   }, [measuredHeights]);
 
-  // Sort visible nodes by position (column, then top-to-bottom within
-  // column) so arrow-key navigation walks the tree in a stable, visually
-  // intuitive order. Memoize on `nodes` only — we want to recompute when
-  // layout changes, not on every keystroke.
+  // Keyboard navigation: ordered nodes (left→right column, then top→bottom),
+  // and parent/children maps for ←/→ traversal.
   const orderedNodeIds = useMemo(() => {
     return nodes
       .slice()
@@ -418,9 +261,6 @@ function CanvasInner({
       .map((n) => n.id);
   }, [nodes]);
 
-  // Tree maps for left/right navigation. Derived from the edge list:
-  //   parentByNode[child]   → parent nodeId
-  //   childrenByNode[parent] → ordered child nodeIds (top-to-bottom by Y)
   const { parentByNode, childrenByNode } = useMemo(() => {
     const parent: Record<string, string> = {};
     const children: Record<string, string[]> = {};
@@ -428,8 +268,6 @@ function CanvasInner({
       parent[e.target] = e.source;
       (children[e.source] ??= []).push(e.target);
     }
-    // Sort siblings by their on-canvas Y so ArrowRight lands on the
-    // top-most child consistently with the visual layout.
     const yOf = (id: string) =>
       nodes.find((n) => n.id === id)?.position.y ?? 0;
     for (const k in children) {
@@ -438,8 +276,6 @@ function CanvasInner({
     return { parentByNode: parent, childrenByNode: children };
   }, [edges, nodes]);
 
-  // Latest values for the keydown handler — avoids re-attaching the
-  // listener on every keystroke / state tick.
   const reactFlow = useReactFlow();
   const navStateRef = useRef({
     focusedPane,
@@ -475,7 +311,7 @@ function CanvasInner({
       if (typing) return;
       const s = navStateRef.current;
       if (s.focusedPane !== "thread") return;
-      if (s.detailOpen) return; // ESC handler owns the overlay's keys
+      if (s.detailOpen) return;
 
       const isUp = e.key === "ArrowUp" || e.key === "k";
       const isDown = e.key === "ArrowDown" || e.key === "j";
@@ -496,27 +332,16 @@ function CanvasInner({
       if (isEnter) {
         if (s.canvasFocusedNodeId) {
           e.preventDefault();
-          // Map nodeId → (sessionId, window). The overlay is keyed by
-          // session id; the window narrows the trace to this slice.
-          const focused = s.nodes.find(
-            (n) => n.id === s.canvasFocusedNodeId,
-          );
+          const focused = s.nodes.find((n) => n.id === s.canvasFocusedNodeId);
           const sid = focused?.data.sessionId ?? s.canvasFocusedNodeId;
           const win = focused
-            ? {
-                start: focused.data.windowStart,
-                end: focused.data.windowEnd,
-              }
+            ? { start: focused.data.windowStart, end: focused.data.windowEnd }
             : null;
           onOpenDetail(sid, win);
         }
         return;
       }
 
-      // Pan + zoom so the newly-focused node sits centered at a
-      // comfortable reading zoom. We don't always force the zoom — if
-      // the user has already zoomed in past the target, leave it alone
-      // so keyboard nav doesn't yank them back out.
       const FOCUS_ZOOM = 1;
       const focusAndPan = (nextId: string) => {
         setCanvasFocusedNodeId(nextId);
@@ -538,14 +363,10 @@ function CanvasInner({
         }, 250);
       };
 
-      // Left/Right walk the call tree along edges instead of rotating
-      // pane focus. Falls back to pane rotation when there's nowhere to
-      // go in that direction (left from root → sessions pane). Right
-      // from a leaf jumps to the top-most node in the next column over,
-      // so leaf cards aren't dead-ends visually.
       if (isLeft || isRight) {
         e.preventDefault();
-        const current = s.canvasFocusedNodeId ?? s.rootSessionId;
+        const current =
+          s.canvasFocusedNodeId ?? s.orderedNodeIds[0] ?? s.rootSessionId;
         if (isLeft) {
           const parent = s.parentByNode[current];
           if (parent) {
@@ -558,8 +379,7 @@ function CanvasInner({
           if (kids && kids.length > 0) {
             focusAndPan(kids[0]);
           } else {
-            // Leaf: hop to the next column. Find the smallest x strictly
-            // greater than ours, then the top-most node in that column.
+            // Leaf: hop to the next column.
             const cur = s.nodes.find((n) => n.id === current);
             if (cur) {
               const rightNodes = s.nodes.filter(
@@ -598,9 +418,7 @@ function CanvasInner({
         // this, the internal nodeInternals map carries over from the prior
         // session — when the new tree's nodes are pushed in via the props,
         // ReactFlow's reconciliation sometimes fails to mount the new
-        // cards visually (you can pan to where they should be and see a
-        // blank grid). A keyed remount throws all that internal state
-        // away and starts clean.
+        // cards visually.
         key={rootSessionId}
         nodes={nodes}
         edges={edges}
@@ -608,23 +426,13 @@ function CanvasInner({
         edgeTypes={edgeTypes}
         onNodeClick={(_, n) => {
           setCanvasFocusedNodeId(n.id);
-          // n.id is a node id (handle id for child instances); the overlay
-          // is keyed by sessionId. We also pass the window so the trace
-          // shows only this slice of the session.
           const d = n.data as CompactCardData | undefined;
           const sid = d?.sessionId ?? n.id;
-          const win = d
-            ? { start: d.windowStart, end: d.windowEnd }
-            : null;
+          const win = d ? { start: d.windowStart, end: d.windowEnd } : null;
           onOpenDetail(sid, win);
         }}
         fitView
         fitViewOptions={{ padding: 0.2, maxZoom: 1.0, minZoom: 0.05 }}
-        // minZoom is intentionally low: a deep fork-tree at 340px-wide
-        // cards can need zoom <0.1 to fit; capping at 0.2 (the previous
-        // default) made fitView bail out and only ~5 cards would land in
-        // the viewport while the rest sat off-screen but reachable via
-        // keyboard nav.
         minZoom={0.05}
         maxZoom={1.5}
         proOptions={{ hideAttribution: true }}
@@ -632,11 +440,6 @@ function CanvasInner({
         nodesConnectable={false}
         elementsSelectable={false}
         onMoveStart={(e) => {
-          // ReactFlow's onMoveStart fires for programmatic moves too (and
-          // sometimes WITH a non-null event arg), so the `if (e)` guard
-          // alone isn't enough — without programmaticMoveRef the very
-          // first auto-fit would lock us out of all future auto-fits and
-          // newly-arriving child nodes would never get framed.
           if (programmaticMoveRef.current) return;
           if (e) userInteractedRef.current = true;
         }}
@@ -655,20 +458,7 @@ function CanvasInner({
   );
 }
 
-/** Auto-fits the viewport to the current graph.
- *
- *  Three triggers, each gated on `!userInteracted` so we never fight a user
- *  who's panned/zoomed:
- *    1. rootSessionId changes — force-fit immediately (ignore the user-
- *       interacted flag for this case since it was just reset).
- *    2. nodeCount grows — schedule a debounced fit so progressive child
- *       discovery keeps the whole tree in frame.
- *    3. heightsSignature changes — re-fit once real measured heights replace
- *       the initial estimates, otherwise fitView frames the wrong bbox and
- *       bottom cards get clipped.
- *
- *  All three funnel into a single trailing-debounced timer so a burst of
- *  changes (root switch + immediate measurements) collapses to one fit. */
+/** Auto-fits the viewport to the current graph (debounced). */
 function AutoFit({
   rootSessionId,
   nodeCount,
@@ -701,12 +491,8 @@ function AutoFit({
     if (!rootChanged && !grew && !heightsChanged) return;
 
     if (timerRef.current != null) window.clearTimeout(timerRef.current);
-    // Slightly longer delay than before — gives ResizeObserver time to feed
-    // back actual heights for newly-rendered cards before we commit to a fit.
     timerRef.current = window.setTimeout(() => {
       timerRef.current = null;
-      // Mark this as a programmatic move so onMoveStart doesn't flip
-      // userInteracted to true. Window covers the 200ms animation.
       programmaticMove.current = true;
       fitView({ padding: 0.2, maxZoom: 1.0, minZoom: 0.05, duration: 200 });
       window.setTimeout(() => {
@@ -731,344 +517,165 @@ function AutoFit({
   return null;
 }
 
-// --- layout -----------------------------------------------------------------
+// --- tree → ReactFlow nodes & edges ----------------------------------------
 
 const DEFAULT_NODE_HEIGHT = 220;
 const COLUMN_GAP = 80;
 const SIBLING_GAP = 24;
 
+/** Compute (x, y) for every WindowNode in the tree.
+ *
+ *  Children stack vertically below their parent's top edge; columns are
+ *  spaced by ``COLUMN_GAP``. Subtree heights are computed bottom-up so
+ *  siblings don't overlap.
+ */
 function layoutTree(
-  rootNodeId: string,
-  knownNodeIds: string[],
-  spawnsByParent: Record<string, SpawnEdgeInfo[]>,
+  root: WindowNode,
   heights: Record<string, number>,
-  startTimes: Record<string, number>,
 ): Record<string, { x: number; y: number }> {
-  const known = new Set(knownNodeIds);
   const positions: Record<string, { x: number; y: number }> = {};
-  if (!known.has(rootNodeId)) return positions;
+  const heightOf = (n: WindowNode) =>
+    heights[n.window_id] ?? DEFAULT_NODE_HEIGHT;
 
-  // Track per-id startTime for tooltip / debugging only — layout uses spawn
-  // order, NOT sortable timestamps.
-  void startTimes;
-
-  // Group a parent's children by their tool_use_id so all children spawned
-  // from the same ``invoke_parallel`` stay visually grouped. handleId is
-  // ``spawn-<toolUseId>-<i>`` — strip the trailing ``-<i>`` for the group
-  // key. invoke / invoke_resume each have their own tool_use_id and so end
-  // up in distinct groups, which is exactly what we want for chronological
-  // stacking of resume instances.
-  const childGroupsOf = (parentNodeId: string): string[][] => {
-    const groups: Record<string, string[]> = {};
-    const groupOrder: string[] = [];
-    const seen = new Set<string>();
-    for (const sp of spawnsByParent[parentNodeId] ?? []) {
-      const childNodeId = sp.handleId;
-      if (!known.has(childNodeId) || seen.has(childNodeId)) continue;
-      seen.add(childNodeId);
-      const groupKey = sp.handleId.replace(/-\d+$/, "");
-      if (!groups[groupKey]) {
-        groups[groupKey] = [];
-        groupOrder.push(groupKey);
-      }
-      groups[groupKey].push(childNodeId);
-    }
-    return groupOrder.map((k) => groups[k]);
-  };
-
-  // Flat list of all children (across groups, dedup), used for subtree-size
-  // calculation.
-  const allChildrenOf = (parent: string): string[] => {
-    const out: string[] = [];
-    for (const g of childGroupsOf(parent)) out.push(...g);
-    return out;
-  };
-
-  const heightOf = (id: string) => heights[id] ?? DEFAULT_NODE_HEIGHT;
-
-  // Subtree height = max(node's own height, sum of children subtree heights + gaps).
-  // Approximation — within a group children stack tightly; across groups we
-  // don't add extra gap here since the per-group layout handles that. Good
-  // enough for sibling spacing; the actual placement loop below enforces no
-  // overlap regardless.
-  const visited = new Set<string>();
   const subtreeH: Record<string, number> = {};
-  function compute(id: string) {
-    if (visited.has(id)) return;
-    visited.add(id);
-    const kids = allChildrenOf(id);
+  function computeH(n: WindowNode): number {
     let sum = 0;
-    for (let i = 0; i < kids.length; i++) {
-      compute(kids[i]);
-      sum += subtreeH[kids[i]];
+    n.children.forEach((c, i) => {
+      const ch = computeH(c);
+      sum += ch;
       if (i > 0) sum += SIBLING_GAP;
-    }
-    subtreeH[id] = Math.max(heightOf(id), sum);
+    });
+    const h = Math.max(heightOf(n), sum);
+    subtreeH[n.window_id] = h;
+    return h;
   }
-  compute(rootNodeId);
+  computeH(root);
 
-  // Place a node and recurse. Children are organized by CALL row groups:
-  //   - Group 1's first child's TOP aligned to parent's TOP.
-  //   - Subsequent children in group 1 stack below.
-  //   - Group 2's first child also tries to align to parent's top, but
-  //     if group 1 extends past that, push group 2 below group 1 (+gap).
-  //   - Within group 2, children stack normally.
-  // Top-alignment (rather than center-alignment) keeps the first CALL row
-  // — which is at the TOP of the parent's spawn list — visually next to
-  // its child instead of dipping down to a centered child.
-  // Visited guard. ``place`` recurses on each child via ``childGroupsOf``,
-  // and inherited tool_uses (subagents inherit their parent's tool_use
-  // blocks) can produce an apparent cycle in spawnsByParent. Without this
-  // guard the recursion blows the JS stack.
-  const placed = new Set<string>();
-  function place(id: string, depth: number, centerY: number) {
-    if (placed.has(id)) return;
-    placed.add(id);
-    positions[id] = {
+  function place(n: WindowNode, depth: number, centerY: number) {
+    positions[n.window_id] = {
       x: depth * (COMPACT_CARD_WIDTH + COLUMN_GAP),
       y: centerY,
     };
-    const groups = childGroupsOf(id);
-    if (groups.length === 0) return;
-
-    const parentTop = centerY - heightOf(id) / 2;
-    let prevGroupBottom: number | null = null;
-    for (const group of groups) {
-      if (group.length === 0) continue;
-      // Where the first child of this group WANTS to go: aligned to the
-      // parent's top edge.
-      const desiredFirstTop = parentTop;
-      const minTop: number =
-        prevGroupBottom == null
-          ? desiredFirstTop
-          : Math.max(desiredFirstTop, prevGroupBottom + SIBLING_GAP);
-      const firstTop: number = minTop;
-      const firstHeight = heightOf(group[0]);
-      const firstCenter = firstTop + firstHeight / 2;
-      place(group[0], depth + 1, firstCenter);
-      let cursorTop: number = firstTop + subtreeH[group[0]] + SIBLING_GAP;
-      for (let i = 1; i < group.length; i++) {
-        const kid = group[i];
-        const kidH = heightOf(kid);
-        place(kid, depth + 1, cursorTop + kidH / 2);
-        cursorTop += subtreeH[kid] + SIBLING_GAP;
-      }
-      prevGroupBottom = cursorTop - SIBLING_GAP;
+    if (n.children.length === 0) return;
+    // Top-align children to the parent's top edge so the FIRST child sits
+    // visually next to the first call row in the parent card.
+    const parentTop = centerY - heightOf(n) / 2;
+    let cursorTop = parentTop;
+    for (const c of n.children) {
+      const ch = heightOf(c);
+      place(c, depth + 1, cursorTop + ch / 2);
+      cursorTop += subtreeH[c.window_id] + SIBLING_GAP;
     }
   }
-  place(rootNodeId, 0, 0);
-
-  // Detached nodes (not reachable from root through spawnsByParent yet) get
-  // dropped into their own column at the bottom. Rare — only if our
-  // discovery is partial.
-  let detachedY = 0;
-  for (const id of knownNodeIds) {
-    if (positions[id]) {
-      detachedY = Math.max(
-        detachedY,
-        positions[id].y + heightOf(id) / 2 + SIBLING_GAP,
-      );
-    }
-  }
-  for (const id of knownNodeIds) {
-    if (positions[id]) continue;
-    positions[id] = { x: 0, y: detachedY + heightOf(id) / 2 };
-    detachedY += heightOf(id) + SIBLING_GAP;
-  }
+  place(root, 0, 0);
   return positions;
 }
 
-/** A canvas node IS a ``(sessionId, [windowStart, windowEnd))`` tuple — a
- *  Claude session viewed through a single time window. Root has both ends
- *  ``null`` (the whole session). ``windowEnd === null`` means open-ended
- *  ("still running / latest"). */
-type CanvasNode = {
-  nodeId: string;
-  sessionId: string;
-  parentNodeId: string | null;
-  windowStart: string | null;
-  windowEnd: string | null;
-  isResumeInstance: boolean;
-  spawnKind: "call" | "subagent" | null;
-  done: boolean;
-  label: string;
-};
-
-function buildCanvasNodes(
-  rootSessionId: string,
-  rootTitle: string,
-  spawnsByParent: Record<string, SpawnEdgeInfo[]>,
-): { nodeMap: Record<string, CanvasNode>; order: string[] } {
-  const nodeMap: Record<string, CanvasNode> = {};
-  const order: string[] = [];
-  nodeMap[rootSessionId] = {
-    nodeId: rootSessionId,
-    sessionId: rootSessionId,
-    parentNodeId: null,
-    windowStart: null,
-    windowEnd: null,
-    isResumeInstance: false,
-    spawnKind: null,
-    done: false,
-    label: rootTitle,
-  };
-  order.push(rootSessionId);
-  // BFS so we process parents before children — child labels/windows depend
-  // on their parent's spawnsByParent entry.
-  const queue: string[] = [rootSessionId];
-  const visited = new Set<string>([rootSessionId]);
-  while (queue.length) {
-    const parentNodeId = queue.shift()!;
-    const spawns = spawnsByParent[parentNodeId];
-    if (!spawns?.length) continue;
-    const windows = windowsForParent(parentNodeId, spawns);
-    // Index spawns by handleId for label lookup. Each window's ``nodeId``
-    // IS its spawn's handleId.
-    const byHandle = new Map<string, SpawnEdgeInfo>();
-    for (const sp of spawns) byHandle.set(sp.handleId, sp);
-    for (const win of windows) {
-      if (visited.has(win.nodeId)) continue;
-      visited.add(win.nodeId);
-      const sp = byHandle.get(win.nodeId);
-      const label =
-        sp?.label ||
-        (win.sessionId.startsWith("agent-")
-          ? win.sessionId.slice(6, 14)
-          : win.sessionId.slice(0, 8));
-      nodeMap[win.nodeId] = {
-        nodeId: win.nodeId,
-        sessionId: win.sessionId,
-        parentNodeId,
-        windowStart: win.windowStart,
-        windowEnd: win.windowEnd,
-        isResumeInstance: win.isResume,
-        spawnKind: win.spawnKind,
-        done: win.done,
-        label,
-      };
-      order.push(win.nodeId);
-      queue.push(win.nodeId);
-    }
-  }
-  return { nodeMap, order };
-}
-
-function buildGraph(args: {
+function treeToReactFlow(args: {
   slug: string;
-  rootSessionId: string;
-  rootTitle: string;
-  spawnsByParent: Record<string, SpawnEdgeInfo[]>;
+  tree: WindowNode;
+  allWindows: WindowNode[];
   heights: Record<string, number>;
-  liveSessionIds: Set<string>;
-  apiStatuses: Record<string, "live" | "yield" | "done">;
-  startTimes: Record<string, number>;
   selectedSessionId: string | null;
   keyboardFocusedNodeId: string | null;
-  onSpawnsResolved: CompactCardData["onSpawnsResolved"];
   onOpenDetail: (id: string) => void;
   onMeasure: (id: string, h: number) => void;
-}) {
+}): { nodes: Node<CompactCardData>[]; edges: Edge[] } {
   const {
     slug,
-    rootSessionId,
-    rootTitle,
-    spawnsByParent,
+    tree,
+    allWindows,
     heights,
-    liveSessionIds,
-    apiStatuses,
-    startTimes,
     selectedSessionId,
     keyboardFocusedNodeId,
-    onSpawnsResolved,
     onOpenDetail,
     onMeasure,
   } = args;
 
-  const { nodeMap, order: knownNodeIds } = buildCanvasNodes(
-    rootSessionId,
-    rootTitle,
-    spawnsByParent,
-  );
+  const positions = layoutTree(tree, heights);
 
-  const positions = layoutTree(
-    rootSessionId,
-    knownNodeIds,
-    spawnsByParent,
-    heights,
-    startTimes,
-  );
+  // Group child windows by their parent — sorted top-to-bottom by the
+  // child's on-canvas Y. Used both for assigning per-parent edge
+  // offsets (so vertical legs don't stack) and for telling each
+  // CompactCard which Handles to render (one per child window_id).
+  const childrenByParent: Record<string, WindowNode[]> = {};
+  for (const w of allWindows) {
+    if (!w.parent_window_id) continue;
+    (childrenByParent[w.parent_window_id] ??= []).push(w);
+  }
+  for (const ws of Object.values(childrenByParent)) {
+    ws.sort(
+      (a, b) =>
+        (positions[a.window_id]?.y ?? 0) - (positions[b.window_id]?.y ?? 0),
+    );
+  }
 
-  // Offset edges per-parent so each call's vertical leg sits at a unique
-  // horizontal stripe. Symmetric around the column midpoint: 3 edges → (+6,
-  // 0, -6) px. Important for invoke + invoke_resume → distinct stripes
-  // even though they target distinct nodes (helps when the resume node
-  // sits close to the original).
+  // Build edges with per-parent symmetric offsets (e.g. 5 edges →
+  // +12, +6, 0, -6, -12) so each vertical leg sits in its own
+  // horizontal stripe. Topmost child → most positive offset.
   const EDGE_OFFSET_STEP = 6;
+
   const edges: Edge[] = [];
-  for (const [parentId, spawns] of Object.entries(spawnsByParent)) {
-    if (!nodeMap[parentId]) continue;
-    const visible = spawns.filter((sp) => nodeMap[sp.handleId]);
-    const N = visible.length;
-    visible.forEach((sp, i) => {
+  for (const [parentId, ws] of Object.entries(childrenByParent)) {
+    const N = ws.length;
+    ws.forEach((w, i) => {
       const centerOffset = ((N - 1) / 2 - i) * EDGE_OFFSET_STEP;
       edges.push({
-        id: `${parentId}::${sp.handleId}`,
+        id: `${parentId}::${w.window_id}`,
         source: parentId,
-        target: sp.handleId,
-        sourceHandle: sp.handleId,
+        target: w.window_id,
+        sourceHandle: w.window_id,
         targetHandle: "in",
         type: "elbow",
         data: { offset: centerOffset },
         className:
-          (sp.spawnKind === "call" ? "uw-edge-call" : "uw-edge-subagent") +
-          (sp.done ? "" : " uw-edge-pending"),
+          (w.kind === "subagent" ? "uw-edge-subagent" : "uw-edge-call") +
+          (w.status === "live" || w.status === "yield"
+            ? " uw-edge-pending"
+            : ""),
       });
     });
   }
 
-  const nodes: Node<CompactCardData>[] = knownNodeIds.map((nodeId) => {
-    const cn = nodeMap[nodeId];
-    const pos = positions[nodeId] ?? { x: 0, y: 0 };
-    const h = heights[nodeId] ?? DEFAULT_NODE_HEIGHT;
-    // Status priority for the canvas card:
-    //   1. Bounded window (``windowEnd != null``) → done: this slice ended
-    //      when a later resume started.
-    //   2. sessions API (process detection + JSONL mtime fallback).
-    //   3. spawn-row liveness — covers subagents (``agent-<id>``).
-    const isLatest = cn.windowEnd === null;
-    const status: "live" | "yield" | "done" = !isLatest
-      ? "done"
-      : (apiStatuses[cn.sessionId] ??
-        (liveSessionIds.has(cn.sessionId) ? "live" : "done"));
-    const data: CompactCardData = {
-      slug,
-      sessionId: cn.sessionId,
-      label: cn.label,
-      isRoot: nodeId === rootSessionId,
-      selected: cn.sessionId === selectedSessionId,
-      keyboardFocused:
-        nodeId === keyboardFocusedNodeId && cn.sessionId !== selectedSessionId,
-      onSpawnsResolved,
-      onOpenDetail,
-      onMeasure,
-      status,
-      nodeId,
-      windowStart: cn.windowStart,
-      windowEnd: cn.windowEnd,
-      isResumeInstance: cn.isResumeInstance,
-      spawnKind: cn.spawnKind,
-    };
-    return {
-      id: nodeId,
-      type: "compact",
-      position: {
-        x: (pos?.x ?? 0) - COMPACT_CARD_WIDTH / 2,
-        y: (pos?.y ?? 0) - h / 2,
-      },
-      data,
-      draggable: false,
-    };
-  });
+  // Build nodes.
+  const nodes: Node<CompactCardData>[] = allWindows
+    .filter((w) => positions[w.window_id])
+    .map((w) => {
+      const pos = positions[w.window_id];
+      const h = heights[w.window_id] ?? DEFAULT_NODE_HEIGHT;
+      const data: CompactCardData = {
+        slug,
+        sessionId: w.session_id,
+        label: w.label,
+        isRoot: w.kind === "root",
+        selected: w.session_id === selectedSessionId,
+        keyboardFocused:
+          w.window_id === keyboardFocusedNodeId &&
+          w.session_id !== selectedSessionId,
+        onOpenDetail,
+        onMeasure,
+        status: w.status === "yield" ? "yield" : w.status === "live" ? "live" : "done",
+        nodeId: w.window_id,
+        windowStart: w.window_start,
+        windowEnd: w.window_end,
+        isResumeInstance: w.kind === "resume",
+        spawnKind: w.kind === "subagent" ? "subagent" : w.kind === "resume" ? "call" : (w.kind === "call" ? "call" : null),
+        canvasChildren: (childrenByParent[w.window_id] ?? []).map((c) => ({
+          window_id: c.window_id,
+          session_id: c.session_id,
+        })),
+      };
+      return {
+        id: w.window_id,
+        type: "compact",
+        position: {
+          x: pos.x - COMPACT_CARD_WIDTH / 2,
+          y: pos.y - h / 2,
+        },
+        data,
+        draggable: false,
+      };
+    });
 
   return { nodes, edges };
 }

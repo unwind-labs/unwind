@@ -4,14 +4,20 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Header, HTTPException, Query, Response
 from pydantic import BaseModel
 
-from ..jsonl import collect_uuids
+import hashlib
+import json as _json
+from pathlib import Path
+
+from ..canvas_tree import build_canvas_tree
+from ..jsonl import collect_uuids, iter_lines
 from ..messages import annotate_spawns, base_uuid, read_messages
-from ..processes import session_status
+from ..processes import project_activity, session_status
 from ..registry import (
     callstack_for_slug,
+    canvas_tree_builder_for_slug,
     fork_detector_for_slug,
     index_for_slug,
     subagent_index_for_slug,
@@ -105,6 +111,18 @@ def list_sessions(
                 status = session_status(s.cwd or project_path, last_epoch)
         else:
             status = session_status(s.cwd or project_path, last_epoch)
+
+        # Process-detection ``live`` upgrade: if the JSONL's last record
+        # is an ``away_summary`` system message, Claude Code wrote the
+        # recap right before yielding control back to the user (e.g. an
+        # MFA prompt awaiting input). The process is alive but actually
+        # paused — surface that as ``yield`` so the canvas highlights
+        # the node. The away_summary signal is strong enough to override
+        # ``live`` regardless of how we arrived at it.
+        if status == "live":
+            jsonl = index.jsonl_path_for(s.session_id)
+            if jsonl is not None and _is_at_user_yield(jsonl):
+                status = "yield"
 
         rows.append(
             SessionRow(
@@ -252,37 +270,40 @@ def get_messages(
         for sid in (m.spawn_session_ids or [])
     }
     if ci.has_logs:
-        # Walk every report's task tree for the node whose session_id matches.
-        # Callstack writes one report per top-level invocation with nested
-        # children, so non-root sessions' spawns are buried in the root's
-        # report.
-        kids = ci.direct_children_of(session_id)
-        unanchored = [
-            k for k in kids if k.session_id and k.session_id not in anchored
-        ]
-        if unanchored:
+        # Walk every report's task tree to surface direct child
+        # invocations that aren't already anchored by an MCP tool_use in
+        # this session's JSONL. ``direct_invocations_of`` returns one
+        # TaskNode per invocation (NOT deduplicated by session_id) so
+        # that a parent which called the same child three times produces
+        # three SpawnCards, one per invocation, each with its own
+        # ``started_at`` and ``invoke_id``. The frontend buckets these
+        # into per-window child cards just like MCP-anchored spawns.
+        invocations = ci.direct_invocations_of(session_id)
+        for inv in invocations:
+            if not inv.session_id or inv.session_id in anchored:
+                continue
+            # An invocation is "running" only when it hasn't ended yet.
+            # ``yielded`` and ``complete`` both have an ``ended_at`` set
+            # in the report — the child returned control to the parent
+            # in either case, so the parent's call row should drop the
+            # in-progress dots and show a checkmark. Only invocations
+            # without an ``ended_at`` (or explicitly running with no
+            # end recorded yet) keep the running indicator.
+            status_lc = (inv.status or "").lower()
+            actually_running = inv.ended_at is None and status_lc in (
+                "running",
+                "in_progress",
+                "pending",
+                "",
+            )
             extra.append(
                 SpawnCard(
-                    invoke_id="",
-                    started_at=min(
-                        (k.started_at for k in unanchored if k.started_at),
-                        default=None,
-                    ),
-                    ended_at=max(
-                        (k.ended_at for k in unanchored if k.ended_at),
-                        default=None,
-                    ),
-                    status=(
-                        "running"
-                        if any(
-                            (k.status or "").lower()
-                            in ("running", "in_progress", "pending", "yielded")
-                            for k in unanchored
-                        )
-                        else "complete"
-                    ),
-                    children=[k.session_id for k in unanchored if k.session_id],
-                    tasks=[k.task for k in unanchored if k.task],
+                    invoke_id=inv.invoke_id or "",
+                    started_at=inv.started_at,
+                    ended_at=inv.ended_at,
+                    status="running" if actually_running else "complete",
+                    children=[inv.session_id],
+                    tasks=[inv.task] if inv.task else [],
                 )
             )
     else:
@@ -320,6 +341,92 @@ def get_messages(
         file_offset=page.file_offset,
         ancestors=[],
         extra_spawns=extra,
+    )
+
+
+class CanvasTreeResponse(BaseModel):
+    """The canvas window-tree rooted at one session.
+
+    ``root`` is a recursive WindowNode dict; ``all_windows`` is the
+    flat list (also recursive — but useful as an index for lookups
+    on the frontend without walking the tree).
+    """
+
+    root: dict
+    all_windows: list[dict]
+
+
+@router.get(
+    "/projects/{slug}/sessions/{session_id}/canvas",
+)
+def get_canvas_tree(
+    slug: str,
+    session_id: str,
+    if_none_match: Optional[str] = Header(default=None, alias="If-None-Match"),
+) -> Response:
+    """Return the canvas window-tree for a root session.
+
+    Computed once per request (cheap — scans are cached per project
+    in the CanvasTreeBuilder). Wraps in an ETag for HTTP-level
+    caching, so polling clients get a 304 when nothing's changed.
+    """
+    index = index_for_slug(slug)
+    if index.jsonl_path_for(session_id) is None and not any(
+        s.session_id == session_id for s in index.list_sessions()
+    ):
+        raise HTTPException(status_code=404, detail="session not found")
+
+    ci = callstack_for_slug(slug)
+    si = subagent_index_for_slug(slug)
+    builder = canvas_tree_builder_for_slug(slug)
+
+    project_path = (
+        str(index.paths.source_path) if index.paths.has_project_dir else None
+    )
+    claude_running = (
+        project_path is not None
+        and project_activity(project_path).claude_running
+    )
+    summaries = {s.session_id: s for s in index.list_sessions()}
+
+    def is_live(sid: str) -> bool:
+        # A session is "live" iff a claude process is up for the project AND
+        # this session's JSONL was touched recently. We reuse session_status
+        # which already encodes both signals.
+        s = summaries.get(sid)
+        last_epoch = s.last_timestamp.timestamp() if s and s.last_timestamp else None
+        cwd = (s.cwd if s else None) or project_path
+        return claude_running and session_status(cwd, last_epoch) == "live"
+
+    def title_for(sid: str) -> Optional[str]:
+        s = summaries.get(sid)
+        if s is None:
+            return None
+        return s.custom_title or s.title or None
+
+    root, all_windows = build_canvas_tree(
+        index.paths.project_dir,
+        session_id,
+        ci,
+        subagent_index=si,
+        builder=builder,
+        is_live_session=is_live,
+        title_for=title_for,
+    )
+    body = {
+        "root": root.to_dict(),
+        "all_windows": [w.to_dict() for w in all_windows],
+    }
+    serialized = _json.dumps(body, sort_keys=True, separators=(",", ":")).encode(
+        "utf-8"
+    )
+    etag = '"' + hashlib.sha1(serialized).hexdigest() + '"'
+    if if_none_match == etag:
+        return Response(status_code=304, headers={"ETag": etag})
+    return Response(
+        content=serialized,
+        media_type="application/json",
+        headers={"ETag": etag},
     )
 
 
@@ -386,6 +493,54 @@ def get_tree(slug: str, session_id: str) -> TreeResponse:
         children=[n.to_dict() for n in children],
         has_callstack_logs=ci.has_logs,
     )
+
+
+def _is_at_user_yield(jsonl: Path) -> bool:
+    """Whether ``jsonl``'s last record indicates Claude paused for input.
+
+    The actual yield signal is an ``assistant`` message containing a
+    ``{"op": "yield"}`` envelope inside its text — that's the message
+    where Claude paused to ask the user something. The session is
+    "currently yielded" iff the most recent assistant message carries
+    that envelope AND no user reply has arrived since (which would
+    mean the session has resumed).
+
+    Note: ``type: system / subtype: away_summary`` is NOT a yield —
+    it's the recap Claude writes when finishing work while the user
+    was away. Treating it as yield (the previous logic) caused
+    completed sessions to render as paused in the left pane.
+
+    Returns ``False`` on any error so the caller safely falls back
+    to the prior status.
+    """
+    try:
+        last_yield = False
+        for rec in iter_lines(jsonl):
+            t = rec.get("type")
+            if t == "assistant":
+                msg = rec.get("message")
+                text = ""
+                if isinstance(msg, dict):
+                    content = msg.get("content")
+                    if isinstance(content, str):
+                        text = content
+                    elif isinstance(content, list):
+                        parts = []
+                        for block in content:
+                            if (
+                                isinstance(block, dict)
+                                and block.get("type") == "text"
+                                and isinstance(block.get("text"), str)
+                            ):
+                                parts.append(block["text"])
+                        text = "\n".join(parts)
+                last_yield = '"op": "yield"' in text or '"op":"yield"' in text
+            elif t == "user":
+                # A user reply after a yield = resumed; clear the flag.
+                last_yield = False
+        return last_yield
+    except OSError:
+        return False
 
 
 def _subagent_nodes(slug: str, parent_session_id: str, depth: int):

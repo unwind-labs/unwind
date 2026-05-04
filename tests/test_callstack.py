@@ -146,6 +146,75 @@ def test_is_callstack_task_distinguishes_main_session_from_forks(tmp_path: Path)
     assert ci.is_callstack_task("UNRELATED") is False
 
 
+def test_direct_invocations_of_returns_one_per_report(tmp_path: Path):
+    """When the same parent → child edge appears in N separate reports
+    (e.g. the parent invoked the same child three times via callstack
+    Skill, producing three report.yaml files), ``direct_invocations_of``
+    must return N TaskNodes, sorted by ``started_at``. ``direct_children_of``
+    deduplicates the same edge to one entry — this method does not.
+    """
+    log = tmp_path / "log"
+    for i, ts in enumerate(
+        ["2026-05-03T19:55:42+00:00", "2026-05-03T21:09:00+00:00", "2026-05-03T21:09:40+00:00"]
+    ):
+        _write_report(
+            log,
+            f"20260503T19554{i}-r{i}",
+            {
+                "invoke_id": f"20260503T19554{i}-r{i}",
+                "parent_session": "MAIN",
+                "started_at": ts,
+                "ended_at": ts,
+                "status": "complete",
+                "tasks": [
+                    {
+                        "task": "/verify-mfa",
+                        "status": "complete",
+                        "depth": 1,
+                        "session_id": "MFA-SESSION",
+                        "children": [
+                            {
+                                "task": "/check-code-expiry",
+                                "status": "complete",
+                                "depth": 2,
+                                "session_id": "EXPIRY-SESSION",
+                            }
+                        ],
+                    }
+                ],
+            },
+        )
+    ci = CallstackIndex(log)
+
+    # MAIN's direct invocations: three TaskNodes for MFA-SESSION, one
+    # per report, in chronological order.
+    mfa_invs = ci.direct_invocations_of("MAIN")
+    assert [n.session_id for n in mfa_invs] == ["MFA-SESSION", "MFA-SESSION", "MFA-SESSION"]
+    assert [n.invoke_id for n in mfa_invs] == [
+        "20260503T195540-r0",
+        "20260503T195541-r1",
+        "20260503T195542-r2",
+    ]
+
+    # MFA-SESSION's direct invocations: three TaskNodes for EXPIRY-SESSION,
+    # one nested inside each report.
+    expiry_invs = ci.direct_invocations_of("MFA-SESSION")
+    assert [n.session_id for n in expiry_invs] == [
+        "EXPIRY-SESSION",
+        "EXPIRY-SESSION",
+        "EXPIRY-SESSION",
+    ]
+    # Each carries the invoke_id of its owning report.
+    assert {n.invoke_id for n in expiry_invs} == {
+        "20260503T195540-r0",
+        "20260503T195541-r1",
+        "20260503T195542-r2",
+    }
+
+    # Compared to direct_children_of, which deduplicates by session_id.
+    assert [n.session_id for n in ci.direct_children_of("MFA-SESSION")] == ["EXPIRY-SESSION"]
+
+
 def test_aggregate_status_returns_terminal_for_main_when_chain_complete(tmp_path: Path):
     """Sanity check that ``aggregate_status_for_session`` DOES return
     ``complete`` for a main session whose entire fork chain is done — this

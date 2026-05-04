@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Optional
 
 from .callstack import CallstackIndex
+from .canvas_tree import CanvasTreeBuilder
 from .fork_detect import ForkDetector
 from .projects import ProjectPaths, claude_projects_root, slug_for
 from .server_state import default_source_path
@@ -22,6 +23,7 @@ _indices: dict[str, SessionIndex] = {}
 _callstack: dict[str, CallstackIndex] = {}
 _fork_detectors: dict[str, ForkDetector] = {}
 _subagents: dict[str, SubagentIndex] = {}
+_canvas_builders: dict[str, CanvasTreeBuilder] = {}
 _slug_to_source: dict[str, Path] = {}
 
 
@@ -57,6 +59,7 @@ def forget_slug(slug: str) -> None:
         _callstack.pop(slug, None)
         _fork_detectors.pop(slug, None)
         _subagents.pop(slug, None)
+        _canvas_builders.pop(slug, None)
         _slug_to_source.pop(slug, None)
 
 
@@ -137,6 +140,21 @@ def fork_detector_for_slug(slug: str) -> ForkDetector:
     with _lock:
         _fork_detectors[slug] = fd
     return fd
+
+
+def canvas_tree_builder_for_slug(slug: str) -> CanvasTreeBuilder:
+    """Project-scoped canvas-tree builder. Caches per-session JSONL scans
+    so subsequent canvas requests for the same project reuse them."""
+    _auto_register_default()
+    with _lock:
+        existing = _canvas_builders.get(slug)
+        if existing is not None:
+            return existing
+    index = index_for_slug(slug)
+    builder = CanvasTreeBuilder(index.paths.project_dir)
+    with _lock:
+        _canvas_builders[slug] = builder
+    return builder
 
 
 def subagent_index_for_slug(slug: str) -> SubagentIndex:

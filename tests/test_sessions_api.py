@@ -141,6 +141,98 @@ def test_messages_does_not_surface_unmarked_forks(app_client):
     assert extra == [], f"expected no extra_spawn cards, got {extra}"
 
 
+def test_messages_extras_emit_one_card_per_callstack_invocation(app_client):
+    """When a parent calls the same child via callstack three times (three
+    ``report.yaml`` files), the messages endpoint must surface three
+    ``extra_spawns`` cards — one per invocation, each with its own
+    ``invoke_id`` and ``started_at`` — so the canvas can render a
+    distinct child node per invocation under each parent window.
+    """
+    import yaml
+
+    client, home, projects_mod, _ = app_client
+
+    real_cwd = home.parent / "work" / "callstack-proj"
+    real_cwd.mkdir(parents=True)
+    slug = projects_mod.slug_for(real_cwd)
+
+    main_sid = "11111111-aaaa-bbbb-cccc-111111111111"
+    parent_sid = "22222222-aaaa-bbbb-cccc-222222222222"
+    child_sid = "33333333-aaaa-bbbb-cccc-333333333333"
+
+    proj_dir = home / ".claude" / "projects" / slug
+    base = {
+        "uuid": "u-1",
+        "type": "user",
+        "timestamp": "2026-05-03T19:00:00.000Z",
+        "message": {"role": "user", "content": "hi"},
+        "cwd": str(real_cwd),
+    }
+    # parent_sid's JSONL has NO references to child_sid — the spawn
+    # happened via the callstack Skill, not an MCP tool_use, so it lives
+    # only in the report.yaml files.
+    _write_session(proj_dir, main_sid, [{**base, "sessionId": main_sid}])
+    _write_session(
+        proj_dir, parent_sid, [{**base, "sessionId": parent_sid, "uuid": "u-2"}]
+    )
+    _write_session(
+        proj_dir, child_sid, [{**base, "sessionId": child_sid, "uuid": "u-3"}]
+    )
+
+    # Three reports recording parent → child, at three different times.
+    log_root = real_cwd / ".claude" / "callstack" / "log"
+    timestamps = [
+        "2026-05-03T19:55:42+00:00",
+        "2026-05-03T21:09:00+00:00",
+        "2026-05-03T21:09:40+00:00",
+    ]
+    for i, ts in enumerate(timestamps):
+        invoke_id = f"20260503T19554{i}-r{i}"
+        d = log_root / invoke_id
+        d.mkdir(parents=True)
+        (d / "report.yaml").write_text(
+            yaml.safe_dump(
+                {
+                    "invoke_id": invoke_id,
+                    "parent_session": main_sid,
+                    "status": "complete",
+                    "started_at": ts,
+                    "ended_at": ts,
+                    "tasks": [
+                        {
+                            "task": "/verify-mfa",
+                            "status": "complete",
+                            "depth": 1,
+                            "session_id": parent_sid,
+                            "children": [
+                                {
+                                    "task": "/check-code-expiry",
+                                    "status": "complete",
+                                    "depth": 2,
+                                    "session_id": child_sid,
+                                }
+                            ],
+                        }
+                    ],
+                }
+            )
+        )
+
+    resp = client.get(f"/api/projects/{slug}/sessions/{parent_sid}/messages")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+
+    extras = body.get("extra_spawns", [])
+    assert len(extras) == 3, f"expected 3 extra_spawns, got {len(extras)}: {extras}"
+    # Each card has exactly one child = the same session_id.
+    assert all(card["children"] == [child_sid] for card in extras)
+    # Each card has its own invoke_id and started_at.
+    invoke_ids = {card["invoke_id"] for card in extras}
+    started = {card["started_at"] for card in extras}
+    assert len(invoke_ids) == 3, invoke_ids
+    assert len(started) == 3, started
+
+
 def test_main_session_with_completed_forks_uses_process_detection(
     app_client, monkeypatch: pytest.MonkeyPatch
 ):

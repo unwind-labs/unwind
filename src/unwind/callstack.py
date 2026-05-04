@@ -361,6 +361,46 @@ class CallstackIndex:
             if c in canonical
         ]
 
+    def direct_invocations_of(self, session_id: str) -> list["TaskNode"]:
+        """Every direct child invocation of ``session_id`` across all reports.
+
+        Unlike ``direct_children_of``, this does NOT deduplicate by
+        ``session_id``. If three separate reports each record
+        ``parent → child`` (e.g. the parent invoked the same child three
+        times via callstack), this returns three TaskNodes — one per
+        invocation — each carrying its own ``invoke_id`` and
+        ``started_at``. The canvas uses the timestamps to bucket
+        invocations into per-window child cards (mirroring how
+        MCP-anchored spawns are partitioned via ``windowsForParent``).
+
+        Returned in chronological order by ``started_at`` (TaskNodes
+        without a timestamp sort to the front).
+        """
+        epoch = datetime.fromtimestamp(0, timezone.utc)
+        out: list[TaskNode] = []
+
+        for rep in self.all_reports():
+            # Top-level tasks: the report's own ``parent_session`` IS the
+            # parent of every task in ``rep.tasks``.
+            if rep.parent_session == session_id:
+                out.extend(rep.tasks)
+            # Nested children: find any TaskNode in this report whose
+            # session_id == ``session_id`` and harvest its direct
+            # children. Multiple matches in the same report are unusual
+            # but handled (each contributes its children).
+
+            def visit(node: TaskNode) -> None:
+                if node.session_id == session_id:
+                    out.extend(node.children)
+                for c in node.children:
+                    visit(c)
+
+            for t in rep.tasks:
+                visit(t)
+
+        out.sort(key=lambda n: n.started_at or epoch)
+        return out
+
     def all_child_session_ids(self) -> set[str]:
         """Every session_id that appears as a child task in any report."""
         out: set[str] = set()

@@ -31,32 +31,17 @@ export function estimateCardHeight(rows: Row[]): number {
   return Math.max(h, HEADER_HEIGHT + PADDING_Y * 2);
 }
 
-export type ResolvedSpawn = {
-  handleId: string;
-  childId: string;
-  label: string;
-  spawnKind: "call" | "subagent";
-  done: boolean;
-  parentToolUseTs: string | null;
-  isResume: boolean;
-  userReply?: string;
-};
-
 export type CompactCardData = {
   slug: string;
   /** Underlying Claude session id — what ``useMessages`` is keyed by, and
    *  what ``onOpenDetail`` opens. Multiple cards on the canvas can share
    *  the same ``sessionId`` (one per ``invoke`` / ``invoke_resume``); they
-   *  differ by their unique ReactFlow node id. */
+   *  differ by their unique ReactFlow node id (= ``window_id``). */
   sessionId: string;
   /** Display label — task name from parent if known, else session id prefix. */
   label: string;
   isRoot: boolean;
   selected: boolean;
-  /** Called whenever this card discovers spawn rows so the canvas can add child nodes.
-   *  ``cardNodeId`` is the parent card's ReactFlow node id (NOT its sessionId
-   *  — instances of the same session have distinct node ids). */
-  onSpawnsResolved: (cardNodeId: string, spawns: ResolvedSpawn[]) => void;
   /** Called when the user wants the full session view. */
   onOpenDetail: (sessionId: string) => void;
   /** Called when the rendered card height changes (for re-layout). Keyed by
@@ -67,10 +52,18 @@ export type CompactCardData = {
    *  with the right pane focused). Distinct from `selected`, which means
    *  the detail overlay is currently open for this session. */
   keyboardFocused?: boolean;
-  /** Unique ReactFlow node id (handleId for child instances; sessionId for
-   *  the root). Forwarded back through ``onSpawnsResolved`` and ``onMeasure``
-   *  so the canvas keys its state per-instance. */
+  /** Unique ReactFlow node id (= the backend's ``window_id`` — usually
+   *  ``<session_id>#<window_index>``, except the root which is just the
+   *  session id). Forwarded through ``onMeasure`` so the canvas keys
+   *  measurements per-instance. */
   nodeId: string;
+  /** Direct children of this card in the canvas tree, in the order
+   *  they should be matched against the in-card spawn rows. Each spawn
+   *  row picks up the next-unused child whose ``session_id`` matches
+   *  the row's ``childId`` and renders its source Handle with that
+   *  child's ``window_id`` — so the canvas's edges can anchor to a
+   *  specific row instead of stacking on a default handle. */
+  canvasChildren: { window_id: string; session_id: string }[];
   /** Inclusive ISO start of this instance's activity window. ``null`` for
    *  the root and for the first instance with no parent timestamp. */
   windowStart: string | null;
@@ -101,14 +94,26 @@ export function CompactCardNode({ data }: { data: CompactCardData }) {
       data.windowStart,
       data.windowEnd,
     );
-    // ``extra_spawns`` (callstack-Skill spawns without a parent tool_use)
-    // have no per-window anchor — pin them to the latest window so we
-    // don't fan them out across every resume.
-    const extras = isLatest ? messages.extra_spawns ?? [] : [];
+    // ``extra_spawns`` are callstack-Skill spawns without an MCP
+    // tool_use anchor. The API emits one entry per invocation with its
+    // own ``started_at``, so we partition them across this card's
+    // window the same way the message stream is partitioned. Entries
+    // with no ``started_at`` (legacy aggregate cards, fork-fallback)
+    // pin to the latest window so they don't fan out across resumes.
+    const startMs = data.windowStart ? Date.parse(data.windowStart) : -Infinity;
+    const endMs = data.windowEnd ? Date.parse(data.windowEnd) : Infinity;
+    const extras = (messages.extra_spawns ?? []).filter((s) => {
+      if (!s.started_at) return isLatest;
+      const t = Date.parse(s.started_at);
+      return t >= startMs && t < endMs;
+    });
     return { messages: filtered, extras };
   }, [messages, data.windowStart, data.windowEnd, isLatest]);
+  // Pass the FULL unwindowed message stream as the third arg so spawn
+  // rows fired in this window still flip to "done" when their
+  // tool_result lands in a later window (after a yield/resume).
   const rows: Row[] = windowed
-    ? deriveRows(windowed.messages, windowed.extras)
+    ? deriveRows(windowed.messages, windowed.extras, messages?.messages ?? windowed.messages)
     : [];
   const cardRef = useRef<HTMLDivElement | null>(null);
 
@@ -145,35 +150,6 @@ export function CompactCardNode({ data }: { data: CompactCardData }) {
           ? "live"
           : "done";
 
-  // When spawn rows are discovered, tell the canvas so it can add child cards.
-  useEffect(() => {
-    if (!windowed) return;
-    const spawns: ResolvedSpawn[] = [];
-    for (const r of rows) {
-      if (r.kind !== "spawn") continue;
-      // Skip rows whose child hasn't resolved yet — no card to draw.
-      if (!r.childId) continue;
-      // Defensive: a spawn whose handleId matches our own nodeId would
-      // create a self-loop in spawnsByParent and infinite-recurse the
-      // layout walk. This shouldn't happen (handleIds are derived from
-      // tool_use_ids unique to each session), but inherited-tool-use
-      // edge cases can produce it; drop them rather than crashing.
-      if (r.handleId === data.nodeId) continue;
-      spawns.push({
-        handleId: r.handleId,
-        childId: r.childId,
-        label: r.title,
-        spawnKind: r.spawnKind,
-        done: r.done,
-        parentToolUseTs: r.parentToolUseTs,
-        isResume: r.isResume,
-        userReply: r.userReply,
-      });
-    }
-    data.onSpawnsResolved(data.nodeId, spawns);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [windowed]);
-
   // Report measured height up so dagre can re-layout.
   useEffect(() => {
     const el = cardRef.current;
@@ -202,6 +178,21 @@ export function CompactCardNode({ data }: { data: CompactCardData }) {
     !data.selected && data.keyboardFocused ? cursorColor : undefined;
   const outlineColor =
     !data.selected && data.keyboardFocused ? cursorColor : undefined;
+
+  // Pop-style mapping from this card's spawn rows to the canvas tree's
+  // child windows: each row claims the next-unused child whose
+  // ``session_id`` matches the row's ``childId``. Built once per render
+  // here and consumed inside the rows.map() loop below.
+  const rowChildAssign = useMemo(() => {
+    // Map<sessionId, queue of window_ids>
+    const m = new Map<string, string[]>();
+    for (const c of data.canvasChildren ?? []) {
+      const list = m.get(c.session_id) ?? [];
+      list.push(c.window_id);
+      m.set(c.session_id, list);
+    }
+    return m;
+  }, [data.canvasChildren]);
 
   // Kind drives the rail tint and the rotated label. Resume wins over
   // spawnKind so users immediately see "this is a continuation" in the
@@ -256,6 +247,20 @@ export function CompactCardNode({ data }: { data: CompactCardData }) {
         ...(outlineColor ? { outlineColor } : null),
       }}
     >
+      {/* Default source handle on the right edge, vertically centered
+          with the header. ReactFlow anchors any edge that doesn't
+          specify a sourceHandle to the FIRST source-type handle on the
+          node — so this MUST come before the per-spawn-row source
+          handles below, otherwise all default-source edges would all
+          stack on the first row. */}
+      <Handle
+        type="source"
+        position={Position.Right}
+        id="out"
+        isConnectable={false}
+        className="!h-2 !w-2 !border-0 !bg-transparent"
+        style={{ top: HEADER_HEIGHT / 2 }}
+      />
       {/* Incoming edge target on the left side, vertically centered with the header. */}
       <Handle
         type="target"
@@ -271,7 +276,7 @@ export function CompactCardNode({ data }: { data: CompactCardData }) {
           (sky=call, violet=subagent, amber=resume, neutral=root). */}
       <div
         className={cn(
-          "flex shrink-0 flex-col items-center gap-2 border-r border-border/60 bg-gradient-to-b py-4",
+          "flex shrink-0 flex-col items-center gap-2 border-r border-border/60 bg-gradient-to-b pb-4 pt-3",
           railTintClass,
         )}
         style={{ width: RAIL_WIDTH }}
@@ -308,13 +313,30 @@ export function CompactCardNode({ data }: { data: CompactCardData }) {
               loading…
             </li>
           )}
-          {rows.map((r, i) =>
-            r.kind === "activity" ? (
-              <ActivityRow key={i} count={r.count} spanSeconds={r.spanSeconds} />
-            ) : (
-              <SpawnRowDisplay key={i} row={r} />
-            ),
-          )}
+          {rows.map((r, i) => {
+            if (r.kind === "activity") {
+              return (
+                <ActivityRow
+                  key={i}
+                  count={r.count}
+                  spanSeconds={r.spanSeconds}
+                />
+              );
+            }
+            // Anchor the row's source Handle to its corresponding canvas
+            // child window — pop the next-unused canvas child whose
+            // ``session_id`` matches this row's ``childId``. Without this
+            // override, every default-source edge would stack on the
+            // first row.
+            const handleOverride = takeMatchingChild(rowChildAssign, r.childId);
+            return (
+              <SpawnRowDisplay
+                key={i}
+                row={r}
+                handleIdOverride={handleOverride}
+              />
+            );
+          })}
           {messages && rows.length === 0 && (
             <li className="px-2 py-1 text-[10px] italic text-muted-foreground">
               (empty)
@@ -331,16 +353,16 @@ export function CompactCardNode({ data }: { data: CompactCardData }) {
 function RailStatus({ status }: { status: "live" | "yield" | "done" }) {
   if (status === "live") {
     return (
-      <span className="relative inline-flex h-2 w-2">
-        <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-60" />
-        <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-400" />
+      <span className="relative inline-flex h-3 w-3">
+        <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-70" />
+        <span className="relative inline-flex h-3 w-3 rounded-full bg-emerald-400" />
       </span>
     );
   }
   if (status === "yield") {
-    return <span className="inline-block h-2 w-2 rounded-full bg-amber-400" />;
+    return <span className="inline-block h-3 w-3 rounded-full bg-amber-400" />;
   }
-  return <CheckCircle2 className="h-3 w-3 text-emerald-500/60" />;
+  return <CheckCircle2 className="h-5 w-5 text-emerald-400" />;
 }
 
 function ActivityRow({ count, spanSeconds }: { count: number; spanSeconds: number }) {
@@ -363,10 +385,26 @@ function ActivityRow({ count, spanSeconds }: { count: number; spanSeconds: numbe
   );
 }
 
+/** Pop the next-unused canvas child window whose ``session_id`` matches
+ *  ``childId``. Returns ``undefined`` (so the Handle keeps its derive-rows
+ *  fallback id) when the canvas tree doesn't know about this spawn yet,
+ *  or when the row's child is empty. */
+function takeMatchingChild(
+  pool: Map<string, string[]>,
+  childId: string | null | undefined,
+): string | undefined {
+  if (!childId) return undefined;
+  const queue = pool.get(childId);
+  if (!queue || queue.length === 0) return undefined;
+  return queue.shift();
+}
+
 function SpawnRowDisplay({
   row,
+  handleIdOverride,
 }: {
   row: Extract<Row, { kind: "spawn" }>;
+  handleIdOverride?: string;
 }) {
   const isCall = row.spawnKind === "call";
   const accentText = isCall ? "text-sky-300" : "text-violet-300";
@@ -405,14 +443,14 @@ function SpawnRowDisplay({
         {row.title}
       </span>
       {row.done ? (
-        <CheckCircle2 className="h-3 w-3 text-emerald-500/70" />
+        <CheckCircle2 className="h-4 w-4 text-emerald-400" />
       ) : (
         <DotPulse />
       )}
       <Handle
         type="source"
         position={Position.Right}
-        id={row.handleId}
+        id={handleIdOverride ?? row.handleId}
         isConnectable={false}
         className="!h-2 !w-2 !border-0 !bg-muted-foreground/60"
       />
@@ -422,10 +460,10 @@ function SpawnRowDisplay({
 
 function DotPulse() {
   return (
-    <span className="inline-flex items-center gap-0.5">
-      <span className="dot-pulse-1 h-1 w-1 rounded-full bg-amber-400" />
-      <span className="dot-pulse-2 h-1 w-1 rounded-full bg-amber-400" />
-      <span className="dot-pulse-3 h-1 w-1 rounded-full bg-amber-400" />
+    <span className="inline-flex items-center gap-1">
+      <span className="dot-pulse-1 h-1.5 w-1.5 rounded-full bg-amber-400" />
+      <span className="dot-pulse-2 h-1.5 w-1.5 rounded-full bg-amber-400" />
+      <span className="dot-pulse-3 h-1.5 w-1.5 rounded-full bg-amber-400" />
     </span>
   );
 }

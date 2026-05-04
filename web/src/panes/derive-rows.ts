@@ -32,7 +32,21 @@ export type Row =
       userReply?: string;
     };
 
-export function deriveRows(messages: Message[], extras: ExtraSpawn[] = []): Row[] {
+/** Build the rows for one window of a session.
+ *
+ *  ``messages`` is the window-filtered slice (drives row order, activity
+ *  buckets, and which spawn rows appear). ``allMessages`` is the full
+ *  unwindowed stream — used only for the ``done`` lookup so that a
+ *  tool_use that fired in window 1 picks up its tool_result even when
+ *  the result lands in window 2 (after a yield/resume). Defaults to
+ *  ``messages`` so callers that don't care about cross-window done
+ *  resolution keep working.
+ */
+export function deriveRows(
+  messages: Message[],
+  extras: ExtraSpawn[] = [],
+  allMessages: Message[] = messages,
+): Row[] {
   const out: Row[] = [];
   let bucketCount = 0;
   let bucketStart: string | null = null;
@@ -105,17 +119,18 @@ export function deriveRows(messages: Message[], extras: ExtraSpawn[] = []): Row[
   flushBucket();
 
   // Re-check spawn ``done``: a tool_use's done state depends on whether a
-  // tool_result for it exists ANYWHERE in the message list. The above loop
-  // sees results in order, so for tool_uses that came BEFORE their result
-  // we'd have missed it. Re-walk and patch — but only when we don't have a
-  // per-child status from the callstack report (that's authoritative).
+  // tool_result for it exists ANYWHERE in the session. We walk the FULL
+  // message stream (``allMessages``) here, not the windowed slice, so a
+  // tool_use that fired in window 1 still flips to done if its
+  // tool_result lands in window 2 after a yield/resume. The
+  // per-child callstack report status (``spawn_done``) wins when present.
   const allResultIds = new Set(
-    messages
+    allMessages
       .filter((m) => m.role === "tool_result" && m.tool_result_for)
       .map((m) => m.tool_result_for!),
   );
   const perChildByHandle: Record<string, boolean | null | undefined> = {};
-  for (const m of messages) {
+  for (const m of allMessages) {
     if (m.role !== "tool_use" || !m.spawn_kind) continue;
     if (!m.spawn_done) continue;
     const tooluse = m.tool_use_id ?? m.uuid;
@@ -144,21 +159,26 @@ export function deriveRows(messages: Message[], extras: ExtraSpawn[] = []): Row[
   // happened relative to messages.
   //
   // ``handleId`` MUST be globally unique: ReactFlow keys nodes by handleId,
-  // so two extras-anchored children that happen to share an ``(ei, i)``
-  // pair across different parents would collapse into one node. Use the
-  // child's session id (a UUID) as the disambiguator — guaranteed unique
-  // and stable across renders.
+  // so two spawns sharing a handleId would collapse into one canvas node.
+  // When the API knows the source ``invoke_id`` (one report.yaml per
+  // invocation), prefer ``extra-{invoke_id}-{childId}`` — that's unique
+  // both across parents AND across multiple invocations of the same
+  // child by the same parent. Falls back to the legacy childId-only
+  // form for aggregate cards (no invoke_id).
   extras.forEach((s, ei) => {
     s.children.forEach((childId, i) => {
       const callDone = s.status !== "running" && s.status !== "in_progress";
       const taskName = s.tasks[i] ?? `child ${i + 1}`;
+      const stem = s.invoke_id
+        ? `${s.invoke_id}-${childId || i}`
+        : (childId || `${ei}-${i}`);
       out.push({
         kind: "spawn",
         spawnKind: "call",
         title: taskName || childId.slice(0, 8) || "(call)",
         childId,
         done: callDone && childId !== "",
-        handleId: `extra-${childId || `${ei}-${i}`}`,
+        handleId: `extra-${stem}`,
         parentToolUseTs: s.started_at ?? null,
         isResume: false,
       });

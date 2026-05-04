@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import type {
+  CanvasTreeResponse,
   DefaultProject,
   MessagesResponse,
   ProjectSummary,
@@ -54,6 +55,26 @@ export function useSessions(
         `/api/projects/${slug}/sessions?include_forks=${includeForks}`,
       ),
     refetchInterval: 30_000,
+  });
+}
+
+/** The canvas window-tree for a root session. Computed server-side
+ *  from session JSONLs + callstack reports in one deterministic pass —
+ *  the frontend just renders the result. */
+export function useCanvasTree(
+  slug: string | null | undefined,
+  rootSessionId: string | null | undefined,
+) {
+  return useQuery({
+    enabled: !!slug && !!rootSessionId,
+    queryKey: ["canvas-tree", slug, rootSessionId],
+    queryFn: () =>
+      j<CanvasTreeResponse>(
+        `/api/projects/${slug}/sessions/${rootSessionId}/canvas`,
+      ),
+    // Same cadence as messages — the WS will normally invalidate
+    // sooner; this is a safety net.
+    refetchInterval: 3_000,
   });
 }
 
