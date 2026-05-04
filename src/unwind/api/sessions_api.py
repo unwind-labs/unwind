@@ -68,6 +68,10 @@ def list_sessions(
         # is written.
         fork_ids |= fork_detector_for_slug(slug).fork_session_ids()
 
+    # Compute the project's active session ONCE per request so each
+    # row's status check doesn't re-walk the session list.
+    active_session_id = _active_session_for_project(index, project_path)
+
     rows: list[SessionRow] = []
     for s in index.list_sessions():
         if s.session_id in fork_ids:
@@ -84,45 +88,29 @@ def list_sessions(
 
         # Status priority — designed so the user's *main* session (the one
         # they're driving in the terminal) shows live, while completed forks
-        # still show done even if a claude process is alive for the project:
+        # still show done even if a claude process is alive for the project.
         #
-        # 1. callstack ``yielded`` → ``yield``: a child is paused waiting
-        #    for the user; trust this regardless of process state.
-        # 2. callstack ``running``/``in_progress`` → ``live``.
-        # 3. callstack ``complete``/``failed``/``error``:
-        #     a. If this session IS a callstack task (a fork) → ``done``.
-        #        callstack tracked its lifecycle precisely; trust the
-        #        terminal verdict even with a live project process.
-        #     b. Otherwise (main session — only ever a ``parent_session``) →
-        #        defer to process detection. The descendants finished but
-        #        the user's claude process is still active.
-        # 4. No callstack entry at all → defer to process detection.
-        status = "done"
-        cs_status = ci.aggregate_status_for_session(s.session_id) if ci.has_logs else None
-        if cs_status is not None:
-            cs_norm = cs_status.lower()
-            if cs_norm == "yielded":
-                status = "yield"
-            elif cs_norm in ("running", "in_progress"):
-                status = "live"
-            elif ci.is_callstack_task(s.session_id):
-                status = "done"
-            else:
-                status = session_status(s.cwd or project_path, last_epoch)
-        else:
-            status = session_status(s.cwd or project_path, last_epoch)
-
-        # Process-detection ``live`` upgrade: if the JSONL's last record
-        # is an ``away_summary`` system message, Claude Code wrote the
-        # recap right before yielding control back to the user (e.g. an
-        # MFA prompt awaiting input). The process is alive but actually
-        # paused — surface that as ``yield`` so the canvas highlights
-        # the node. The away_summary signal is strong enough to override
-        # ``live`` regardless of how we arrived at it.
-        if status == "live":
-            jsonl = index.jsonl_path_for(s.session_id)
-            if jsonl is not None and _is_at_user_yield(jsonl):
-                status = "yield"
+        # 1. Forks (sessions that ARE a callstack task) trust the
+        #    callstack verdict directly — yielded → yield, running →
+        #    live, terminal → done — even when no claude process is
+        #    alive for the project (the fork ran and finished; its
+        #    lifecycle is fully captured).
+        # 2. Main sessions (only ever a ``parent_session``) gate the
+        #    ``yield`` upgrade on the session being live (process up +
+        #    recent activity). A historical main session whose
+        #    descendants happened to yield somewhere in the chain
+        #    isn't "currently waiting for the user" — it's finished
+        #    and resumable. Without this gate the entire backlog of
+        #    historical sessions lights up amber.
+        status = _compute_session_status(
+            index,
+            ci,
+            s.session_id,
+            s.cwd,
+            last_epoch,
+            project_path,
+            active_session_id=active_session_id,
+        )
 
         rows.append(
             SessionRow(
@@ -150,6 +138,16 @@ def get_session(slug: str, session_id: str) -> SessionRow:
     summary = index.get_session(session_id)
     if summary is None:
         raise HTTPException(status_code=404, detail="session not found")
+    project_path = (
+        str(index.paths.source_path) if index.paths.has_project_dir else None
+    )
+    ci = callstack_for_slug(slug)
+    last_epoch = (
+        summary.last_timestamp.timestamp() if summary.last_timestamp else None
+    )
+    status = _compute_session_status(
+        index, ci, summary.session_id, summary.cwd, last_epoch, project_path
+    )
     return SessionRow(
         session_id=summary.session_id,
         title=summary.title,
@@ -158,7 +156,85 @@ def get_session(slug: str, session_id: str) -> SessionRow:
         message_count=summary.message_count,
         cwd=summary.cwd,
         git_branch=summary.git_branch,
+        status=status,
     )
+
+
+def _active_session_for_project(
+    index, project_path: Optional[str]
+) -> Optional[str]:
+    """The most-recently-touched session in the project, OR ``None``
+    when no claude process is running OR no session has fresh activity.
+
+    Sessions in the same project all share one claude process; we
+    can't tell from process state alone WHICH session is being driven.
+    The most-recent activity heuristic picks the right one in
+    practice — claude writes to the active session continuously, so
+    any other session's last_timestamp will lag.
+    """
+    import time as _time
+
+    if project_path is None:
+        return None
+    if not project_activity(project_path).claude_running:
+        return None
+    sessions = index.list_sessions()
+    candidates = [s for s in sessions if s.last_timestamp is not None]
+    if not candidates:
+        return None
+    candidates.sort(key=lambda s: s.last_timestamp, reverse=True)
+    most_recent = candidates[0]
+    if (_time.time() - most_recent.last_timestamp.timestamp()) >= 300:
+        return None
+    return most_recent.session_id
+
+
+def _compute_session_status(
+    index,
+    ci,
+    session_id: str,
+    cwd: Optional[str],
+    last_epoch: Optional[float],
+    project_path: Optional[str],
+    *,
+    active_session_id: Optional[str] = None,
+) -> str:
+    """Single-source-of-truth for session status. See ``list_sessions`` for
+    the full semantics; reused by ``get_session`` so the two endpoints
+    can't drift.
+
+    ``active_session_id`` (the project's most-recently-touched session,
+    or ``None``) is computed once per request. When omitted we look it
+    up here — fine for one-off calls but inefficient for batch use.
+    """
+    del cwd  # currently unused; reserved for future per-session checks
+    cs_status = ci.aggregate_status_for_session(session_id) if ci.has_logs else None
+    cs_norm = cs_status.lower() if cs_status else None
+    is_fork = ci.has_logs and ci.is_callstack_task(session_id)
+
+    if is_fork:
+        if cs_norm == "yielded":
+            return "yield"
+        if cs_norm in ("running", "in_progress"):
+            return "live"
+        return "done"
+
+    # Non-fork "main" session: alive only if it's THE active session
+    # for this project. ``last_epoch`` is the timestamp from the last
+    # record, not file mtime — but that's not enough to disambiguate
+    # which of multiple recent sessions is being driven, so we defer
+    # to ``active_session_id``.
+    del last_epoch
+    if active_session_id is None:
+        active_session_id = _active_session_for_project(index, project_path)
+    if session_id != active_session_id:
+        return "done"
+    if cs_norm == "yielded":
+        return "yield"
+    jsonl = index.jsonl_path_for(session_id)
+    if jsonl is not None and _is_at_user_yield(jsonl):
+        return "yield"
+    return "live"
 
 
 class AncestorRef(BaseModel):
@@ -389,14 +465,15 @@ def get_canvas_tree(
     )
     summaries = {s.session_id: s for s in index.list_sessions()}
 
+    # Compute the project's active session once per request; the
+    # canvas tree only renders one tree per call but build_canvas_tree
+    # may invoke ``is_live`` for many sessions (subagents, callstack
+    # children) — none should flip live just because their JSONL was
+    # touched recently when they aren't the active main session.
+    active_session_id = _active_session_for_project(index, project_path)
+
     def is_live(sid: str) -> bool:
-        # A session is "live" iff a claude process is up for the project AND
-        # this session's JSONL was touched recently. We reuse session_status
-        # which already encodes both signals.
-        s = summaries.get(sid)
-        last_epoch = s.last_timestamp.timestamp() if s and s.last_timestamp else None
-        cwd = (s.cwd if s else None) or project_path
-        return claude_running and session_status(cwd, last_epoch) == "live"
+        return sid == active_session_id
 
     def title_for(sid: str) -> Optional[str]:
         s = summaries.get(sid)
@@ -498,23 +575,25 @@ def get_tree(slug: str, session_id: str) -> TreeResponse:
 def _is_at_user_yield(jsonl: Path) -> bool:
     """Whether ``jsonl``'s last record indicates Claude paused for input.
 
-    The actual yield signal is an ``assistant`` message containing a
-    ``{"op": "yield"}`` envelope inside its text — that's the message
-    where Claude paused to ask the user something. The session is
-    "currently yielded" iff the most recent assistant message carries
-    that envelope AND no user reply has arrived since (which would
-    mean the session has resumed).
+    Two yield signals — both produce True:
+
+    1. An ``assistant`` message containing the ``{"op": "yield"}``
+       envelope (the callstack-runtime yield format), with no user
+       reply since.
+    2. A ``system / stop_hook_summary`` record (Claude finished its
+       turn) with no user reply since — this catches interactive
+       pauses where Claude asked the user a question and is now idle
+       awaiting input.
 
     Note: ``type: system / subtype: away_summary`` is NOT a yield —
     it's the recap Claude writes when finishing work while the user
-    was away. Treating it as yield (the previous logic) caused
-    completed sessions to render as paused in the left pane.
+    was away.
 
     Returns ``False`` on any error so the caller safely falls back
     to the prior status.
     """
     try:
-        last_yield = False
+        at_prompt = False
         for rec in iter_lines(jsonl):
             t = rec.get("type")
             if t == "assistant":
@@ -534,11 +613,35 @@ def _is_at_user_yield(jsonl: Path) -> bool:
                             ):
                                 parts.append(block["text"])
                         text = "\n".join(parts)
-                last_yield = '"op": "yield"' in text or '"op":"yield"' in text
+                if '"op": "yield"' in text or '"op":"yield"' in text:
+                    at_prompt = True
+                else:
+                    # Claude is still talking — clear any prior
+                    # at-prompt state from earlier in the session.
+                    at_prompt = False
+            elif t == "system" and rec.get("subtype") == "stop_hook_summary":
+                # Turn ended; waiting for user input.
+                at_prompt = True
             elif t == "user":
-                # A user reply after a yield = resumed; clear the flag.
-                last_yield = False
-        return last_yield
+                # Tool results are recorded as type=user with
+                # content blocks of type=tool_result; those don't
+                # clear the prompt state (Claude is processing the
+                # tool response, still mid-turn).
+                msg = rec.get("message")
+                is_tool_result = False
+                if isinstance(msg, dict):
+                    content = msg.get("content")
+                    if isinstance(content, list):
+                        for block in content:
+                            if (
+                                isinstance(block, dict)
+                                and block.get("type") == "tool_result"
+                            ):
+                                is_tool_result = True
+                                break
+                if not is_tool_result:
+                    at_prompt = False
+        return at_prompt
     except OSError:
         return False
 

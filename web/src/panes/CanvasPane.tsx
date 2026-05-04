@@ -277,6 +277,41 @@ function CanvasInner({
   }, [edges, nodes]);
 
   const reactFlow = useReactFlow();
+
+  // Pan + zoom helper, extracted so both the keydown handler and the
+  // auto-focus effect (below) can reuse it.
+  const FOCUS_ZOOM = 1;
+  const focusAndPan = useCallback(
+    (nextId: string) => {
+      setCanvasFocusedNodeId(nextId);
+      const node = nodes.find((n) => n.id === nextId);
+      if (!node) return;
+      const w = COMPACT_CARD_WIDTH;
+      const h = measuredHeights[nextId] ?? DEFAULT_NODE_HEIGHT;
+      const cx = node.position.x + w / 2;
+      const cy = node.position.y + h / 2;
+      const currentZoom = reactFlow.getZoom();
+      const targetZoom = currentZoom < FOCUS_ZOOM ? FOCUS_ZOOM : currentZoom;
+      programmaticMoveRef.current = true;
+      reactFlow.setCenter(cx, cy, { zoom: targetZoom, duration: 200 });
+      window.setTimeout(() => {
+        programmaticMoveRef.current = false;
+      }, 250);
+    },
+    [nodes, measuredHeights, reactFlow],
+  );
+
+  // When the canvas pane becomes focused (e.g., user pressed → from
+  // the sessions pane), default the keyboard cursor to the root node
+  // — pan/zoom to it. Without this, ↑/↓/←/→ from a fresh canvas have
+  // no anchor and feel unresponsive.
+  useEffect(() => {
+    if (focusedPane !== "thread") return;
+    if (canvasFocusedNodeId !== null) return;
+    if (orderedNodeIds.length === 0) return;
+    focusAndPan(orderedNodeIds[0]);
+  }, [focusedPane, canvasFocusedNodeId, orderedNodeIds, focusAndPan]);
+
   const navStateRef = useRef({
     focusedPane,
     detailOpen: !!detailSessionId,
@@ -341,27 +376,6 @@ function CanvasInner({
         }
         return;
       }
-
-      const FOCUS_ZOOM = 1;
-      const focusAndPan = (nextId: string) => {
-        setCanvasFocusedNodeId(nextId);
-        const node = s.nodes.find((n) => n.id === nextId);
-        if (!node) return;
-        const w = COMPACT_CARD_WIDTH;
-        const h = measuredHeights[nextId] ?? DEFAULT_NODE_HEIGHT;
-        const cx = node.position.x + w / 2;
-        const cy = node.position.y + h / 2;
-        const currentZoom = reactFlow.getZoom();
-        const targetZoom = currentZoom < FOCUS_ZOOM ? FOCUS_ZOOM : currentZoom;
-        programmaticMoveRef.current = true;
-        reactFlow.setCenter(cx, cy, {
-          zoom: targetZoom,
-          duration: 200,
-        });
-        window.setTimeout(() => {
-          programmaticMoveRef.current = false;
-        }, 250);
-      };
 
       if (isLeft || isRight) {
         e.preventDefault();

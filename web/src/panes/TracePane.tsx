@@ -115,7 +115,7 @@ export function TracePane({
             trace
           </div>
           <div className="flex items-center gap-2 text-xs text-muted-foreground">
-            <span>{shortId(sessionId)}</span>
+            <span className="font-mono">{sessionId}</span>
             {windowed ? (
               <Badge
                 variant="outline"

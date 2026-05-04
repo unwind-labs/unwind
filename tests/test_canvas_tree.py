@@ -380,11 +380,11 @@ def test_yielded_status_propagates(tmp_path: Path):
     assert root.children[0].status == "yield"
 
 
-def test_completed_invocation_status_is_done_not_running(tmp_path: Path):
-    """An invocation that has ``ended_at`` should be ``done`` regardless
-    of whether the report's terminal status is ``yielded`` or ``complete``
-    when there's a LATER invocation of the same child (the user has moved
-    on)."""
+def test_only_the_last_window_can_be_yield(tmp_path: Path):
+    """Only the FINAL window of a session can be "currently waiting".
+    Earlier windows whose task yielded got resumed (that's how a later
+    window exists), so they're past and show ``done`` even if the
+    invocation's task status was ``yielded``."""
     proj = tmp_path / "proj"
     _write_session(proj, "MAIN", [_user("MAIN", "2026-05-04T10:00:00Z")])
     _write_session(proj, "C", [_user("C", "2026-05-04T10:00:01Z")])
@@ -416,14 +416,43 @@ def test_completed_invocation_status_is_done_not_running(tmp_path: Path):
     ci = CallstackIndex(log)
     root, _ = build_canvas_tree(proj, "MAIN", ci)
     assert len(root.children) == 2
-    # Earlier window is done (a later resume happened).
+    # First window: yielded then resumed → done (the yield was answered).
     assert root.children[0].status == "done"
+    # Second window: completed terminally → done.
     assert root.children[1].status == "done"
 
 
-def test_yield_in_root_sets_root_status_to_yield(tmp_path: Path):
-    """A root session that ends with a yield envelope should have
-    status=yield (waiting for user input)."""
+def test_last_window_with_yielded_status_shows_yield(tmp_path: Path):
+    """The final window of a child whose task is currently ``yielded``
+    (no later resume yet) shows ``yield``."""
+    proj = tmp_path / "proj"
+    _write_session(proj, "MAIN", [_user("MAIN", "2026-05-04T10:00:00Z")])
+    _write_session(proj, "C", [_user("C", "2026-05-04T10:00:01Z")])
+    log = tmp_path / "log"
+    _write_report(
+        log,
+        "i0",
+        parent_sid="MAIN",
+        started_at="2026-05-04T10:00:01+00:00",
+        ended_at="2026-05-04T10:00:05+00:00",
+        status="yielded",
+        tasks=[
+            {"task": "/x", "status": "yielded", "depth": 1, "session_id": "C"}
+        ],
+    )
+    ci = CallstackIndex(log)
+    root, _ = build_canvas_tree(proj, "MAIN", ci)
+    assert len(root.children) == 1
+    assert root.children[0].status == "yield"
+
+
+def test_yield_in_live_root_sets_root_status_to_yield(tmp_path: Path):
+    """An ALIVE root session that ends with a yield envelope shows
+    ``yield``. (When the process has exited or activity is stale, the
+    same content is treated as ``done`` — see the ``stale`` test
+    below — since virtually every historical session sits at a
+    ``stop_hook_summary`` and we'd otherwise drown the canvas in
+    amber.)"""
     proj = tmp_path / "proj"
     sid = "MAIN"
     _write_session(
@@ -438,8 +467,32 @@ def test_yield_in_root_sets_root_status_to_yield(tmp_path: Path):
     log = tmp_path / "log"
     log.mkdir()
     ci = CallstackIndex(log)
-    root, _ = build_canvas_tree(proj, sid, ci)
+    root, _ = build_canvas_tree(
+        proj, sid, ci, is_live_session=lambda _sid: True
+    )
     assert root.status == "yield"
+
+
+def test_stale_root_with_yield_envelope_is_done_not_yield(tmp_path: Path):
+    """Same yield-envelope content, but the session is stale (process
+    not running, no recent activity). Status downgrades to ``done``
+    so historical sessions don't all light up amber."""
+    proj = tmp_path / "proj"
+    sid = "MAIN"
+    _write_session(
+        proj,
+        sid,
+        [
+            _user(sid, "2026-05-04T10:00:00Z"),
+            _assistant(sid, "2026-05-04T10:00:05Z"),
+            _yield_message(sid, "2026-05-04T10:00:10Z", "Approve?"),
+        ],
+    )
+    log = tmp_path / "log"
+    log.mkdir()
+    ci = CallstackIndex(log)
+    root, _ = build_canvas_tree(proj, sid, ci, is_live_session=lambda _sid: False)
+    assert root.status == "done"
 
 
 # --- builder caching ----------------------------------------------------

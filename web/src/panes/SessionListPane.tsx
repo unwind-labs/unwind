@@ -66,8 +66,10 @@ export function SessionListPane() {
 
   const focusedPane = useUi((s) => s.focusedPane);
 
-  // Keyboard: ↑/↓ + j/k to move between sessions when this pane is focused;
-  // `/` always focuses search.
+  // Keyboard: ↑/↓, j/k, AND Tab/Shift+Tab all move selection when this
+  // pane is focused. (Tab/Shift+Tab is intercepted so the focus state
+  // stays unified with the selection — there's no separate "tabbable
+  // cursor" cycling through items.) `/` always focuses search.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;
@@ -84,12 +86,16 @@ export function SessionListPane() {
       if (typing) return;
       const isArrow = e.key === "ArrowUp" || e.key === "ArrowDown";
       const isVim = e.key === "j" || e.key === "k";
-      if (!isArrow && !isVim) return;
-      if (isArrow && focusedPane !== "sessions") return;
+      const isTab = e.key === "Tab";
+      if (!isArrow && !isVim && !isTab) return;
+      if (focusedPane !== "sessions") return;
       if (!filtered.length) return;
       e.preventDefault();
       const idx = filtered.findIndex((s) => s.session_id === selectedId);
-      const goDown = e.key === "ArrowDown" || e.key === "j";
+      const goDown =
+        e.key === "ArrowDown" ||
+        e.key === "j" ||
+        (e.key === "Tab" && !e.shiftKey);
       const next = goDown
         ? Math.min(filtered.length - 1, idx < 0 ? 0 : idx + 1)
         : Math.max(0, idx < 0 ? 0 : idx - 1);
@@ -163,15 +169,15 @@ function SessionItem({
   const startedAgo = formatTimeAgo(session.first_timestamp);
   const updatedAgo = formatTimeAgo(session.last_timestamp);
   const sameTimes = session.first_timestamp === session.last_timestamp;
-  const isYield = session.status === "yield";
 
-  // Scroll the selected row into view (only if not already visible) so
-  // keyboard navigation, URL-deep-links, and long lists all keep the
-  // current item on screen.
+  // Scroll the selected row into view, AND move keyboard focus to it.
+  // Selection IS the focus state — there's no separate "tabbable
+  // cursor" cycling through unselected items.
   const btnRef = useRef<HTMLButtonElement | null>(null);
   useEffect(() => {
     if (!selected) return;
     btnRef.current?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    btnRef.current?.focus({ preventScroll: true });
   }, [selected]);
 
   return (
@@ -179,19 +185,25 @@ function SessionItem({
       <button
         ref={btnRef}
         type="button"
+        // Only the selected row is tabbable — unselected rows have
+        // ``tabIndex=-1`` so Tab/Shift+Tab won't cycle through them.
+        // The pane-level keydown handler intercepts Tab/Shift+Tab and
+        // moves selection (which moves focus, since they're unified).
+        tabIndex={selected ? 0 : -1}
         onClick={onSelect}
         className={cn(
           // Flat list row: background-only hover/selection treatment so
           // the list reads as one continuous surface, not a stack of
           // boxes. A 2px accent bar on the left edge marks the selected
-          // row without thickening the row's footprint.
+          // row without thickening the row's footprint. Yield is
+          // signaled solely by the StatusDot — no row-level wash.
           "relative flex w-full flex-col gap-1 px-4 py-2 text-left transition-colors",
+          // Suppress the browser's default focus outline — selection
+          // (the left-edge bar + bg) is the focus indicator.
+          "outline-none focus:outline-none focus-visible:outline-none",
           "before:pointer-events-none before:absolute before:inset-y-1 before:left-0 before:w-[2px] before:rounded-r before:bg-transparent before:transition-colors",
           "hover:bg-foreground/[0.04]",
           selected && "bg-foreground/[0.07] before:bg-primary",
-          isYield &&
-            "bg-amber-500/25 hover:bg-amber-500/30 before:bg-amber-500",
-          isYield && selected && "bg-amber-500/40 hover:bg-amber-500/40",
         )}
       >
         <div className="flex items-center gap-2">

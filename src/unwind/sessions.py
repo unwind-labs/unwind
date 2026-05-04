@@ -35,7 +35,10 @@ class SessionIndex:
         return self._paths
 
     def list_sessions(self) -> list[SessionSummary]:
-        """Return every session for this project, sorted by start time (newest first)."""
+        """Return every session for this project, sorted by last activity
+        (newest first). ``last_timestamp`` reflects ongoing work — a
+        session that's been actively used today should outrank one
+        that started earlier today but has been idle for hours."""
         if not self._paths.project_dir.is_dir():
             return []
         results: list[SessionSummary] = []
@@ -43,8 +46,9 @@ class SessionIndex:
             summary = self._get_summary(jsonl)
             if summary is not None:
                 results.append(summary)
+        epoch = datetime.fromtimestamp(0, timezone.utc)
         results.sort(
-            key=lambda s: s.first_timestamp or datetime.fromtimestamp(0, timezone.utc),
+            key=lambda s: s.last_timestamp or s.first_timestamp or epoch,
             reverse=True,
         )
         return results

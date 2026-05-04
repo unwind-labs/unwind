@@ -399,20 +399,25 @@ def annotate_spawns(
 def _done_from_status(status: Optional[str]) -> Optional[bool]:
     """Map a callstack task status into the spawn-row done flag.
 
-    Returns True for terminal-success states, False for in-flight states,
-    None when unknown — the UI falls back to the parent's tool_result for
-    None entries.
+    From the PARENT's perspective, a CALL row is "done" the moment the
+    child returned control — including when the child yielded for user
+    input. The yield is a return; the parent's row should drop the
+    in-progress dots once that happens. (The child card will still
+    show its own ``YIELD`` rail label so the user knows the chain is
+    paused; we just don't want the parent's CALL row pulsing
+    indefinitely.)
+
+    Returns True for terminal states, False for genuinely in-flight
+    states, None when unknown (the UI falls back to the parent's
+    tool_result presence).
     """
     if not status:
         return None
     s = status.lower()
-    if s in ("complete",):
+    if s in ("complete", "yielded", "error", "failed"):
         return True
-    if s in ("running", "in_progress", "pending", "yielded"):
+    if s in ("running", "in_progress", "pending"):
         return False
-    # ``error``/``failed`` count as terminal so the row stops pulsing.
-    if s in ("error", "failed"):
-        return True
     return None
 
 

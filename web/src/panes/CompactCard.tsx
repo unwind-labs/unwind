@@ -6,6 +6,8 @@ import {
   Activity,
   CheckCircle2,
   ChevronRight,
+  CornerDownLeft,
+  Loader2,
 } from "lucide-react";
 import { useMessages } from "@/api/client";
 import { cn, shortId } from "@/lib/utils";
@@ -140,15 +142,12 @@ export function CompactCardNode({ data }: { data: CompactCardData }) {
   //      mtime fallback). If "yield" or "live", trust it.
   //   3. Otherwise, infer from spawn rows: any unfinished call → live.
   //   4. Otherwise → done.
-  const selfStatus: "live" | "yield" | "done" = !isLatest
-    ? "done"
-    : data.status === "yield"
-      ? "yield"
-      : data.status === "live"
-        ? "live"
-        : windowed && rows.some((r) => r.kind === "spawn" && !r.done)
-          ? "live"
-          : "done";
+  // Trust the backend's status verbatim — the canvas tree builder
+  // already has the authoritative view (yield iff this window's task
+  // status was ``yielded``; done otherwise). Earlier logic forced
+  // ``done`` for any non-latest window, which masked yields on
+  // historically-paused-then-resumed slices.
+  const selfStatus: "live" | "yield" | "done" = data.status;
 
   // Report measured height up so dagre can re-layout.
   useEffect(() => {
@@ -286,7 +285,11 @@ export function CompactCardNode({ data }: { data: CompactCardData }) {
           className="text-[8.5px] font-bold uppercase tracking-[0.32em] text-foreground/70"
           style={{ writingMode: "vertical-rl", transform: "rotate(180deg)" }}
         >
-          {kind}
+          {selfStatus === "yield"
+            ? "waiting"
+            : kind === "resume"
+              ? "continued"
+              : kind}
         </span>
       </div>
       <div className="min-w-0 flex-1">
@@ -342,9 +345,51 @@ export function CompactCardNode({ data }: { data: CompactCardData }) {
               (empty)
             </li>
           )}
+          {/* Terminator row: every window that ended its work closes
+              with a single line indicating HOW it ended — either it
+              returned to its parent (COMPLETE) or paused waiting for
+              user input (YIELD). No source handle, no status badge —
+              the icon + label IS the indicator.
+
+              Exception: the root card never shows COMPLETE. A "done"
+              main session usually means "stale, resumable via
+              ``claude --resume``", not "finished returning to a
+              caller" — the COMPLETE label would be misleading. The
+              root still shows the YIELD terminator when it's
+              actively waiting for user input. */}
+          {selfStatus === "done" && !data.isRoot && (
+            <TerminatorRow kind="complete" />
+          )}
+          {selfStatus === "yield" && <TerminatorRow kind="yield" />}
         </ul>
       </div>
     </div>
+  );
+}
+
+function TerminatorRow({ kind }: { kind: "complete" | "yield" }) {
+  const isYield = kind === "yield";
+  const accentText = isYield ? "text-amber-300" : "text-emerald-400";
+  const label = isYield ? "waiting for user" : "complete";
+  return (
+    <li
+      className="flex items-center gap-2 rounded px-2 text-[11px] font-mono"
+      style={{ height: ACTIVITY_HEIGHT - 4 }}
+    >
+      {isYield ? (
+        <Loader2 className={cn("h-3.5 w-3.5 animate-spin", accentText)} />
+      ) : (
+        <CornerDownLeft className={cn("h-3.5 w-3.5", accentText)} />
+      )}
+      <span
+        className={cn(
+          "text-[9px] font-bold uppercase tracking-[0.18em]",
+          accentText,
+        )}
+      >
+        {label}
+      </span>
+    </li>
   );
 }
 
@@ -407,9 +452,29 @@ function SpawnRowDisplay({
   handleIdOverride?: string;
 }) {
   const isCall = row.spawnKind === "call";
-  const accentText = isCall ? "text-sky-300" : "text-violet-300";
-  const accentBg = isCall ? "bg-sky-950/40" : "bg-violet-950/40";
-  const accentBorder = isCall ? "border-sky-500/50" : "border-violet-500/50";
+  // Resume rows ("CONTINUED") get the amber treatment — same yellow
+  // we use for yielded windows, since each resume line was waiting on
+  // the user before it ran.
+  const accentText = row.isResume
+    ? "text-amber-300"
+    : isCall
+      ? "text-sky-300"
+      : "text-violet-300";
+  const accentBg = row.isResume
+    ? "bg-amber-500/5"
+    : isCall
+      ? "bg-sky-950/40"
+      : "bg-violet-950/40";
+  const accentBorder = row.isResume
+    ? "border-amber-500/50"
+    : isCall
+      ? "border-sky-500/50"
+      : "border-violet-500/50";
+  const badgeBorderText = row.isResume
+    ? "border-amber-500/40 text-amber-300"
+    : isCall
+      ? "border-sky-500/40 text-sky-300"
+      : "border-violet-500/40 text-violet-300";
 
   return (
     <li
@@ -427,14 +492,9 @@ function SpawnRowDisplay({
       )}
       <Badge
         variant="outline"
-        className={cn(
-          "border text-[9px] uppercase",
-          isCall
-            ? "border-sky-500/40 text-sky-300"
-            : "border-violet-500/40 text-violet-300",
-        )}
+        className={cn("border text-[9px] uppercase", badgeBorderText)}
       >
-        {isCall ? "call" : "subagent"}
+        {row.isResume ? "continued" : isCall ? "call" : "subagent"}
       </Badge>
       <span
         className="flex-1 truncate font-mono text-[11px] text-foreground"

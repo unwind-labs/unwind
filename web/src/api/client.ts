@@ -39,10 +39,11 @@ export function useProjects() {
   });
 }
 
-/**
- * With the WebSocket feeding incremental updates we rely on occasional polling
- * only as a safety net (e.g. if the WS drops and hasn't reconnected yet).
- */
+/** Polls every 3s so the left pane's status dot stays in lockstep
+ *  with the canvas main-node status (which polls at the same rate via
+ *  ``useCanvasTree``). Without this matching cadence the left pane
+ *  could lag the canvas by up to 30 seconds — visually jarring when
+ *  the user just resumed a session. */
 export function useSessions(
   slug: string | null | undefined,
   includeForks: boolean = false,
@@ -54,7 +55,7 @@ export function useSessions(
       j<SessionRow[]>(
         `/api/projects/${slug}/sessions?include_forks=${includeForks}`,
       ),
-    refetchInterval: 30_000,
+    refetchInterval: 3_000,
   });
 }
 

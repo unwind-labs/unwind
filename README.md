@@ -12,8 +12,6 @@ Run `unwind serve` in any project folder; a browser tab opens showing every Clau
 pip install unwind-labs
 ```
 
-(PyPI distribution name is `unwind-labs`; the installed command is `unwind` and the Python import is `unwind`.)
-
 ## Web UI
 
 ```bash
@@ -47,8 +45,6 @@ unwind reads:
 
 - `~/.claude/projects/<slug>/*.jsonl` — Claude Code's own session logs
 - `<project>/.claude/callstack/log/` — `/call` invocation reports written by the [callstack](https://github.com/unwind-labs/callstack) plugin
-
-…and renders them in a live-updating web UI (or prints them via the CLI). Loopback only (`127.0.0.1`).
 
 ## License
 [MIT](LICENSE)

@@ -67,6 +67,13 @@ class SessionScan:
     start_ts: Optional[datetime] = None
     end_ts: Optional[datetime] = None
     yields: list[datetime] = field(default_factory=list)
+    # True if the session's most recent meaningful event is Claude
+    # finishing a turn (``system/stop_hook_summary``) with no user
+    # reply since — i.e. Claude is currently waiting for input. This
+    # is the "interactive yield" signal that callstack-yield envelopes
+    # don't catch (and that ``away_summary`` recaps incorrectly
+    # implied).
+    at_user_prompt: bool = False
 
 
 @dataclass
@@ -121,7 +128,9 @@ class WindowNode:
 
 
 def scan_session(path: Path) -> SessionScan:
-    """Walk a session's JSONL once; collect start, end, and yield timestamps."""
+    """Walk a session's JSONL once; collect start, end, yield timestamps,
+    and the at-user-prompt state (Claude finished its turn, awaiting reply).
+    """
     try:
         st = path.stat()
     except OSError:
@@ -132,17 +141,48 @@ def scan_session(path: Path) -> SessionScan:
         mtime=st.st_mtime,
         size=st.st_size,
     )
+    at_user_prompt = False
     for rec in iter_lines(path):
         ts = _parse_ts(rec.get("timestamp"))
         if ts is not None:
             if scan.start_ts is None:
                 scan.start_ts = ts
             scan.end_ts = ts
-        if rec.get("type") == "assistant":
+        rtype = rec.get("type")
+        if rtype == "assistant":
             text = _extract_assistant_text(rec)
             if text and _YIELD_RE.search(text) and ts is not None:
                 scan.yields.append(ts)
+            # Claude is producing output → not at user prompt.
+            at_user_prompt = False
+        elif rtype == "user":
+            # Tool results are recorded as ``type: user`` with content
+            # blocks of type ``tool_result``; those don't reset the
+            # waiting state (Claude is processing the tool response).
+            # Only an actual user reply (text content) does.
+            if not _is_tool_result_record(rec):
+                at_user_prompt = False
+        elif rtype == "system":
+            sub = rec.get("subtype")
+            if sub == "stop_hook_summary":
+                # Claude wrapped up its turn. Until a user record
+                # arrives, the session is waiting for input.
+                at_user_prompt = True
+    scan.at_user_prompt = at_user_prompt
     return scan
+
+
+def _is_tool_result_record(rec: dict[str, Any]) -> bool:
+    msg = rec.get("message")
+    if not isinstance(msg, dict):
+        return False
+    content = msg.get("content")
+    if not isinstance(content, list):
+        return False
+    for block in content:
+        if isinstance(block, dict) and block.get("type") == "tool_result":
+            return True
+    return False
 
 
 def _extract_assistant_text(rec: dict[str, Any]) -> Optional[str]:
@@ -276,13 +316,23 @@ def _compute_windows(
     """
     if is_root or not invocations:
         end = None if is_live else scan.end_ts
-        if is_live:
-            status = "live"
-        elif scan.yields and (
-            scan.end_ts is None or scan.yields[-1] >= scan.end_ts
+        # ``yield`` is gated on ``is_live`` (process up + recent
+        # activity). Sessions that ended their turn long ago are
+        # technically "resumable via ``claude --resume``", but the
+        # vast majority of historical sessions live in that state —
+        # surfacing them all as amber yield would drown out the
+        # genuinely-waiting ones. Treat them as ``done`` and let the
+        # user resume them out-of-band.
+        if is_live and (
+            scan.at_user_prompt
+            or (
+                scan.yields
+                and (scan.end_ts is None or scan.yields[-1] >= scan.end_ts)
+            )
         ):
-            # Last meaningful event was a yield — session is paused.
             status = "yield"
+        elif is_live:
+            status = "live"
         else:
             status = "done"
         return [
@@ -318,21 +368,21 @@ def _compute_windows(
         else:
             w_end = inv.ended_at
 
-        # Status:
-        #   * Any non-final window: ``done`` (it ended when the next
-        #     resume started).
-        #   * Final window: derived from the invocation's own status,
-        #     with a process-detection upgrade for ``live``.
-        if k < n - 1:
+        # Status: only the FINAL window of a session can be "currently
+        # waiting" — earlier windows whose task yielded got resumed
+        # (that's how a later window came to exist) and are now in the
+        # past, so they show as ``done``. The final window's status
+        # mirrors the invocation's task status verbatim.
+        inv_status = (inv.status or "").lower()
+        is_last = k == n - 1
+        if not is_last:
             status = "done"
+        elif inv_status == "yielded":
+            status = "yield"
+        elif inv_status in ("running", "in_progress", "pending"):
+            status = "live" if is_live else "done"
         else:
-            inv_status = (inv.status or "").lower()
-            if inv_status == "yielded":
-                status = "yield"
-            elif inv_status in ("running", "in_progress", "pending"):
-                status = "live" if is_live else "done"
-            else:
-                status = "done"
+            status = "done"
 
         out.append(
             WindowNode(
