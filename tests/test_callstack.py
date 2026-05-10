@@ -60,6 +60,66 @@ def test_build_subtree_nests_children_recursively(tmp_path: Path):
     assert grand.task == "/task-b"
 
 
+def test_build_subtree_accepts_new_call_kind(tmp_path: Path):
+    """The runtime now emits `kind: "call"` / `kind: "call_resume"` in
+    report.yaml (replacing legacy `invoke`/`invoke_parallel`/`invoke_resume`).
+    Old reports stay readable via the legacy strings; new ones must work
+    with the new vocabulary."""
+    log = tmp_path / "log"
+    _write_report(
+        log,
+        "20260201T000000-root",
+        {
+            "invoke_id": "20260201T000000-root",
+            "kind": "call",
+            "parent_session": "ROOT",
+            "started_at": "2026-02-01T00:00:00+00:00",
+            "ended_at": "2026-02-01T00:00:30+00:00",
+            "status": "complete",
+            "tasks": [
+                {
+                    "id": "a",
+                    "task": "/task-a",
+                    "status": "complete",
+                    "depth": 1,
+                    "session_id": "CHILD-A",
+                    "duration_seconds": 5.0,
+                    "summary": "did a",
+                }
+            ],
+        },
+    )
+    _write_report(
+        log,
+        "20260201T000010-resume",
+        {
+            "invoke_id": "20260201T000010-resume",
+            "kind": "call_resume",
+            "parent_session": "ROOT",
+            "started_at": "2026-02-01T00:00:10+00:00",
+            "ended_at": "2026-02-01T00:00:15+00:00",
+            "status": "complete",
+            "tasks": [
+                {
+                    "id": "a2",
+                    "task": "/task-a-resumed",
+                    "status": "complete",
+                    "depth": 1,
+                    "session_id": "CHILD-A",
+                    "duration_seconds": 1.5,
+                    "summary": "resumed a",
+                }
+            ],
+        },
+    )
+    ci = CallstackIndex(log)
+    assert ci.has_logs
+    subtree = ci.build_subtree("ROOT")
+    # Both invocations target CHILD-A; CallstackIndex should surface them.
+    sessions = {n.session_id for n in subtree}
+    assert "CHILD-A" in sessions
+
+
 def test_independent_later_invocations_are_merged(tmp_path: Path):
     """CHILD-A spawned its own invocation later; should attach under CHILD-A."""
     log = tmp_path / "log"

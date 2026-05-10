@@ -38,9 +38,13 @@ from .jsonl import iter_lines
 # correlation).
 CALLSTACK_TOOL_NAMES = frozenset(
     {
+        # Legacy names — kept so old sessions still match. Current runtime
+        # emits the unprefixed forms below.
         "mcp__plugin_callstack_call__invoke",
         "mcp__plugin_callstack_call__invoke_parallel",
         "mcp__plugin_callstack_call__invoke_resume",
+        "mcp__plugin_callstack_call__call",
+        "mcp__plugin_callstack_call__resume",
     }
 )
 
@@ -86,7 +90,7 @@ class Invocation:
     ended_at: Optional[datetime]
     label: str
     status: str  # complete | yielded | running | failed
-    kind: str    # ``invoke`` | ``invoke_resume`` (from the report)
+    kind: str    # ``call``/``invoke`` (legacy) | ``call_resume``/``invoke_resume`` (legacy)
     invoke_id: str
 
 

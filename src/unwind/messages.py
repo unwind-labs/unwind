@@ -112,9 +112,13 @@ def base_uuid(message_uuid: str) -> str:
 
 # Tool names whose use spawns child sessions/agents we want to drill into.
 CALLSTACK_TOOL_NAMES = {
+    # Legacy names (kept so historical sessions still resolve their spawn
+    # edges). Active runtime emits the unprefixed names below.
     "mcp__plugin_callstack_call__invoke",
     "mcp__plugin_callstack_call__invoke_parallel",
     "mcp__plugin_callstack_call__invoke_resume",
+    "mcp__plugin_callstack_call__call",
+    "mcp__plugin_callstack_call__resume",
 }
 SUBAGENT_TOOL_NAMES = {"Agent", "Task"}
 
