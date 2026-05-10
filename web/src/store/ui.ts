@@ -19,6 +19,12 @@ interface UiState {
    *  ``detailWindow`` records the slice's ``[start, end)`` so the trace
    *  shows only that range. ``null`` = show the full session. */
   detailWindow: { start: string | null; end: string | null } | null;
+  /** Transient signal: when the user enters the canvas pane via
+   *  keyboard (←/→), the canvas auto-focuses the root node. Mouse
+   *  clicks must NOT trigger this auto-focus — otherwise a click on a
+   *  specific node loses to the auto-focus race. The flag is consumed
+   *  and cleared by the canvas's auto-focus effect. */
+  canvasEnterIntent: "keyboard" | null;
   setSlug: (slug: string | null) => void;
   selectRootSession: (id: string | null) => void;
   selectThreadSession: (id: string | null) => void;
@@ -33,6 +39,8 @@ interface UiState {
   closeDetail: () => void;
   focusPane: (p: PaneKey) => void;
   rotateFocus: (dir: 1 | -1) => void;
+  enterCanvasViaKeyboard: () => void;
+  clearCanvasEnterIntent: () => void;
 }
 
 const PANE_ORDER: PaneKey[] = ["sessions", "thread"];
@@ -47,6 +55,7 @@ export const useUi = create<UiState>((set, get) => ({
   callsOnly: false,
   detailSessionId: null,
   detailWindow: null,
+  canvasEnterIntent: null,
   focusedPane: "sessions",
   setSlug: (slug) =>
     set({
@@ -81,6 +90,17 @@ export const useUi = create<UiState>((set, get) => ({
     const i = PANE_ORDER.indexOf(cur);
     const next = Math.max(0, Math.min(PANE_ORDER.length - 1, i + dir));
     if (next === i) return;
-    set({ focusedPane: PANE_ORDER[next] });
+    const nextPane = PANE_ORDER[next];
+    set({
+      focusedPane: nextPane,
+      // Signal to the canvas auto-focus effect that this transition came
+      // from a keyboard rotation — clicks (which call ``focusPane``
+      // directly) leave the intent ``null`` so the click handler runs
+      // unopposed.
+      canvasEnterIntent: nextPane === "thread" ? "keyboard" : get().canvasEnterIntent,
+    });
   },
+  enterCanvasViaKeyboard: () =>
+    set({ focusedPane: "thread", canvasEnterIntent: "keyboard" }),
+  clearCanvasEnterIntent: () => set({ canvasEnterIntent: null }),
 }));

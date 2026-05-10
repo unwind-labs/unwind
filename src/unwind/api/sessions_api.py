@@ -20,6 +20,7 @@ from ..registry import (
     canvas_tree_builder_for_slug,
     fork_detector_for_slug,
     index_for_slug,
+    spawn_resolver_for_slug,
     subagent_index_for_slug,
 )
 from ..subagents import SUBAGENT_PREFIX
@@ -278,10 +279,8 @@ def get_messages(
     include_meta: bool = Query(False),
 ) -> MessagesResponse:
     ci = callstack_for_slug(slug)
-
     si = subagent_index_for_slug(slug)
-
-    fd = fork_detector_for_slug(slug)
+    resolver = spawn_resolver_for_slug(slug)
 
     # Subagent traces resolve through a separate index.
     if session_id.startswith(SUBAGENT_PREFIX):
@@ -293,8 +292,7 @@ def get_messages(
             page.messages,
             slug_callstack=ci,
             current_session_id=session_id,
-            subagent_index=si,
-            fork_detector=fd,
+            spawn_resolver=resolver,
         )
         return MessagesResponse(
             session_id=session_id,
@@ -310,12 +308,14 @@ def get_messages(
         raise HTTPException(status_code=404, detail="session not found")
 
     page = read_messages(jsonl, include_meta=include_meta)
+    # Anchor spawns to tool_uses in one pass — the resolver handles
+    # callstack reports + fork detector + subagent index uniformly.
+    spawns = resolver.anchor_to_messages(session_id, page.messages)
     annotate_spawns(
         page.messages,
         slug_callstack=ci,
         current_session_id=session_id,
-        subagent_index=si,
-        fork_detector=fd,
+        spawn_resolver=resolver,
     )
 
     # Fork delta: when this session has callstack ancestors, the JSONL begins
@@ -334,81 +334,28 @@ def get_messages(
                 if base_uuid(m.uuid) not in ancestor_uuids
             ]
 
-    # Surface callstack invocations whose parent_session is this session but
-    # which don't have a matching tool_use in the JSONL (the common case for
-    # all non-root callstack children — they spawn via JSON envelope, not via
-    # an MCP tool call).
+    # Surface spawns that don't have a tool_use anchor in this JSONL —
+    # the resolver already knows which spawns lack ``parent_tool_use_id``.
+    # One SpawnCard per unanchored Spawn (the frontend buckets them into
+    # per-window child cards using ``started_at``).
     extra: list[SpawnCard] = []
-    anchored = {
-        sid
-        for m in page.messages
-        if m.spawn_kind == "call"
-        for sid in (m.spawn_session_ids or [])
-    }
-    if ci.has_logs:
-        # Walk every report's task tree to surface direct child
-        # invocations that aren't already anchored by an MCP tool_use in
-        # this session's JSONL. ``direct_invocations_of`` returns one
-        # TaskNode per invocation (NOT deduplicated by session_id) so
-        # that a parent which called the same child three times produces
-        # three SpawnCards, one per invocation, each with its own
-        # ``started_at`` and ``invoke_id``. The frontend buckets these
-        # into per-window child cards just like MCP-anchored spawns.
-        invocations = ci.direct_invocations_of(session_id)
-        for inv in invocations:
-            if not inv.session_id or inv.session_id in anchored:
-                continue
-            # An invocation is "running" only when it hasn't ended yet.
-            # ``yielded`` and ``complete`` both have an ``ended_at`` set
-            # in the report — the child returned control to the parent
-            # in either case, so the parent's call row should drop the
-            # in-progress dots and show a checkmark. Only invocations
-            # without an ``ended_at`` (or explicitly running with no
-            # end recorded yet) keep the running indicator.
-            status_lc = (inv.status or "").lower()
-            actually_running = inv.ended_at is None and status_lc in (
-                "running",
-                "in_progress",
-                "pending",
-                "",
+    for s in spawns:
+        if s.parent_tool_use_id or s.kind != "call":
+            continue
+        status_lc = (s.status or "").lower()
+        actually_running = s.ended_at is None and status_lc in (
+            "running", "in_progress", "pending", "",
+        )
+        extra.append(
+            SpawnCard(
+                invoke_id=s.invoke_id or "",
+                started_at=s.started_at,
+                ended_at=s.ended_at,
+                status="running" if actually_running else "complete",
+                children=[s.child_session_id],
+                tasks=[s.label] if s.label else [],
             )
-            extra.append(
-                SpawnCard(
-                    invoke_id=inv.invoke_id or "",
-                    started_at=inv.started_at,
-                    ended_at=inv.ended_at,
-                    status="running" if actually_running else "complete",
-                    children=[inv.session_id],
-                    tasks=[inv.task] if inv.task else [],
-                )
-            )
-    else:
-        # No ``.claude/callstack/log/`` for this project — but the fork
-        # detector still classifies sibling JSONLs that share this session's
-        # head uuid as forks (e.g. ``deep-rewrite`` runs that spawn
-        # ``claude --fork-session`` subprocesses without going through
-        # callstack's MCP tool). Surface them so the canvas can render the
-        # tree we know is there.
-        fork_sids = [s for s in fd.children_of(session_id) if s not in anchored]
-        if fork_sids:
-            tasks: list[str] = []
-            for fsid in fork_sids:
-                # Best-effort label: the divergent text the fork started with
-                # (for callstack forks this is "/task-x"; otherwise the first
-                # user message).
-                fd.find_session_by_divergence_text(session_id, "")  # warm cache
-                text = fd.divergence_text_for(fsid) or ""
-                tasks.append(text.strip() or fsid[:8])
-            extra.append(
-                SpawnCard(
-                    invoke_id="",
-                    started_at=None,
-                    ended_at=None,
-                    status="complete",
-                    children=fork_sids,
-                    tasks=tasks,
-                )
-            )
+        )
 
     return MessagesResponse(
         session_id=session_id,
@@ -452,9 +399,8 @@ def get_canvas_tree(
     ):
         raise HTTPException(status_code=404, detail="session not found")
 
-    ci = callstack_for_slug(slug)
-    si = subagent_index_for_slug(slug)
     builder = canvas_tree_builder_for_slug(slug)
+    resolver = spawn_resolver_for_slug(slug)
 
     project_path = (
         str(index.paths.source_path) if index.paths.has_project_dir else None
@@ -484,8 +430,7 @@ def get_canvas_tree(
     root, all_windows = build_canvas_tree(
         index.paths.project_dir,
         session_id,
-        ci,
-        subagent_index=si,
+        spawn_resolver=resolver,
         builder=builder,
         is_live_session=is_live,
         title_for=title_for,

@@ -214,6 +214,13 @@ function CanvasInner({
     onOpenDetail,
   ]);
 
+  // Forward declare focusAndPan so treeToReactFlow can reference it; we
+  // assign the real implementation below (it depends on `nodes`).
+  const focusAndPanRef = useRef<((id: string) => void) | null>(null);
+  const handleFocusChild = useCallback((windowId: string) => {
+    focusAndPanRef.current?.(windowId);
+  }, []);
+
   // Build ReactFlow nodes + edges from the tree.
   const { nodes, edges } = useMemo(() => {
     if (!canvasTree) return { nodes: [], edges: [] };
@@ -225,6 +232,7 @@ function CanvasInner({
       selectedSessionId: detailSessionId,
       keyboardFocusedNodeId: canvasFocusedNodeId,
       onOpenDetail,
+      onFocusChild: handleFocusChild,
       onMeasure: handleMeasure,
     });
   }, [
@@ -234,6 +242,7 @@ function CanvasInner({
     detailSessionId,
     canvasFocusedNodeId,
     onOpenDetail,
+    handleFocusChild,
     handleMeasure,
   ]);
 
@@ -300,17 +309,33 @@ function CanvasInner({
     },
     [nodes, measuredHeights, reactFlow],
   );
+  // Keep the ref in sync so the row-click closure (built before
+  // focusAndPan exists in scope) calls the latest version.
+  focusAndPanRef.current = focusAndPan;
 
-  // When the canvas pane becomes focused (e.g., user pressed → from
-  // the sessions pane), default the keyboard cursor to the root node
-  // — pan/zoom to it. Without this, ↑/↓/←/→ from a fresh canvas have
-  // no anchor and feel unresponsive.
+  // When the user enters the canvas pane VIA KEYBOARD (←/→), default
+  // the keyboard cursor to the root node — pan/zoom to it. Without
+  // this, ↑/↓/←/→ from a fresh canvas have no anchor and feel
+  // unresponsive. We deliberately do NOT auto-focus on mouse entry
+  // (PaneFrame.onMouseDown) — clicking a specific node would race with
+  // this effect and lose, leaving focus on the root instead of the
+  // clicked node.
+  const canvasEnterIntent = useUi((s) => s.canvasEnterIntent);
+  const clearCanvasEnterIntent = useUi((s) => s.clearCanvasEnterIntent);
   useEffect(() => {
-    if (focusedPane !== "thread") return;
-    if (canvasFocusedNodeId !== null) return;
+    if (canvasEnterIntent !== "keyboard") return;
     if (orderedNodeIds.length === 0) return;
-    focusAndPan(orderedNodeIds[0]);
-  }, [focusedPane, canvasFocusedNodeId, orderedNodeIds, focusAndPan]);
+    if (canvasFocusedNodeId === null) {
+      focusAndPan(orderedNodeIds[0]);
+    }
+    clearCanvasEnterIntent();
+  }, [
+    canvasEnterIntent,
+    canvasFocusedNodeId,
+    orderedNodeIds,
+    focusAndPan,
+    clearCanvasEnterIntent,
+  ]);
 
   const navStateRef = useRef({
     focusedPane,
@@ -534,14 +559,21 @@ function AutoFit({
 // --- tree → ReactFlow nodes & edges ----------------------------------------
 
 const DEFAULT_NODE_HEIGHT = 220;
-const COLUMN_GAP = 80;
+const MIN_COLUMN_GAP = 80;
 const SIBLING_GAP = 24;
+// Per-edge horizontal stripe spacing, mirrored in ``treeToReactFlow``.
+// Kept in sync so layoutTree can size each inter-column gap to fit the
+// edge bundle leaving the wider parent at that depth.
+const EDGE_OFFSET_STEP = 6;
+const EDGE_BUNDLE_PADDING = 32;
 
 /** Compute (x, y) for every WindowNode in the tree.
  *
- *  Children stack vertically below their parent's top edge; columns are
- *  spaced by ``COLUMN_GAP``. Subtree heights are computed bottom-up so
- *  siblings don't overlap.
+ *  Children stack vertically below their parent's top edge. Each
+ *  inter-column gap widens to fit the edge bundle leaving the widest
+ *  parent at the source depth — so a parent with 14 siblings doesn't
+ *  smush its 14 elbow stripes into the standard 80px gap.
+ *  Subtree heights are computed bottom-up so siblings don't overlap.
  */
 function layoutTree(
   root: WindowNode,
@@ -550,6 +582,32 @@ function layoutTree(
   const positions: Record<string, { x: number; y: number }> = {};
   const heightOf = (n: WindowNode) =>
     heights[n.window_id] ?? DEFAULT_NODE_HEIGHT;
+
+  // First pass: largest fan-out per depth, so we know how wide each
+  // inter-column gap needs to be. Depth d's "fan-out" = max number of
+  // direct children among parents at depth d.
+  const maxFanOutAtDepth: number[] = [];
+  function recordFanOut(n: WindowNode, depth: number) {
+    maxFanOutAtDepth[depth] = Math.max(
+      maxFanOutAtDepth[depth] ?? 0,
+      n.children.length,
+    );
+    n.children.forEach((c) => recordFanOut(c, depth + 1));
+  }
+  recordFanOut(root, 0);
+
+  const xOfDepth: number[] = [0];
+  for (let d = 1; d <= maxFanOutAtDepth.length; d++) {
+    const fanOut = maxFanOutAtDepth[d - 1] ?? 0;
+    // Bundle width = (N-1) * step on each side of center, total ~= N * step.
+    // Add padding so the outermost stripe still has breathing room
+    // before each card edge.
+    const gap =
+      fanOut <= 1
+        ? MIN_COLUMN_GAP
+        : Math.max(MIN_COLUMN_GAP, fanOut * EDGE_OFFSET_STEP + EDGE_BUNDLE_PADDING);
+    xOfDepth[d] = xOfDepth[d - 1] + COMPACT_CARD_WIDTH + gap;
+  }
 
   const subtreeH: Record<string, number> = {};
   function computeH(n: WindowNode): number {
@@ -567,7 +625,7 @@ function layoutTree(
 
   function place(n: WindowNode, depth: number, centerY: number) {
     positions[n.window_id] = {
-      x: depth * (COMPACT_CARD_WIDTH + COLUMN_GAP),
+      x: xOfDepth[depth] ?? depth * (COMPACT_CARD_WIDTH + MIN_COLUMN_GAP),
       y: centerY,
     };
     if (n.children.length === 0) return;
@@ -593,6 +651,7 @@ function treeToReactFlow(args: {
   selectedSessionId: string | null;
   keyboardFocusedNodeId: string | null;
   onOpenDetail: (id: string) => void;
+  onFocusChild: (windowId: string) => void;
   onMeasure: (id: string, h: number) => void;
 }): { nodes: Node<CompactCardData>[]; edges: Edge[] } {
   const {
@@ -603,6 +662,7 @@ function treeToReactFlow(args: {
     selectedSessionId,
     keyboardFocusedNodeId,
     onOpenDetail,
+    onFocusChild,
     onMeasure,
   } = args;
 
@@ -627,8 +687,8 @@ function treeToReactFlow(args: {
   // Build edges with per-parent symmetric offsets (e.g. 5 edges →
   // +12, +6, 0, -6, -12) so each vertical leg sits in its own
   // horizontal stripe. Topmost child → most positive offset.
-  const EDGE_OFFSET_STEP = 6;
-
+  // ``EDGE_OFFSET_STEP`` is shared with ``layoutTree`` so the
+  // inter-column gap widens to fit the bundle.
   const edges: Edge[] = [];
   for (const [parentId, ws] of Object.entries(childrenByParent)) {
     const N = ws.length;
@@ -667,6 +727,7 @@ function treeToReactFlow(args: {
           w.window_id === keyboardFocusedNodeId &&
           w.session_id !== selectedSessionId,
         onOpenDetail,
+        onFocusChild,
         onMeasure,
         status: w.status === "yield" ? "yield" : w.status === "live" ? "live" : "done",
         nodeId: w.window_id,

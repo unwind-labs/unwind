@@ -27,6 +27,10 @@ export type DefaultProject = {
 
 export type TaskKind = "call" | "subagent";
 
+/** Sub-classification of a "call" spawn — drives the per-row icon.
+ *  Only meaningful when ``spawn_kind === "call"``. */
+export type CallType = "fork" | "fresh" | "fresh_cross_project";
+
 export type TaskNode = {
   session_id: string | null;
   task: string;
@@ -72,6 +76,10 @@ export type Message = {
   // ``invoke_parallel`` tool_result lands. ``null`` means unknown (fall
   // back to the parent's tool_result).
   spawn_done?: (boolean | null)[];
+  // Per-child call type (parallel to spawn_session_ids). Drives the icon
+  // Unwind renders per spawn row. Older messages without this field fall
+  // back to "fork" so the UI still renders.
+  spawn_call_types?: CallType[];
 };
 
 export type AncestorRef = {

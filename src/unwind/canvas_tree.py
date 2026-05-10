@@ -221,79 +221,64 @@ def _parse_ts(raw: Any) -> Optional[datetime]:
 
 
 def collect_invocations(
-    callstack_index: Any,
+    callstack_index: Any = None,
     subagent_index: Any = None,
     *,
     known_session_ids: Optional[set[str]] = None,
+    spawn_resolver: Any = None,
+    fork_detector: Any = None,
 ) -> dict[str, list[Invocation]]:
-    """Enumerate every parent → child invocation.
+    """Enumerate every parent → child invocation, keyed by child session id.
 
-    Two sources:
-      * **callstack reports** — ``/call`` invocations with their full
-        task tree; one ``Invocation`` per (parent, task) edge per
-        report.
-      * **subagent index** — ``Agent``/``Task`` tool spawns. These
-        live as ``<session>/subagents/agent-<id>.jsonl`` and don't
-        appear in callstack reports. We synthesize an Invocation per
-        subagent with a synthetic ``agent-<id>`` target session id.
+    Sources are unified by :class:`unwind.spawns.SpawnResolver` — one
+    place that knows about callstack reports, the fork detector (for
+    in-flight forks before ``report.yaml`` lands), and the subagent
+    index. Pass ``spawn_resolver`` for new code; the legacy
+    ``callstack_index`` / ``subagent_index`` / ``fork_detector`` kwargs
+    are accepted (composing an ad-hoc resolver) so existing tests still
+    work.
 
-    Returns a map keyed by child ``session_id``. Each list is sorted
-    chronologically by ``started_at`` so the K-th entry corresponds to
-    the K-th window of the child.
+    Each list is sorted chronologically by ``started_at`` so the K-th
+    entry corresponds to the K-th window of the child.
 
-    ``known_session_ids`` (when given) bounds the subagent walk: we
-    only enumerate subagents for sessions we'll actually scan,
-    avoiding a full filesystem walk for unrelated projects.
+    ``known_session_ids`` is no longer used (the resolver enumerates
+    subagent parents itself); kept as a keyword for backward
+    compatibility with the previous signature.
     """
-    out: dict[str, list[Invocation]] = {}
+    del known_session_ids  # unused; kept for signature compatibility
 
-    def add(caller_sid: str, task: Any, rep: Any) -> None:
-        if not task.session_id:
-            return
-        out.setdefault(task.session_id, []).append(
-            Invocation(
-                caller_session_id=caller_sid,
-                target_session_id=task.session_id,
-                started_at=rep.started_at,
-                ended_at=rep.ended_at,
-                label=task.task or task.session_id[:8],
-                status=(task.status or "complete").lower(),
-                kind=getattr(rep, "kind", "invoke") if hasattr(rep, "kind") else "invoke",
-                invoke_id=rep.invoke_id,
-            )
+    if spawn_resolver is None:
+        from .spawns import SpawnResolver
+        from .callstack import CallstackIndex
+        from .fork_detect import ForkDetector
+        from .subagents import SubagentIndex
+
+        sentinel = Path("/dev/null/no-data")
+        cs = callstack_index or CallstackIndex(sentinel)
+        fd = fork_detector or ForkDetector(sentinel)
+        sa = subagent_index or SubagentIndex(sentinel)
+        proj_dir = (
+            getattr(fd, "_project_dir", None)
+            or getattr(sa, "_project_dir", None)
+            or sentinel
         )
+        spawn_resolver = SpawnResolver(cs, fd, sa, project_dir=proj_dir)
 
-    def visit(node: Any, parent_sid: str, rep: Any) -> None:
-        for c in node.children:
-            add(parent_sid, c, rep)
-            next_parent = c.session_id or parent_sid
-            visit(c, next_parent, rep)
-
-    for rep in callstack_index.all_reports():
-        for task in rep.tasks:
-            add(rep.parent_session, task, rep)
-            if task.session_id:
-                visit(task, task.session_id, rep)
-
-    # Subagent invocations: one Invocation per (parent_sid, subagent)
-    # pair. The target session id is the subagent's synthetic
-    # ``agent-<id>``; the canvas builder treats it as a leaf node
-    # (single window covering the subagent's recorded activity).
-    if subagent_index is not None and known_session_ids:
-        for sid in known_session_ids:
-            for sa in subagent_index.list_for_session(sid):
-                out.setdefault(sa.synthetic_session_id, []).append(
-                    Invocation(
-                        caller_session_id=sid,
-                        target_session_id=sa.synthetic_session_id,
-                        started_at=sa.created_at,
-                        ended_at=None,
-                        label=sa.description or sa.agent_type or sa.agent_id[:8],
-                        status="complete",
-                        kind="subagent",
-                        invoke_id=f"subagent-{sa.agent_id}",
-                    )
+    out: dict[str, list[Invocation]] = {}
+    for parent_sid, spawns in spawn_resolver.spawns_by_parent().items():
+        for s in spawns:
+            out.setdefault(s.child_session_id, []).append(
+                Invocation(
+                    caller_session_id=parent_sid,
+                    target_session_id=s.child_session_id,
+                    started_at=s.started_at,
+                    ended_at=s.ended_at,
+                    label=s.label or s.child_session_id[:8],
+                    status=s.status,
+                    kind=s.kind,
+                    invoke_id=s.invoke_id or "",
                 )
+            )
 
     epoch = datetime.fromtimestamp(0, timezone.utc)
     for invs in out.values():
@@ -433,23 +418,35 @@ TitleFn = Callable[[str], Optional[str]]
 def build_canvas_tree(
     project_dir: Path,
     root_session_id: str,
-    callstack_index: Any,
+    callstack_index: Any = None,
     *,
     subagent_index: Any = None,
+    fork_detector: Any = None,
+    spawn_resolver: Any = None,
     builder: Optional["CanvasTreeBuilder"] = None,
     is_live_session: IsLiveFn = lambda _sid: False,
     title_for: TitleFn = lambda _sid: None,
 ) -> tuple[WindowNode, list[WindowNode]]:
     """Compute the canvas tree rooted at ``root_session_id``.
 
+    Pass ``spawn_resolver`` (preferred) — a unified view over callstack
+    reports + fork detector + subagent index. The legacy individual
+    indexes are accepted for backwards compatibility (an ad-hoc
+    resolver is composed from them).
+
     Returns ``(root_window, all_windows_flat)``.
     """
-    # Pass 1: enumerate callstack invocations and BFS from root to
-    # discover reachable real sessions. We need this set BEFORE we can
-    # collect subagent invocations (which are keyed by parent session).
-    cs_invs = collect_invocations(callstack_index)
+    invocations_by_target = collect_invocations(
+        callstack_index,
+        subagent_index,
+        spawn_resolver=spawn_resolver,
+        fork_detector=fork_detector,
+    )
+
+    # BFS from root over the parent → child edges to discover every
+    # session reachable from this canvas.
     calls_from: dict[str, set[str]] = {}
-    for target_sid, invs in cs_invs.items():
+    for target_sid, invs in invocations_by_target.items():
         for inv in invs:
             calls_from.setdefault(inv.caller_session_id, set()).add(target_sid)
 
@@ -462,15 +459,6 @@ def build_canvas_tree(
         real_sessions.add(sid)
         for child in calls_from.get(sid, ()):
             queue.append(child)
-
-    # Pass 2: re-collect with subagents bounded to reachable sessions.
-    # Subagent target ids look like ``agent-<hex>`` and have no JSONL
-    # in ``project_dir`` — they're terminal leaves in the tree.
-    invocations_by_target = collect_invocations(
-        callstack_index,
-        subagent_index,
-        known_session_ids=real_sessions,
-    )
 
     # Scan every real session (subagents skip the scan — they have no
     # ``<session_id>.jsonl`` in project_dir).
@@ -536,12 +524,48 @@ def build_canvas_tree(
                 tw.kind = "subagent"
             cw.children.append(tw)
 
-    # Sort each window's children for a stable visual ordering: by
-    # the child's own start time (which orders parallel invokes by
-    # when they fired, and resume series by their timeline).
+    # Sort each window's children to MATCH the parent's CALL row order
+    # in the compact card. Without this the canvas columns end up
+    # alphabetical-by-sid within each timestamp group while the rows are
+    # in requested-tasks order — and the connectors cross.
+    #
+    # Strategy: read each parent's JSONL once, ask the resolver for the
+    # display order (mirrors derive-rows.ts logic), and use it as the
+    # primary sort key. Fall back to ``window_start`` for parents
+    # without a JSONL (subagent leaves) or when the resolver isn't
+    # plumbed through.
     epoch = datetime.fromtimestamp(0, timezone.utc)
+    display_order_cache: dict[str, dict[str, int]] = {}
+
+    def _display_order_for(parent_sid: str) -> dict[str, int]:
+        if parent_sid in display_order_cache:
+            return display_order_cache[parent_sid]
+        order: dict[str, int] = {}
+        if spawn_resolver is not None:
+            path = project_dir / f"{parent_sid}.jsonl"
+            if path.is_file():
+                try:
+                    from .messages import read_messages
+
+                    page = read_messages(path)
+                    order = spawn_resolver.child_display_order(
+                        parent_sid, page.messages
+                    )
+                except Exception:
+                    order = {}
+        display_order_cache[parent_sid] = order
+        return order
+
     for w in all_windows:
-        w.children.sort(key=lambda c: c.window_start or epoch)
+        if not w.children:
+            continue
+        order = _display_order_for(w.session_id)
+        w.children.sort(
+            key=lambda c: (
+                order.get(c.session_id, 10**9),
+                c.window_start or epoch,
+            )
+        )
 
     # Root window is index 0 of root_session_id (root sessions always
     # get a single window — see _compute_windows).

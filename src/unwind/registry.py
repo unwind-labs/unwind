@@ -15,6 +15,7 @@ from .fork_detect import ForkDetector
 from .projects import ProjectPaths, claude_projects_root, slug_for
 from .server_state import default_source_path
 from .sessions import SessionIndex
+from .spawns import SpawnResolver
 from .subagents import SubagentIndex
 
 
@@ -168,6 +169,23 @@ def subagent_index_for_slug(slug: str) -> SubagentIndex:
     with _lock:
         _subagents[slug] = si
     return si
+
+
+def spawn_resolver_for_slug(slug: str) -> SpawnResolver:
+    """Compose a fresh ``SpawnResolver`` over this slug's three indexes.
+
+    The resolver caches its own per-instance result; the underlying
+    indexes themselves cache by mtime. Cheap to instantiate per request,
+    so we don't keep one in the registry — this guarantees each
+    request sees the latest filesystem state.
+    """
+    index = index_for_slug(slug)
+    return SpawnResolver(
+        callstack_for_slug(slug),
+        fork_detector_for_slug(slug),
+        subagent_index_for_slug(slug),
+        project_dir=index.paths.project_dir,
+    )
 
 
 def list_known_projects() -> list[tuple[str, Path]]:

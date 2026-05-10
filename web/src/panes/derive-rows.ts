@@ -15,6 +15,10 @@ export type Row =
   | {
       kind: "spawn";
       spawnKind: "call" | "subagent";
+      /** Sub-classification of a call spawn — picks the icon. ``"fork"`` by
+       *  default (also for subagent rows, which use a different icon
+       *  altogether and ignore this field). */
+      callType: "fork" | "fresh" | "fresh_cross_project";
       title: string;
       /** Underlying Claude session id of the child. Empty while resolving. */
       childId: string;
@@ -96,9 +100,11 @@ export function deriveRows(
         const title = isResume
           ? labelForResume(userReply ?? rawLabel)
           : rawLabel || childId.slice(0, 8) || "(resolving)";
+        const callType = m.spawn_call_types?.[i] ?? "fork";
         out.push({
           kind: "spawn",
           spawnKind: m.spawn_kind!,
+          callType,
           title,
           childId,
           done,
@@ -175,6 +181,11 @@ export function deriveRows(
       out.push({
         kind: "spawn",
         spawnKind: "call",
+        // Extras come from aggregate spawn cards that don't surface
+        // per-child call_type yet — default to "fork" so the legacy
+        // git-fork icon renders. Threading call_type through
+        // SpawnCardData is future work.
+        callType: "fork",
         title: taskName || childId.slice(0, 8) || "(call)",
         childId,
         done: callDone && childId !== "",

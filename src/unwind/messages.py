@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Literal, Optional
 
-from .jsonl import collect_uuids, iter_lines
+from .jsonl import iter_lines
 
 
 Role = Literal["user", "assistant", "tool_use", "tool_result", "system"]
@@ -70,6 +70,11 @@ class Message:
     # parent ``invoke_parallel`` tool_use is still in flight waiting on
     # slow siblings. ``None`` = unknown (fall back to parent tool_result).
     spawn_done: list[Optional[bool]] = field(default_factory=list)
+    # Per-child call type (parallel to spawn_session_ids). Values:
+    # "fork" | "fresh" | "fresh_cross_project". Drives the icon Unwind
+    # renders per spawn row. Only meaningful when ``spawn_kind == "call"``;
+    # subagent rows fill with "fork" by convention and ignore the field.
+    spawn_call_types: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -92,6 +97,7 @@ class Message:
             "spawn_session_ids": list(self.spawn_session_ids),
             "spawn_tasks": list(self.spawn_tasks),
             "spawn_done": list(self.spawn_done),
+            "spawn_call_types": list(self.spawn_call_types),
         }
 
 
@@ -110,25 +116,7 @@ def base_uuid(message_uuid: str) -> str:
     return message_uuid
 
 
-# Tool names whose use spawns child sessions/agents we want to drill into.
-CALLSTACK_TOOL_NAMES = {
-    # Legacy names (kept so historical sessions still resolve their spawn
-    # edges). Active runtime emits the unprefixed names below.
-    "mcp__plugin_callstack_call__invoke",
-    "mcp__plugin_callstack_call__invoke_parallel",
-    "mcp__plugin_callstack_call__invoke_resume",
-    "mcp__plugin_callstack_call__call",
-    "mcp__plugin_callstack_call__resume",
-}
-SUBAGENT_TOOL_NAMES = {"Agent", "Task"}
-
-
-_AGENT_ID_RE = __import__("re").compile(r"agentId:\s*([0-9a-f]{8,})")
-# Tolerant of JSON-in-string with escaped quotes: matches both "invoke_id":"…"
-# and \"invoke_id\":\"…\".
-_INVOKE_ID_RE = __import__("re").compile(
-    r'\\?"invoke_id\\?"\s*:\s*\\?"([0-9A-Za-z._-]+)\\?"'
-)
+from .spawns import Spawn, SpawnResolver  # noqa: E402
 
 
 def annotate_spawns(
@@ -138,266 +126,104 @@ def annotate_spawns(
     current_session_id: Optional[str] = None,
     subagent_index=None,
     fork_detector=None,
+    spawn_resolver: Optional[SpawnResolver] = None,
 ) -> None:
-    """Tag tool_use messages that spawned children with ``spawn_session_ids``.
+    """Tag tool_use messages with their spawned children's session ids.
 
-    Two cases are handled:
+    Pass ``spawn_resolver`` (preferred) for one-shot resolution. The
+    resolver consolidates callstack reports, fork detector, and the
+    subagent index — see :mod:`unwind.spawns`.
 
-    1. Callstack invokes: their ``tool_result`` content embeds an
-       ``invoke_id``. We look up that report and attach the child task
-       session_ids — but ONLY if the report's ``parent_session`` matches
-       ``current_session_id``. This filters out inherited tool_use blocks
-       (every fork inherits the parent's invoke_parallel call+result, so
-       the invoke_id in their JSONL points at the parent's invocation; we
-       don't want to mark inherited messages as spawning anything).
-    2. Agent / Task tool calls: the result text contains
-       ``agentId: <id>`` — synthesize an ``agent-<id>`` session_id.
-       If the tool_result hasn't arrived yet (the subagent is still
-       running), fall back to the on-disk subagent index: Claude Code
-       creates ``subagents/<session>/agent-<id>.jsonl`` + ``.meta.json``
-       as soon as the agent starts, so we can match the pending
-       tool_use to its trace by ``description``. Pass
-       ``subagent_index`` to enable this.
-
-    Pass ``current_session_id`` whenever you have it (it's the session
-    whose JSONL these messages came from). Without it the callstack
-    parent-match check is skipped and inherited spawns will be tagged.
-
-    Pass ``fork_detector`` to resolve placeholder session_ids when the
-    callstack report doesn't (yet) contain the spawned tasks. The fork
-    detector matches each fork's first divergent user message against the
-    tool_use's requested task names — robust to callstack reports being
-    overwritten by sibling invocations or not yet flushed to disk.
+    The legacy parameters ``slug_callstack``, ``subagent_index``, and
+    ``fork_detector`` are accepted for backwards compatibility (notably
+    in tests). When ``spawn_resolver`` is None, an ad-hoc resolver is
+    composed from whichever of those were provided. Anything missing is
+    handled by best-effort no-op stand-ins.
     """
-    by_use_id: dict[str, Message] = {}
-    by_result_for: dict[str, Message] = {}
-    # Preserve chronological order of callstack tool_uses so we can claim
-    # reports in order when no tool_result links them by invoke_id.
-    callstack_use_order: list[str] = []
+    if not current_session_id:
+        # Without the parent's session id we can't anchor anything.
+        # Old behaviour: silently no-op.
+        return
+
+    resolver = spawn_resolver or _resolver_from_legacy_args(
+        slug_callstack, fork_detector, subagent_index
+    )
+    if resolver is None:
+        return
+
+    spawns = resolver.anchor_to_messages(current_session_id, messages)
+    spawns_by_tu: dict[str, list[Spawn]] = {}
+    for s in spawns:
+        if s.parent_tool_use_id:
+            spawns_by_tu.setdefault(s.parent_tool_use_id, []).append(s)
+
     for m in messages:
-        if m.role == "tool_use" and m.tool_use_id:
-            by_use_id[m.tool_use_id] = m
-            if m.tool_name in CALLSTACK_TOOL_NAMES:
-                callstack_use_order.append(m.tool_use_id)
-        elif m.role == "tool_result" and m.tool_result_for:
-            by_result_for[m.tool_result_for] = m
+        if m.role != "tool_use" or not m.tool_use_id:
+            continue
+        bound = spawns_by_tu.get(m.tool_use_id)
+        if not bound:
+            continue
+        # All bound spawns for one tool_use share the same kind
+        # (callstack tool_uses bind to call-spawns; Agent tool_uses bind
+        # to subagent-spawns). Take the first.
+        m.spawn_kind = bound[0].kind
+        m.spawn_session_ids = [s.child_session_id for s in bound]
+        m.spawn_tasks = [s.label for s in bound]
+        m.spawn_call_types = [s.call_type for s in bound]
+        # Prefer the LATEST known status across all reports for callstack
+        # spawns — covers the "original call yielded, later resume
+        # completed" case where the spawn's snapshot status is stale.
+        m.spawn_done = [_done_for_spawn(s, slug_callstack) for s in bound]
 
-    # Track which reports have been "claimed" by a specific tool_use, so a
-    # later in-flight tool_use can pick the NEXT unclaimed report instead of
-    # double-counting.
-    claimed_invoke_ids: set[str] = set()
-    # Track session_ids already attributed to a prior callstack tool_use.
-    # Multiple nested ``invoke*`` calls from the same fork share one report
-    # (callstack merges them), so without this each tool_use sees the union
-    # of every prior invocation's children — and the leftover-task logic
-    # below would phantom-render them.
-    claimed_child_sids: set[str] = set()
-    # Same idea for subagent invocations matched by description.
-    claimed_agent_ids: set[str] = set()
 
-    # Iterate callstack uses in chronological order so unclaimed-report
-    # selection is stable.
-    ordered_items = [(uid, by_use_id[uid]) for uid in callstack_use_order] + [
-        (uid, m)
-        for uid, m in by_use_id.items()
-        if (m.tool_name or "") not in CALLSTACK_TOOL_NAMES
-    ]
-    for use_id, use_msg in ordered_items:
-        name = use_msg.tool_name or ""
-        result_msg = by_result_for.get(use_id)
-        if name in CALLSTACK_TOOL_NAMES:
-            # Match each callstack tool_use to ONE specific report. Without
-            # this, a session with multiple invokes (e.g. /run twice) would
-            # see all callstack tool_uses point at the merged children of
-            # ALL prior invokes.
-            #
-            # Strategy:
-            #  1. If the tool_result is in (call returned), extract invoke_id
-            #     and bind to that report exactly.
-            #  2. Otherwise (live, in-flight), pick the NEXT unclaimed report
-            #     for this session in chronological order.
-            tasks: list = []
-            chosen_report = None
-            # ``exact_match`` = we found this tool_use's specific report via
-            # invoke_id. In that case the report belongs uniquely to this
-            # tool_use, so we don't need the ``claimed_child_sids`` defense
-            # against shared/merged reports — and we shouldn't trip it
-            # either, since a later ``invoke_resume`` legitimately points at
-            # the same child the original ``invoke`` did.
-            exact_match = False
-            invoke_id = _extract_invoke_id(result_msg)
-            if invoke_id and slug_callstack is not None:
-                report = slug_callstack.report_for_invoke(invoke_id)
-                if report is not None and current_session_id is not None:
-                    chosen_report = report
-                    claimed_invoke_ids.add(report.invoke_id)
-                    tasks = slug_callstack.children_in_report(
-                        report, current_session_id
-                    )
-                    exact_match = True
-            elif current_session_id is not None and slug_callstack is not None:
-                # In-flight (no tool_result yet) — try the first unclaimed
-                # report first (legacy: each invocation got its own report).
-                for rep in slug_callstack.reports_with_session_node(
-                    current_session_id
-                ):
-                    if rep.invoke_id in claimed_invoke_ids:
-                        continue
-                    chosen_report = rep
-                    claimed_invoke_ids.add(rep.invoke_id)
-                    tasks = slug_callstack.children_in_report(
-                        rep, current_session_id
-                    )
-                    break
-                # If no unclaimed report exists, fall back to whichever
-                # report contains this session — modern callstack merges
-                # sibling invocations into one report, so the prior tool_use
-                # already claimed it. ``claimed_child_sids`` below filters
-                # tasks already attributed to siblings, so name-matching
-                # below still resolves THIS tool_use's children.
-                if not tasks:
-                    for rep in slug_callstack.reports_with_session_node(
-                        current_session_id
-                    ):
-                        chosen_report = rep
-                        tasks = slug_callstack.children_in_report(
-                            rep, current_session_id
-                        )
-                        break
+def _resolver_from_legacy_args(
+    slug_callstack, fork_detector, subagent_index
+) -> Optional[SpawnResolver]:
+    """Compose a resolver from the legacy keyword args (used by tests)."""
+    from .callstack import CallstackIndex
+    from .fork_detect import ForkDetector
+    from .subagents import SubagentIndex
 
-            # Strip tasks already claimed by an earlier tool_use so we don't
-            # double-count children when the report is shared across multiple
-            # nested invokes. Skip when we matched a unique report by
-            # invoke_id — an ``invoke_resume`` legitimately re-targets the
-            # same child the original ``invoke`` spawned.
-            if claimed_child_sids and not exact_match:
-                tasks = [
-                    t for t in tasks
-                    if not (t.session_id and t.session_id in claimed_child_sids)
-                ]
+    if slug_callstack is None and fork_detector is None and subagent_index is None:
+        return None
 
-            # Index per-child completion status by session_id so the caller
-            # card can mark individual children done before the parent
-            # ``invoke_parallel`` tool_result lands.
-            status_by_sid: dict[str, str] = {
-                t.session_id: (t.status or "").lower()
-                for t in tasks if t.session_id
-            }
+    # Tests sometimes pass only one source; fill the rest with empty
+    # stand-ins rooted at a non-existent path so they're always empty.
+    from pathlib import Path as _Path
+    sentinel = _Path("/dev/null/no-data")
 
-            # Build per-child (session_id, task) pairs, preserving the order
-            # requested in the tool_input so unresolved children render as
-            # placeholder rows.
-            #
-            # Match by task NAME, not by index: callstack writes tree.nodes
-            # in arrival/completion order, which doesn't always match the
-            # requested order during live runs. Mismatched order would
-            # otherwise pin the wrong session_id to a task name on the first
-            # render, and the canvas's "first label wins" logic would lock
-            # the mistake in.
-            child_pairs: list[tuple[str, str]] = []
-            requested = _requested_tasks(use_msg.tool_input)
-            if requested:
-                # Bucket tasks by name (preserves duplicates so two requests
-                # for "/task-b" each get their own session_id in order).
-                by_name: dict[str, list[str]] = {}
-                for t in tasks:
-                    name = t.task or ""
-                    sid = t.session_id or ""
-                    if name:
-                        by_name.setdefault(name, []).append(sid)
-                for t_name in requested:
-                    bucket = by_name.get(t_name)
-                    sid = bucket.pop(0) if bucket else ""
-                    child_pairs.append((sid, t_name))
-                # NOTE: we deliberately do NOT append unmatched report tasks
-                # as leftovers here. With callstack's merged-frame model, a
-                # single report often contains tasks from sibling tool_uses
-                # (5 specialists + 3 meta-assessors + 1 re-author all share
-                # one report). Appending leftovers would emit phantom rows
-                # for tasks that belong to a different tool_use. Sibling
-                # tool_uses surface their own children when the loop
-                # processes them.
-            else:
-                # No requested tasks (e.g. Skill-style invoke) — fall back to
-                # whatever the chosen report has.
-                for t in tasks:
-                    child_pairs.append((t.session_id or "", t.task or ""))
+    cs = slug_callstack if slug_callstack is not None else CallstackIndex(sentinel)
+    fd = fork_detector if fork_detector is not None else ForkDetector(sentinel)
+    sa = subagent_index if subagent_index is not None else SubagentIndex(sentinel)
 
-            # Fork-detector fallback: any pair still missing a session_id
-            # gets resolved by matching the fork's first divergent user text
-            # against the requested task name. This survives callstack
-            # reports being overwritten by sibling invocations and works for
-            # in-flight invocations whose tool_result hasn't landed yet.
-            if fork_detector is not None and current_session_id is not None:
-                resolved: list[tuple[str, str]] = []
-                for sid, t_name in child_pairs:
-                    if sid or not t_name:
-                        resolved.append((sid, t_name))
-                        continue
-                    found = fork_detector.find_session_by_divergence_text(
-                        current_session_id, t_name
-                    )
-                    if found and found not in claimed_child_sids:
-                        resolved.append((found, t_name))
-                    else:
-                        resolved.append((sid, t_name))
-                child_pairs = resolved
+    # Project dir: derive from whichever real source we got, else sentinel.
+    project_dir = sentinel
+    for src in (subagent_index, fork_detector):
+        attr = getattr(src, "_project_dir", None)
+        if attr is not None:
+            project_dir = attr
+            break
 
-            # Drop empty placeholders.
-            child_pairs = [(s, t) for s, t in child_pairs if s or t]
-            if child_pairs:
-                use_msg.spawn_kind = "call"
-                use_msg.spawn_session_ids = [s for s, _ in child_pairs]
-                use_msg.spawn_tasks = [t for _, t in child_pairs]
-                # Prefer the LATEST known status across all reports, not the
-                # snapshot in the report bound to this specific invoke_id.
-                # When a parent re-invokes a yielded chain, the original
-                # call's report stays frozen at "running"/"yielded"; the
-                # later resume's report records "complete". Surfacing the
-                # latest status flips the original call's row to done once
-                # the resume lands.
-                done_list: list[Optional[bool]] = []
-                for s, _t in child_pairs:
-                    if not s:
-                        done_list.append(None)
-                        continue
-                    latest_status: Optional[str] = None
-                    if slug_callstack is not None:
-                        latest_status = slug_callstack.aggregate_status_for_session(s)
-                    if latest_status is None:
-                        latest_status = status_by_sid.get(s)
-                    done_list.append(_done_from_status(latest_status))
-                use_msg.spawn_done = done_list
-                # Only register children as "claimed" when we did NOT match
-                # the report by invoke_id. Exact-match tool_uses each own
-                # their own report and should not block siblings or
-                # ``invoke_resume`` from targeting the same child.
-                if not exact_match:
-                    for sid, _t in child_pairs:
-                        if sid:
-                            claimed_child_sids.add(sid)
-            _ = chosen_report  # (silences unused; kept for future debug)
-        elif name in SUBAGENT_TOOL_NAMES:
-            agent_id = _extract_agent_id(result_msg)
-            if agent_id:
-                use_msg.spawn_kind = "subagent"
-                use_msg.spawn_session_ids = [f"agent-{agent_id}"]
-                claimed_agent_ids.add(agent_id)
-            elif subagent_index is not None and current_session_id:
-                # In-flight: the tool_result hasn't been written yet. Match
-                # by description against the on-disk subagent invocations.
-                desc = ""
-                if isinstance(use_msg.tool_input, dict):
-                    raw = use_msg.tool_input.get("description")
-                    if isinstance(raw, str):
-                        desc = raw.strip()
-                if desc:
-                    pending_id = _claim_pending_subagent(
-                        subagent_index, current_session_id, desc, claimed_agent_ids
-                    )
-                    if pending_id:
-                        use_msg.spawn_kind = "subagent"
-                        use_msg.spawn_session_ids = [f"agent-{pending_id}"]
+    return SpawnResolver(cs, fd, sa, project_dir=project_dir)
+
+
+def _done_for_spawn(s: Spawn, slug_callstack) -> Optional[bool]:
+    """Map a Spawn's status to the spawn-row done flag.
+
+    For callstack spawns, prefer the LATEST status aggregated across
+    all reports (handles the "original yielded → resume completed"
+    case). Falls back to the spawn's snapshot status.
+    """
+    status = s.status
+    if (
+        s.kind == "call"
+        and s.child_session_id
+        and slug_callstack is not None
+    ):
+        latest = slug_callstack.aggregate_status_for_session(s.child_session_id)
+        if latest:
+            status = latest
+    return _done_from_status(status)
 
 
 def _done_from_status(status: Optional[str]) -> Optional[bool]:
@@ -406,14 +232,10 @@ def _done_from_status(status: Optional[str]) -> Optional[bool]:
     From the PARENT's perspective, a CALL row is "done" the moment the
     child returned control — including when the child yielded for user
     input. The yield is a return; the parent's row should drop the
-    in-progress dots once that happens. (The child card will still
-    show its own ``YIELD`` rail label so the user knows the chain is
-    paused; we just don't want the parent's CALL row pulsing
-    indefinitely.)
+    in-progress dots once that happens.
 
     Returns True for terminal states, False for genuinely in-flight
-    states, None when unknown (the UI falls back to the parent's
-    tool_result presence).
+    states, None when unknown.
     """
     if not status:
         return None
@@ -423,80 +245,6 @@ def _done_from_status(status: Optional[str]) -> Optional[bool]:
     if s in ("running", "in_progress", "pending"):
         return False
     return None
-
-
-def _requested_tasks(tool_input: Any) -> list[str]:
-    """Return the requested task labels from a callstack invoke* tool_input.
-
-    For ``invoke_parallel(tasks=[...])`` returns the tasks list; for
-    ``invoke(task=...)`` returns ``[task]``; otherwise empty.
-    """
-    if not isinstance(tool_input, dict):
-        return []
-    tasks = tool_input.get("tasks")
-    if isinstance(tasks, list):
-        return [str(t) for t in tasks]
-    task = tool_input.get("task")
-    if isinstance(task, str):
-        return [task]
-    return []
-
-
-def _claim_pending_subagent(
-    subagent_index,
-    session_id: str,
-    description: str,
-    already_claimed: set[str],
-) -> Optional[str]:
-    """Match an in-flight Agent tool_use to its on-disk subagent trace.
-
-    Claude Code writes ``subagents/<session>/agent-<id>.meta.json`` as soon as
-    the subagent starts, well before the parent's ``tool_result`` lands. So
-    while the tool call is pending we can still surface the link by matching
-    the tool_use's ``description`` arg against the meta files. Two calls with
-    identical descriptions get distinct invocations because we track which
-    agent ids have already been claimed in this annotation pass.
-    """
-    try:
-        invocations = subagent_index.list_for_session(session_id)
-    except Exception:  # subagent index is best-effort
-        return None
-    for inv in invocations:
-        if inv.agent_id in already_claimed:
-            continue
-        if inv.description.strip() == description:
-            already_claimed.add(inv.agent_id)
-            return inv.agent_id
-    return None
-
-
-def _extract_invoke_id(result: Optional[Message]) -> Optional[str]:
-    if result is None or result.tool_result is None:
-        return None
-    text = _stringify_result(result.tool_result)
-    m = _INVOKE_ID_RE.search(text)
-    return m.group(1) if m else None
-
-
-def _extract_agent_id(result: Optional[Message]) -> Optional[str]:
-    if result is None or result.tool_result is None:
-        return None
-    text = _stringify_result(result.tool_result)
-    m = _AGENT_ID_RE.search(text)
-    return m.group(1) if m else None
-
-
-def _stringify_result(r: Any) -> str:
-    if isinstance(r, str):
-        return r
-    if isinstance(r, list):
-        parts: list[str] = []
-        for block in r:
-            if isinstance(block, dict):
-                if block.get("type") == "text" and isinstance(block.get("text"), str):
-                    parts.append(block["text"])
-        return "\n".join(parts)
-    return ""
 
 
 def read_messages(

@@ -42,6 +42,15 @@ class TaskNode:
     ended_at: Optional[datetime] = None
     # ``call`` for callstack forks, ``subagent`` for Agent-tool subagents.
     kind: str = "call"
+    # Sub-classification within ``kind == "call"``: how the underlying claude
+    # session was launched. Read from report.yaml; defaults to ``"fork"`` for
+    # backward compat with reports written before this field existed.
+    #   "fork"                — `--resume <parent> --fork-session`
+    #   "fresh"               — brand-new session in the parent's project
+    #   "fresh_cross_project" — brand-new session in a different project
+    # Always ``"fork"`` for ``kind == "subagent"`` (the field is meaningful
+    # only for callstack spawns).
+    call_type: str = "fork"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -56,6 +65,7 @@ class TaskNode:
             "started_at": self.started_at.isoformat() if self.started_at else None,
             "ended_at": self.ended_at.isoformat() if self.ended_at else None,
             "kind": self.kind,
+            "call_type": self.call_type,
             "children": [c.to_dict() for c in self.children],
         }
 
@@ -479,6 +489,7 @@ class CallstackIndex:
                 invoke_id=node.invoke_id,
                 started_at=node.started_at,
                 ended_at=node.ended_at,
+                call_type=node.call_type,
             )
 
         out: list[TaskNode] = []
@@ -547,6 +558,8 @@ def _task_node(
         for c in children_raw
         if isinstance(c, dict)
     ]
+    raw_call_type = raw.get("call_type")
+    call_type = raw_call_type if isinstance(raw_call_type, str) else "fork"
     return TaskNode(
         session_id=raw.get("session_id"),
         task=str(raw.get("task") or ""),
@@ -559,6 +572,7 @@ def _task_node(
         invoke_id=invoke_id,
         started_at=parent_started,
         ended_at=parent_ended,
+        call_type=call_type,
     )
 
 

@@ -7,6 +7,8 @@ import {
   CheckCircle2,
   ChevronRight,
   CornerDownLeft,
+  Leaf,
+  Trees,
   Loader2,
 } from "lucide-react";
 import { useMessages } from "@/api/client";
@@ -79,6 +81,12 @@ export type CompactCardData = {
    *  through ``/call``, ``"subagent"`` if launched as a Claude Code
    *  subagent. ``null`` for the root. Drives the rail's tint and label. */
   spawnKind: "call" | "subagent" | null;
+  /** Called when a CALL/SUBAGENT row inside this card is clicked. The
+   *  row's child window_id is passed so the canvas can pan/center it
+   *  WITHOUT opening the detail overlay. ``undefined`` when the row's
+   *  child isn't on the canvas yet — the row click then falls through
+   *  to the default card click (open detail). */
+  onFocusChild?: (windowId: string) => void;
 };
 
 export function CompactCardNode({ data }: { data: CompactCardData }) {
@@ -180,18 +188,17 @@ export function CompactCardNode({ data }: { data: CompactCardData }) {
 
   // Pop-style mapping from this card's spawn rows to the canvas tree's
   // child windows: each row claims the next-unused child whose
-  // ``session_id`` matches the row's ``childId``. Built once per render
-  // here and consumed inside the rows.map() loop below.
-  const rowChildAssign = useMemo(() => {
-    // Map<sessionId, queue of window_ids>
-    const m = new Map<string, string[]>();
-    for (const c of data.canvasChildren ?? []) {
-      const list = m.get(c.session_id) ?? [];
-      list.push(c.window_id);
-      m.set(c.session_id, list);
-    }
-    return m;
-  }, [data.canvasChildren]);
+  // ``session_id`` matches the row's ``childId``. Built fresh on every
+  // render — ``takeMatchingChild`` mutates the queues via ``.shift()``,
+  // so a memoised Map stays drained after the first render and every
+  // subsequent render sees no matches (breaking edge anchoring AND the
+  // row click/hover focus path).
+  const rowChildAssign = new Map<string, string[]>();
+  for (const c of data.canvasChildren ?? []) {
+    const list = rowChildAssign.get(c.session_id) ?? [];
+    list.push(c.window_id);
+    rowChildAssign.set(c.session_id, list);
+  }
 
   // Kind drives the rail tint and the rotated label. Resume wins over
   // spawnKind so users immediately see "this is a continuation" in the
@@ -330,13 +337,19 @@ export function CompactCardNode({ data }: { data: CompactCardData }) {
             // child window — pop the next-unused canvas child whose
             // ``session_id`` matches this row's ``childId``. Without this
             // override, every default-source edge would stack on the
-            // first row.
-            const handleOverride = takeMatchingChild(rowChildAssign, r.childId);
+            // first row. The popped window_id is also reused as the
+            // focus target when the user clicks the row.
+            const targetWindowId = takeMatchingChild(rowChildAssign, r.childId);
             return (
               <SpawnRowDisplay
                 key={i}
                 row={r}
-                handleIdOverride={handleOverride}
+                handleIdOverride={targetWindowId}
+                onFocus={
+                  targetWindowId && data.onFocusChild
+                    ? () => data.onFocusChild!(targetWindowId)
+                    : undefined
+                }
               />
             );
           })}
@@ -447,54 +460,113 @@ function takeMatchingChild(
 function SpawnRowDisplay({
   row,
   handleIdOverride,
+  onFocus,
 }: {
   row: Extract<Row, { kind: "spawn" }>;
   handleIdOverride?: string;
+  /** Click handler — when set, the row owns its own click and stops it
+   *  from bubbling up to the card-level "open detail" handler. */
+  onFocus?: () => void;
 }) {
   const isCall = row.spawnKind === "call";
+  // Sub-variant of a call: fork (default, inherits ctx), fresh (isolated,
+  // same project), fresh_cross_project (isolated, different project).
+  const isFresh = isCall && row.callType === "fresh";
+  const isFreshCross = isCall && row.callType === "fresh_cross_project";
   // Resume rows ("CONTINUED") get the amber treatment — same yellow
   // we use for yielded windows, since each resume line was waiting on
   // the user before it ran.
   const accentText = row.isResume
     ? "text-amber-300"
-    : isCall
-      ? "text-sky-300"
-      : "text-violet-300";
+    : isFreshCross
+      ? "text-teal-300"
+      : isFresh
+        ? "text-emerald-300"
+        : isCall
+          ? "text-sky-300"
+          : "text-violet-300";
   const accentBg = row.isResume
     ? "bg-amber-500/5"
-    : isCall
-      ? "bg-sky-950/40"
-      : "bg-violet-950/40";
+    : isFreshCross
+      ? "bg-teal-950/40"
+      : isFresh
+        ? "bg-emerald-950/40"
+        : isCall
+          ? "bg-sky-950/40"
+          : "bg-violet-950/40";
   const accentBorder = row.isResume
     ? "border-amber-500/50"
-    : isCall
-      ? "border-sky-500/50"
-      : "border-violet-500/50";
+    : isFreshCross
+      ? "border-teal-500/50"
+      : isFresh
+        ? "border-emerald-500/50"
+        : isCall
+          ? "border-sky-500/50"
+          : "border-violet-500/50";
   const badgeBorderText = row.isResume
     ? "border-amber-500/40 text-amber-300"
-    : isCall
-      ? "border-sky-500/40 text-sky-300"
-      : "border-violet-500/40 text-violet-300";
+    : isFreshCross
+      ? "border-teal-500/40 text-teal-300"
+      : isFresh
+        ? "border-emerald-500/40 text-emerald-300"
+        : isCall
+          ? "border-sky-500/40 text-sky-300"
+          : "border-violet-500/40 text-violet-300";
 
   return (
     <li
       className={cn(
-        "relative flex items-center gap-2 rounded border-l-2 px-2",
+        "uw-spawn-row relative flex items-center gap-2 rounded border-l-2 px-2 transition-colors",
         accentBg,
         accentBorder,
+        // Row owns its own hover state — the card's ``:has(.uw-spawn-row:hover)``
+        // CSS rule (in index.css) suppresses the card-level hover ring
+        // while the cursor is over a row. We use an INSET ring + brighter
+        // background so the affordance is visible despite the card's
+        // ``overflow-hidden`` (an outward ring would be clipped).
+        onFocus && "cursor-pointer hover:ring-2 hover:ring-inset",
+        onFocus &&
+          (row.isResume
+            ? "hover:bg-amber-500/15 hover:ring-amber-400/70"
+            : isFreshCross
+              ? "hover:bg-teal-900/60 hover:ring-teal-400/70"
+              : isFresh
+                ? "hover:bg-emerald-900/60 hover:ring-emerald-400/70"
+                : isCall
+                  ? "hover:bg-sky-900/60 hover:ring-sky-400/70"
+                  : "hover:bg-violet-900/60 hover:ring-violet-400/70"),
       )}
       style={{ height: SPAWN_HEIGHT - 4 }}
-    >
-      {isCall ? (
-        <GitFork className={cn("h-3 w-3", accentText)} />
-      ) : (
+      onClick={
+        onFocus
+          ? (e) => {
+              e.stopPropagation();
+              onFocus();
+            }
+          : undefined
+      }>
+      {!isCall ? (
         <Sparkles className={cn("h-3 w-3", accentText)} />
+      ) : isFreshCross ? (
+        <Trees className={cn("h-3 w-3", accentText)} />
+      ) : isFresh ? (
+        <Leaf className={cn("h-3 w-3", accentText)} />
+      ) : (
+        <GitFork className={cn("h-3 w-3", accentText)} />
       )}
       <Badge
         variant="outline"
         className={cn("border text-[9px] uppercase", badgeBorderText)}
       >
-        {row.isResume ? "continued" : isCall ? "call" : "subagent"}
+        {row.isResume
+          ? "continued"
+          : !isCall
+            ? "subagent"
+            : isFreshCross
+              ? "fresh @ other"
+              : isFresh
+                ? "fresh"
+                : "call"}
       </Badge>
       <span
         className="flex-1 truncate font-mono text-[11px] text-foreground"
