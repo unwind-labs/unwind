@@ -31,6 +31,7 @@ from typing import Any, Optional
 
 from .callstack import CallstackIndex, TaskNode
 from .fork_detect import ForkDetector
+from .jsonl import iter_lines
 from .subagents import SUBAGENT_PREFIX, SubagentIndex
 
 
@@ -53,6 +54,12 @@ _AGENT_ID_RE = re.compile(r"agentId:\s*([0-9a-f]{8,})")
 _INVOKE_ID_RE = re.compile(
     r'\\?"invoke_id\\?"\s*:\s*\\?"([0-9A-Za-z._-]+)\\?"'
 )
+# Callstack child-return envelope. Mirror of ``canvas_tree._YIELD_RE`` — when
+# no ``report.yaml`` exists (older runtime, or report not yet written) the
+# envelope in the child's last assistant message is the only signal that the
+# fork actually completed.
+_RETURN_RE = re.compile(r'"op"\s*:\s*"return"')
+_YIELD_RE = re.compile(r'"op"\s*:\s*"yield"')
 
 
 @dataclass
@@ -137,27 +144,35 @@ class SpawnResolver:
                 )
 
         # 2. Fork detector — only for sessions not already covered above.
+        # A fork is "covered" if it appears as a child in ANY callstack
+        # report, under any parent — not just the family root. Otherwise
+        # the detector adds phantom root→grandchild spawns for every
+        # nested descendant (they all share the same ``family_root``),
+        # which double-counts them on the root and creates spurious
+        # resume windows on the canvas.
+        callstack_children: set[str] = {child for _, child in callstack_pairs}
         fork_sids = self._fd.fork_session_ids()
         for fork_sid in fork_sids:
             root = self._fd.family_root(fork_sid)
             if root is None:
                 continue
-            if (root, fork_sid) in callstack_pairs:
+            if fork_sid in callstack_children:
                 continue
             # Trigger divergence-text computation lazily for every fork
             # under this root (cheap if cached).
             self._fd._enrich_divergence_for_root(root)  # type: ignore[attr-defined]
             label = self._fd.divergence_text_for(fork_sid) or fork_sid[:8]
             started_at = self._fork_birth(fork_sid)
+            status, ended_at = self._infer_fork_status(fork_sid)
             out.setdefault(root, []).append(
                 Spawn(
                     parent_session_id=root,
                     child_session_id=fork_sid,
                     kind="call",
                     label=label,
-                    status="running",
+                    status=status,
                     started_at=started_at,
-                    ended_at=None,
+                    ended_at=ended_at,
                     invoke_id=None,
                     source="fork",
                 )
@@ -388,6 +403,42 @@ class SpawnResolver:
         for child in task.children:
             self._absorb_callstack(out, seen_pairs, next_parent, child, rep)
 
+    def _infer_fork_status(
+        self, fork_sid: str
+    ) -> tuple[str, Optional[datetime]]:
+        """Status + ended_at for a fork-detected spawn with no callstack report.
+
+        Scans the child JSONL for the callstack return/yield envelope in an
+        assistant message. The envelope is the runtime's only persistent
+        signal that the fork finished — without it (no envelope, no report)
+        the spawn is genuinely in-flight, so we keep ``running``.
+
+        Yield wins over return only if the yield is the LATER envelope;
+        otherwise a yield-then-resumed-then-returned child would show as
+        yielded. We can't tell the two apart from the JSONL alone, so we
+        take the LAST envelope seen as the terminal state.
+        """
+        path = self._project_dir / f"{fork_sid}.jsonl"
+        if not path.is_file():
+            return "running", None
+        last_kind: Optional[str] = None
+        last_ts: Optional[datetime] = None
+        for rec in iter_lines(path):
+            if rec.get("type") != "assistant":
+                continue
+            text = _assistant_text(rec)
+            if not text:
+                continue
+            is_return = bool(_RETURN_RE.search(text))
+            is_yield = bool(_YIELD_RE.search(text))
+            if not (is_return or is_yield):
+                continue
+            last_kind = "complete" if is_return else "yielded"
+            last_ts = _parse_ts(rec.get("timestamp"))
+        if last_kind is None:
+            return "running", None
+        return last_kind, last_ts
+
     def _fork_birth(self, fork_sid: str) -> Optional[datetime]:
         """Birth timestamp of the fork's JSONL."""
         probe = self._fd._probes.get(fork_sid)  # type: ignore[attr-defined]
@@ -463,6 +514,34 @@ def _requested_tasks(tool_input: Any) -> list[str]:
     if isinstance(task, str):
         return [task]
     return []
+
+
+def _assistant_text(rec: dict[str, Any]) -> Optional[str]:
+    msg = rec.get("message")
+    if not isinstance(msg, dict):
+        return None
+    content = msg.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                t = block.get("text")
+                if isinstance(t, str):
+                    parts.append(t)
+        return "\n".join(parts) if parts else None
+    return None
+
+
+def _parse_ts(raw: Any) -> Optional[datetime]:
+    if not isinstance(raw, str):
+        return None
+    try:
+        s = raw[:-1] + "+00:00" if raw.endswith("Z") else raw
+        return datetime.fromisoformat(s)
+    except (ValueError, TypeError):
+        return None
 
 
 # Re-export the helpers messages.py still uses for tool_result-status
