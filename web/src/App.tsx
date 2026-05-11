@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { pickFolder, useDefaultProject, useProjects } from "@/api/client";
 import { useUi } from "@/store/ui";
+import { navigate, useUrlSync } from "@/lib/url-sync";
 import { useLiveEvents } from "@/ws/client";
 import {
   ResizableHandle,
@@ -15,50 +16,15 @@ import { FolderSearch, FolderTree } from "lucide-react";
 
 export function App() {
   const slug = useUi((s) => s.slug);
-  const setSlug = useUi((s) => s.setSlug);
   const [showBrowser, setShowBrowser] = useState(false);
 
   const { data: defaultProject } = useDefaultProject();
   useLiveEvents(slug);
 
-  const selectRootSession = useUi((s) => s.selectRootSession);
-  const rootId = useUi((s) => s.rootSessionId);
-
-  // Auto-select a project ONLY on first mount (URL param wins, then the
-  // server's default-project hint). Without the guard, clicking "switch
-  // project" would set slug=null and this effect would immediately set it
-  // back to the cached default — making the picker un-openable.
-  const autoSelected = useRef(false);
-  useEffect(() => {
-    if (autoSelected.current) return;
-    if (slug) {
-      autoSelected.current = true;
-      return;
-    }
-    const params = new URLSearchParams(window.location.search);
-    const queryProject = params.get("project");
-    if (queryProject) {
-      autoSelected.current = true;
-      setSlug(queryProject);
-      const querySession = params.get("session");
-      if (querySession) selectRootSession(querySession);
-      return;
-    }
-    if (defaultProject?.slug) {
-      autoSelected.current = true;
-      setSlug(defaultProject.slug);
-    }
-  }, [slug, defaultProject, setSlug, selectRootSession]);
-
-  // Reflect selection into the URL so refresh and bookmarks work.
-  useEffect(() => {
-    if (!slug) return;
-    const url = new URL(window.location.href);
-    url.searchParams.set("project", slug);
-    if (rootId) url.searchParams.set("session", rootId);
-    else url.searchParams.delete("session");
-    window.history.replaceState({}, "", url.toString());
-  }, [slug, rootId]);
+  // Single source of truth for URL ↔ store sync: parses the URL on mount,
+  // listens for popstate, and fills in the server's default project once
+  // it loads (only when no project is already selected).
+  useUrlSync(defaultProject?.slug ?? null);
 
   // Global ← / → to switch focus between panes; cmd/ctrl+O opens the folder
   // picker. Per-pane up/down handlers live in the panes themselves.
@@ -187,22 +153,16 @@ function PaneFrame({
 }
 
 function useOpenFolderPicker() {
-  const setSlug = useUi((s) => s.setSlug);
-  const selectRootSession = useUi((s) => s.selectRootSession);
   const queryClient = useQueryClient();
   return useCallback(async () => {
     const result = await pickFolder();
     if (result.cancelled || !result.slug) return;
-    // Reflect into URL so refresh keeps the new project.
-    const url = new URL(window.location.href);
-    url.searchParams.set("project", result.slug);
-    url.searchParams.delete("session");
-    window.history.replaceState({}, "", url.toString());
-    setSlug(result.slug);
-    selectRootSession(null);
+    // navigate.setSlug clears rootSessionId/detailSessionId/canvasFocus
+    // and pushes a history entry so back returns to the previous project.
+    navigate.setSlug(result.slug);
     // Refetch the project list so the title bar can resolve the new path.
     queryClient.invalidateQueries({ queryKey: ["projects"] });
-  }, [setSlug, selectRootSession, queryClient]);
+  }, [queryClient]);
 }
 
 function TopBar({

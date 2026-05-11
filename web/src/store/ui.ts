@@ -2,6 +2,14 @@ import { create } from "zustand";
 
 export type PaneKey = "sessions" | "thread";
 
+export type UrlSyncedState = {
+  slug: string | null;
+  rootSessionId: string | null;
+  detailSessionId: string | null;
+  detailWindow: { start: string | null; end: string | null } | null;
+  canvasFocusedNodeId: string | null;
+};
+
 interface UiState {
   slug: string | null;
   rootSessionId: string | null;
@@ -19,6 +27,12 @@ interface UiState {
    *  ``detailWindow`` records the slice's ``[start, end)`` so the trace
    *  shows only that range. ``null`` = show the full session. */
   detailWindow: { start: string | null; end: string | null } | null;
+  /** Keyboard cursor on the canvas — a *node id* (window_id), distinct
+   *  from detailSessionId (which is a session id and means the overlay
+   *  is open). Lifted into the store so `lib/url-sync` can mirror it
+   *  into the URL via ``replaceState`` (refresh restores the cursor;
+   *  back/forward does not step through cursor moves). */
+  canvasFocusedNodeId: string | null;
   /** Transient signal: when the user enters the canvas pane via
    *  keyboard (←/→), the canvas auto-focuses the root node. Mouse
    *  clicks must NOT trigger this auto-focus — otherwise a click on a
@@ -37,6 +51,11 @@ interface UiState {
     window?: { start: string | null; end: string | null } | null,
   ) => void;
   closeDetail: () => void;
+  setCanvasFocusedNodeId: (id: string | null) => void;
+  /** Bulk-write the URL-synced fields without the destructive resets that
+   *  ``setSlug``/``selectRootSession`` perform. ONLY used by the URL-sync
+   *  popstate path to restore a history entry verbatim. */
+  applyUrlState: (next: UrlSyncedState) => void;
   focusPane: (p: PaneKey) => void;
   rotateFocus: (dir: 1 | -1) => void;
   enterCanvasViaKeyboard: () => void;
@@ -55,6 +74,7 @@ export const useUi = create<UiState>((set, get) => ({
   callsOnly: false,
   detailSessionId: null,
   detailWindow: null,
+  canvasFocusedNodeId: null,
   canvasEnterIntent: null,
   focusedPane: "sessions",
   setSlug: (slug) =>
@@ -65,6 +85,7 @@ export const useUi = create<UiState>((set, get) => ({
       sessionFilter: "",
       detailSessionId: null,
       detailWindow: null,
+      canvasFocusedNodeId: null,
     }),
   selectRootSession: (id) =>
     set({
@@ -72,6 +93,7 @@ export const useUi = create<UiState>((set, get) => ({
       threadSessionId: id,
       detailSessionId: null,
       detailWindow: null,
+      canvasFocusedNodeId: null,
     }),
   selectThreadSession: (id) => set({ threadSessionId: id }),
   setIncludeMeta: (v) => set({ includeMeta: v }),
@@ -81,6 +103,16 @@ export const useUi = create<UiState>((set, get) => ({
   openDetail: (id, window) =>
     set({ detailSessionId: id, detailWindow: window ?? null }),
   closeDetail: () => set({ detailSessionId: null, detailWindow: null }),
+  setCanvasFocusedNodeId: (id) => set({ canvasFocusedNodeId: id }),
+  applyUrlState: (next) =>
+    set({
+      slug: next.slug,
+      rootSessionId: next.rootSessionId,
+      threadSessionId: next.rootSessionId,
+      detailSessionId: next.detailSessionId,
+      detailWindow: next.detailWindow,
+      canvasFocusedNodeId: next.canvasFocusedNodeId,
+    }),
   focusPane: (p) => set({ focusedPane: p }),
   rotateFocus: (dir) => {
     // Clamp at the ends rather than wrapping — pressing ← from the

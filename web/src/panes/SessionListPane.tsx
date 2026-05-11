@@ -3,6 +3,7 @@ import { Search } from "lucide-react";
 import { useSessions } from "@/api/client";
 import type { SessionRow, SessionStatus } from "@/api/types";
 import { useUi } from "@/store/ui";
+import { navigate } from "@/lib/url-sync";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { cn, formatTimeAgo, shortId } from "@/lib/utils";
 
@@ -35,7 +36,6 @@ function StatusDot({ status }: { status: SessionStatus }) {
 export function SessionListPane() {
   const slug = useUi((s) => s.slug);
   const selectedId = useUi((s) => s.rootSessionId);
-  const select = useUi((s) => s.selectRootSession);
   const filter = useUi((s) => s.sessionFilter);
   const setFilter = useUi((s) => s.setSessionFilter);
   const { data, isLoading, error } = useSessions(slug, false);
@@ -45,12 +45,13 @@ export function SessionListPane() {
   // Auto-select the most recent session whenever the project changes
   // and nothing is selected yet (e.g., user just picked a new folder).
   // The URL-restore flow in App.tsx sets rootSessionId before sessions
-  // load, so we won't trample a deep link.
+  // load, so we won't trample a deep link. Use the *Auto variant — this
+  // is canonicalization, not a user nav, so it doesn't push history.
   useEffect(() => {
     if (selectedId) return;
     if (!data || data.length === 0) return;
-    select(data[0].session_id);
-  }, [data, selectedId, select]);
+    navigate.selectRootSessionAuto(data[0].session_id);
+  }, [data, selectedId]);
 
   const filtered = useMemo(() => {
     if (!data) return [];
@@ -99,11 +100,11 @@ export function SessionListPane() {
       const next = goDown
         ? Math.min(filtered.length - 1, idx < 0 ? 0 : idx + 1)
         : Math.max(0, idx < 0 ? 0 : idx - 1);
-      select(filtered[next].session_id);
+      navigate.selectRootSession(filtered[next].session_id);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [filtered, selectedId, select, focusedPane]);
+  }, [filtered, selectedId, focusedPane]);
 
   return (
     <div className="uw-session-pane flex h-full flex-col">
@@ -148,7 +149,7 @@ export function SessionListPane() {
               key={s.session_id}
               session={s}
               selected={s.session_id === selectedId}
-              onSelect={() => select(s.session_id)}
+              onSelect={() => navigate.selectRootSession(s.session_id)}
             />
           ))}
         </ul>

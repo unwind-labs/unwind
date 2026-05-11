@@ -12,6 +12,7 @@ import ReactFlow, {
 import "reactflow/dist/style.css";
 import { X } from "lucide-react";
 import { useUi } from "@/store/ui";
+import { navigate } from "@/lib/url-sync";
 import {
   COMPACT_CARD_WIDTH,
   CompactCardNode,
@@ -32,8 +33,6 @@ export function CanvasPane() {
   const rootSessionId = useUi((s) => s.rootSessionId);
   const detailSessionId = useUi((s) => s.detailSessionId);
   const detailWindow = useUi((s) => s.detailWindow);
-  const openDetail = useUi((s) => s.openDetail);
-  const closeDetail = useUi((s) => s.closeDetail);
 
   // ESC closes the detail overlay. Hook MUST come before any early returns
   // to keep the hook count stable across renders (React #310).
@@ -42,12 +41,12 @@ export function CanvasPane() {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         e.preventDefault();
-        closeDetail();
+        navigate.closeDetail();
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [detailSessionId, closeDetail]);
+  }, [detailSessionId]);
 
   if (!rootSessionId) {
     return (
@@ -69,7 +68,7 @@ export function CanvasPane() {
           <CanvasInner
             slug={slug!}
             rootSessionId={rootSessionId}
-            onOpenDetail={openDetail}
+            onOpenDetail={navigate.openDetail}
           />
         </ReactFlowProvider>
         {detailSessionId ? (
@@ -77,7 +76,7 @@ export function CanvasPane() {
             <div className="flex items-center justify-between gap-2 border-b border-border bg-card/60 px-3 py-1.5">
               <button
                 type="button"
-                onClick={closeDetail}
+                onClick={() => navigate.closeDetail()}
                 className="flex items-center gap-1 rounded px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-accent/50 hover:text-foreground"
               >
                 <X className="h-3 w-3" />
@@ -140,13 +139,18 @@ function CanvasInner({
 
   // Keyboard cursor on the canvas — a *node id* (window_id), distinct
   // from detailSessionId (which is a session id and means the overlay
-  // is open). Up/Down move it, Enter opens detail.
-  const [canvasFocusedNodeId, setCanvasFocusedNodeId] = useState<string | null>(
-    null,
+  // is open). Up/Down move it, Enter opens detail. Lifted into the store
+  // so url-sync can mirror it into the URL via replaceState (see
+  // lib/url-sync's navigate.setCanvasFocus). The store's
+  // ``selectRootSession`` action already clears focus when the root
+  // changes, so no separate reset effect is needed — and removing it is
+  // what lets a deep link like ``?session=Y&focus=A`` actually restore
+  // the cursor on first mount.
+  const canvasFocusedNodeId = useUi((s) => s.canvasFocusedNodeId);
+  const setCanvasFocusedNodeId = useCallback(
+    (id: string | null) => navigate.setCanvasFocus(id),
+    [],
   );
-  useEffect(() => {
-    setCanvasFocusedNodeId(null);
-  }, [rootSessionId]);
 
   // Per-node measured heights — fed back from each card's ResizeObserver.
   const [measuredHeights, setMeasuredHeights] = useState<Record<string, number>>(
@@ -203,7 +207,8 @@ function CanvasInner({
         return;
       }
       autoOpenedForRef.current = rootSessionId;
-      onOpenDetail(rootSessionId);
+      // Auto-open is not a user nav: replaceState, no history entry.
+      navigate.openDetailAuto(rootSessionId);
     }, 400);
     return () => window.clearTimeout(t);
   }, [
