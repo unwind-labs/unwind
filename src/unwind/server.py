@@ -98,6 +98,8 @@ def _mount_static(app: FastAPI) -> None:
         def index() -> FileResponse:
             return FileResponse(index_html)
 
+        static_root = STATIC_DIR.resolve()
+
         @app.get("/{full_path:path}", include_in_schema=False)
         def spa(full_path: str) -> FileResponse:
             # /api/* and /assets/* already matched above; this catches deep SPA
@@ -105,9 +107,13 @@ def _mount_static(app: FastAPI) -> None:
             if full_path.startswith("api/") or full_path.startswith("assets/"):
                 # 404 — FastAPI would already have matched a registered route.
                 return FileResponse(index_html, status_code=404)
-            target = STATIC_DIR / full_path
-            if target.is_file():
-                return FileResponse(target)
+            try:
+                target = (STATIC_DIR / full_path).resolve()
+            except (OSError, RuntimeError):
+                return FileResponse(index_html)
+            if target == static_root or static_root in target.parents:
+                if target.is_file():
+                    return FileResponse(target)
             return FileResponse(index_html)
 
     else:
