@@ -16,7 +16,7 @@ import {
 import { useMessages } from "@/api/client";
 import type { Message, SpawnCardData } from "@/api/types";
 import { useUi } from "@/store/ui";
-import { filterMessagesByWindow } from "@/panes/instances";
+import { filterExtrasByWindow, filterMessagesByWindow } from "@/panes/instances";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import {
   Collapsible,
@@ -25,6 +25,7 @@ import {
 } from "@/components/ui/collapsible";
 import { Badge } from "@/components/ui/badge";
 import { cn, shortId } from "@/lib/utils";
+import { isTypingTarget } from "@/lib/keyboard";
 
 /**
  * Single-pane content view: renders a session's full message trace, where
@@ -58,13 +59,7 @@ export function TracePane({
   useEffect(() => {
     if (focusedPane !== "thread") return;
     const onKey = (e: KeyboardEvent) => {
-      const target = e.target as HTMLElement | null;
-      const typing =
-        target &&
-        (target.tagName === "INPUT" ||
-          target.tagName === "TEXTAREA" ||
-          target.isContentEditable);
-      if (typing) return;
+      if (isTypingTarget(e)) return;
       if (
         e.key !== "ArrowUp" &&
         e.key !== "ArrowDown" &&
@@ -210,8 +205,6 @@ function SessionTrace({
   const windowed = useMemo(() => {
     if (!data) return null;
     if (!traceWindow || (!traceWindow.start && !traceWindow.end)) return data;
-    const startMs = traceWindow.start ? Date.parse(traceWindow.start) : -Infinity;
-    const endMs = traceWindow.end ? Date.parse(traceWindow.end) : Infinity;
     return {
       ...data,
       messages: filterMessagesByWindow(
@@ -219,16 +212,11 @@ function SessionTrace({
         traceWindow.start,
         traceWindow.end,
       ),
-      // Mirror the canvas card's behaviour: each extra represents one
-      // callstack invocation and has its own ``started_at``. Keep the
-      // ones whose anchor falls inside this window. Extras without a
-      // ``started_at`` (legacy / fork-fallback) pin to the latest
-      // window only.
-      extra_spawns: (data.extra_spawns ?? []).filter((s) => {
-        if (!s.started_at) return traceWindow.end === null;
-        const t = Date.parse(s.started_at);
-        return t >= startMs && t < endMs;
-      }),
+      extra_spawns: filterExtrasByWindow(
+        data.extra_spawns,
+        traceWindow.start,
+        traceWindow.end,
+      ),
     };
   }, [data, traceWindow]);
 

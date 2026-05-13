@@ -14,7 +14,7 @@ import {
 import { useMessages } from "@/api/client";
 import { cn, shortId } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
-import { filterMessagesByWindow } from "./instances";
+import { filterExtrasByWindow, filterMessagesByWindow } from "./instances";
 import { deriveRows, type Row } from "./derive-rows";
 
 export { deriveRows } from "./derive-rows";
@@ -91,9 +91,6 @@ export type CompactCardData = {
 
 export function CompactCardNode({ data }: { data: CompactCardData }) {
   const { data: messages } = useMessages(data.slug, data.sessionId, false);
-  // ``windowEnd === null`` means this is the open-ended (latest) view of the
-  // session — same shape as the root node, which has both ends null.
-  const isLatest = data.windowEnd === null;
   // Filter the child's full message stream to this window so each card on
   // the canvas only shows what happened during its own slice of the session.
   // Earlier slices stop at the next invoke_resume; the latest is open-ended.
@@ -104,21 +101,13 @@ export function CompactCardNode({ data }: { data: CompactCardData }) {
       data.windowStart,
       data.windowEnd,
     );
-    // ``extra_spawns`` are callstack-Skill spawns without an MCP
-    // tool_use anchor. The API emits one entry per invocation with its
-    // own ``started_at``, so we partition them across this card's
-    // window the same way the message stream is partitioned. Entries
-    // with no ``started_at`` (legacy aggregate cards, fork-fallback)
-    // pin to the latest window so they don't fan out across resumes.
-    const startMs = data.windowStart ? Date.parse(data.windowStart) : -Infinity;
-    const endMs = data.windowEnd ? Date.parse(data.windowEnd) : Infinity;
-    const extras = (messages.extra_spawns ?? []).filter((s) => {
-      if (!s.started_at) return isLatest;
-      const t = Date.parse(s.started_at);
-      return t >= startMs && t < endMs;
-    });
+    const extras = filterExtrasByWindow(
+      messages.extra_spawns,
+      data.windowStart,
+      data.windowEnd,
+    );
     return { messages: filtered, extras };
-  }, [messages, data.windowStart, data.windowEnd, isLatest]);
+  }, [messages, data.windowStart, data.windowEnd]);
   // Pass the FULL unwindowed message stream as the third arg so spawn
   // rows fired in this window still flip to "done" when their
   // tool_result lands in a later window (after a yield/resume).

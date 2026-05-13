@@ -60,8 +60,12 @@ function snapshot(): UrlState {
   };
 }
 
-function writeHistory(state: UrlState, mode: "push" | "replace") {
-  if (isApplyingFromUrl) return;
+function writeHistory(
+  state: UrlState,
+  mode: "push" | "replace",
+  opts?: { force?: boolean },
+) {
+  if (!opts?.force && isApplyingFromUrl) return;
   const target = window.location.pathname + buildSearch(state);
   const current = window.location.pathname + window.location.search;
   if (target === current) return;
@@ -123,7 +127,8 @@ export function useUrlSync(defaultProjectSlug: string | null | undefined) {
     }
     if (useUi.getState().slug) settledRef.current = true;
     // Canonicalize: write back the parsed URL so e.g. param order is stable.
-    writeHistoryDirect(snapshot(), "replace");
+    // Force past isApplyingFromUrl since we're still inside the apply window.
+    writeHistory(snapshot(), "replace", { force: true });
 
     const onPop = () => {
       isApplyingFromUrl = true;
@@ -154,19 +159,6 @@ export function useUrlSync(defaultProjectSlug: string | null | undefined) {
     } finally {
       isApplyingFromUrl = false;
     }
-    writeHistoryDirect(snapshot(), "replace");
+    writeHistory(snapshot(), "replace", { force: true });
   }, [defaultProjectSlug]);
-}
-
-// Bypasses the isApplyingFromUrl guard — used inside useUrlSync to write
-// the canonical URL right after a popstate-driven apply.
-function writeHistoryDirect(state: UrlState, mode: "push" | "replace") {
-  const target = window.location.pathname + buildSearch(state);
-  const current = window.location.pathname + window.location.search;
-  if (target === current) return;
-  if (mode === "push") {
-    window.history.pushState({}, "", target);
-  } else {
-    window.history.replaceState({}, "", target);
-  }
 }

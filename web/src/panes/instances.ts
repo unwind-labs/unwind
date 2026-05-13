@@ -7,7 +7,30 @@
  *  consuming a server-precomputed tree.
  */
 
-import type { Message } from "@/api/types";
+import type { Message, SpawnCardData } from "@/api/types";
+
+
+/** Filter ``extra_spawns`` to a single window ``[start, end)``.
+ *
+ *  Extras represent callstack-Skill spawns without an MCP tool_use anchor,
+ *  so they're sliced by ``started_at`` rather than by message uuid order.
+ *  Extras with no ``started_at`` (legacy / fork-fallback) pin to whichever
+ *  window is the open-ended latest one. */
+export function filterExtrasByWindow(
+  extras: SpawnCardData[] | null | undefined,
+  start: string | null,
+  end: string | null,
+): SpawnCardData[] {
+  if (!extras) return [];
+  const isLatest = end == null;
+  const startMs = start ? Date.parse(start) : -Infinity;
+  const endMs = end ? Date.parse(end) : Infinity;
+  return extras.filter((s) => {
+    if (!s.started_at) return isLatest;
+    const t = Date.parse(s.started_at);
+    return t >= startMs && t < endMs;
+  });
+}
 
 
 /** Filter a child session's messages to a window ``[start, end)``.

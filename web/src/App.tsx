@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { pickFolder, useDefaultProject, useProjects } from "@/api/client";
 import { useUi } from "@/store/ui";
+import { isTypingTarget } from "@/lib/keyboard";
 import { navigate, useUrlSync } from "@/lib/url-sync";
 import { useLiveEvents } from "@/ws/client";
 import {
@@ -37,12 +38,6 @@ export function App() {
   focusedPaneRef.current = focusedPaneFromStore;
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      const target = e.target as HTMLElement | null;
-      const typing =
-        target &&
-        (target.tagName === "INPUT" ||
-          target.tagName === "TEXTAREA" ||
-          target.isContentEditable);
       // cmd/ctrl+O fires regardless of focus — matches the OS-wide convention
       // for "Open…". We still skip it if a modifier-stacked variant (shift,
       // alt) is active so we don't steal browser shortcuts like ⌘⇧O.
@@ -56,7 +51,7 @@ export function App() {
         void openPicker();
         return;
       }
-      if (typing) return;
+      if (isTypingTarget(e)) return;
       // When the canvas pane is focused, it owns ←/→ for tree
       // navigation (parent/child) and only falls through to pane focus
       // rotation when there's nowhere to go in that direction. Skipping

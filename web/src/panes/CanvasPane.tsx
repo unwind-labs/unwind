@@ -12,6 +12,7 @@ import ReactFlow, {
 import "reactflow/dist/style.css";
 import { X } from "lucide-react";
 import { useUi } from "@/store/ui";
+import { isTypingTarget } from "@/lib/keyboard";
 import { navigate } from "@/lib/url-sync";
 import {
   COMPACT_CARD_WIDTH,
@@ -367,13 +368,7 @@ function CanvasInner({
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      const target = e.target as HTMLElement | null;
-      const typing =
-        target &&
-        (target.tagName === "INPUT" ||
-          target.tagName === "TEXTAREA" ||
-          target.isContentEditable);
-      if (typing) return;
+      if (isTypingTarget(e)) return;
       const s = navStateRef.current;
       if (s.focusedPane !== "thread") return;
       if (s.detailOpen) return;
