@@ -41,11 +41,14 @@ export function useProjects() {
   });
 }
 
-/** Polls every 3s so the left pane's status dot stays in lockstep
- *  with the canvas main-node status (which polls at the same rate via
- *  ``useCanvasTree``). Without this matching cadence the left pane
- *  could lag the canvas by up to 30 seconds — visually jarring when
- *  the user just resumed a session. */
+// The WebSocket is the primary push channel; ws/client.ts invalidates
+// each query family on the matching server event. These polling intervals
+// are pure safety nets for when the WS is flaky or paused (background tab,
+// reconnect window). 30s strikes the balance: 10x fewer HTTP round-trips
+// than the prior 3s cadence, while still ensuring the UI converges within
+// half a minute of a missed event.
+const POLL_SAFETY_NET_MS = 30_000;
+
 export function useSessions(
   slug: string | null | undefined,
   includeForks: boolean = false,
@@ -57,7 +60,7 @@ export function useSessions(
       j<SessionRow[]>(
         `/api/projects/${enc(slug!)}/sessions?include_forks=${includeForks}`,
       ),
-    refetchInterval: 3_000,
+    refetchInterval: POLL_SAFETY_NET_MS,
   });
 }
 
@@ -75,9 +78,7 @@ export function useCanvasTree(
       j<CanvasTreeResponse>(
         `/api/projects/${enc(slug!)}/sessions/${enc(rootSessionId!)}/canvas`,
       ),
-    // Same cadence as messages — the WS will normally invalidate
-    // sooner; this is a safety net.
-    refetchInterval: 3_000,
+    refetchInterval: POLL_SAFETY_NET_MS,
   });
 }
 
@@ -93,10 +94,6 @@ export function useMessages(
       j<MessagesResponse>(
         `/api/projects/${enc(slug!)}/sessions/${enc(sessionId!)}/messages?include_meta=${includeMeta}`,
       ),
-    // Refresh aggressively while a session is in flight so the canvas picks
-    // up new spawns and child sessions as callstack updates report.yaml.
-    // The WebSocket also invalidates on tree_changed, but this is a safety
-    // net for environments where the WS is flaky.
-    refetchInterval: 3_000,
+    refetchInterval: POLL_SAFETY_NET_MS,
   });
 }

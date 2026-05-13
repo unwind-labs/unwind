@@ -122,9 +122,19 @@ export function CompactCardNode({ data }: { data: CompactCardData }) {
   // Pass the FULL unwindowed message stream as the third arg so spawn
   // rows fired in this window still flip to "done" when their
   // tool_result lands in a later window (after a yield/resume).
-  const rows: Row[] = windowed
-    ? deriveRows(windowed.messages, windowed.extras, messages?.messages ?? windowed.messages)
-    : [];
+  // Memo-ed: every parent re-render would otherwise re-walk the entire
+  // window for every card, even when no inputs changed.
+  const rows: Row[] = useMemo(
+    () =>
+      windowed
+        ? deriveRows(
+            windowed.messages,
+            windowed.extras,
+            messages?.messages ?? windowed.messages,
+          )
+        : [],
+    [windowed, messages],
+  );
   const cardRef = useRef<HTMLDivElement | null>(null);
 
   // Spawn handles are added/removed dynamically as `useMessages` resolves and
