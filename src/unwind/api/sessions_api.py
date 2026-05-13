@@ -12,7 +12,7 @@ import json as _json
 from pathlib import Path
 
 from ..canvas_tree import build_canvas_tree
-from ..jsonl import collect_uuids, iter_lines
+from ..jsonl import collect_uuids, iter_lines, iter_lines_from
 from ..messages import annotate_spawns, base_uuid, read_messages
 from ..processes import project_activity, session_status
 from ..registry import (
@@ -518,6 +518,12 @@ def get_tree(slug: SlugPath, session_id: SessionIdPath) -> TreeResponse:
     )
 
 
+# Bytes of tail to consult for the at_user_yield state machine. The yield
+# envelope plus the last few assistant/user records easily fit in 64 KiB;
+# scanning more is wasted I/O on every session-list refresh.
+_YIELD_TAIL_BYTES = 64 * 1024
+
+
 def _is_at_user_yield(jsonl: Path) -> bool:
     """Whether ``jsonl``'s last record indicates Claude paused for input.
 
@@ -535,12 +541,31 @@ def _is_at_user_yield(jsonl: Path) -> bool:
     it's the recap Claude writes when finishing work while the user
     was away.
 
+    Reads only the last ~64 KiB of the JSONL: the final state-machine
+    value depends only on the most recent ``assistant`` / ``user`` /
+    ``system`` records, so a full-file scan was pure waste on every
+    session-list refresh.
+
     Returns ``False`` on any error so the caller safely falls back
     to the prior status.
     """
     try:
+        try:
+            size = jsonl.stat().st_size
+        except OSError:
+            return False
+        if size <= _YIELD_TAIL_BYTES:
+            iterator = iter_lines(jsonl)
+        else:
+            iterator, _ = iter_lines_from(jsonl, size - _YIELD_TAIL_BYTES)
+            # iter_lines_from already splits on newline and skips empties,
+            # but its first item may be a partial line if we didn't land on
+            # a record boundary. iter_lines_from already returns parsed
+            # records (json.loads above), so a partial line would have
+            # raised JSONDecodeError and been skipped — no extra work
+            # needed here.
         at_prompt = False
-        for rec in iter_lines(jsonl):
+        for rec in iterator:
             t = rec.get("type")
             if t == "assistant":
                 msg = rec.get("message")
