@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Literal, Optional
 
-from .jsonl import iter_lines
+from .jsonl import read_records
 
 
 Role = Literal["user", "assistant", "tool_use", "tool_result", "system"]
@@ -252,7 +252,14 @@ def read_messages(
     *,
     include_meta: bool = False,
 ) -> MessagePage:
-    """Parse the whole JSONL, returning a normalized ``MessagePage``."""
+    """Parse the whole JSONL, returning a normalized ``MessagePage``.
+
+    Records are pulled from ``jsonl.read_records`` (cached by mtime+size),
+    so a session that hasn't changed since the last call skips both disk
+    I/O and JSON parsing. Normalization runs every call so each
+    ``Message`` returned is a fresh, mutable object — safe for callers
+    that tag origin/inheritance flags downstream.
+    """
     out: list[Message] = []
     last_uuid: Optional[str] = None
     try:
@@ -260,7 +267,7 @@ def read_messages(
     except OSError:
         size = 0
 
-    for rec in iter_lines(path):
+    for rec in read_records(path):
         last_uuid = rec.get("uuid") or last_uuid
         for m in _normalize_record(rec, include_meta=include_meta):
             out.append(m)

@@ -19,6 +19,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator, Optional
 
+from ._cache import PathCache as _PathCache
+
 
 # --- raw line iteration --------------------------------------------------
 
@@ -40,19 +42,49 @@ def iter_lines(path: Path) -> Iterator[dict[str, Any]]:
                 continue
 
 
+def _load_records(path: Path) -> tuple[dict[str, Any], ...]:
+    """Read every line of ``path`` into a tuple of parsed records.
+
+    Tuple (not list) so callers can't mutate the cached payload.
+    """
+    return tuple(iter_lines(path))
+
+
+_RECORDS_CACHE = _PathCache(_load_records)
+
+
+def read_records(path: Path) -> tuple[dict[str, Any], ...]:
+    """Cached version of ``list(iter_lines(path))``, keyed by (mtime, size).
+
+    The returned tuple is shared by reference — do not mutate the records
+    themselves. Treat them as read-only views of the on-disk JSONL.
+    """
+    return _RECORDS_CACHE.get(path)  # type: ignore[return-value]
+
+
+def _collect_uuids_uncached(path: Path) -> frozenset[str]:
+    out: set[str] = set()
+    for rec in iter_lines(path):
+        u = rec.get("uuid")
+        if isinstance(u, str):
+            out.add(u)
+    return frozenset(out)
+
+
+_UUID_CACHE = _PathCache(_collect_uuids_uncached)
+
+
 def collect_uuids(path: Path) -> set[str]:
     """Return every ``uuid`` field present in a JSONL.
 
     Used to compute fork-inheritance: a fork session's JSONL begins with the
     parent's history, sharing message uuids. Any uuid in the fork that is also
     in the parent is "inherited"; the rest is fork-original.
+
+    Cached by (path, mtime, size); the returned set is a frozenset shared by
+    reference across callers — must not be mutated.
     """
-    out: set[str] = set()
-    for rec in iter_lines(path):
-        u = rec.get("uuid")
-        if isinstance(u, str):
-            out.add(u)
-    return out
+    return _UUID_CACHE.get(path)  # type: ignore[return-value]
 
 
 def iter_lines_from(path: Path, byte_offset: int) -> tuple[Iterator[dict[str, Any]], int]:
