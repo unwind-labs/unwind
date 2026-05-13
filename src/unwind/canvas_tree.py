@@ -28,25 +28,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from .jsonl import iter_lines
-
-
-# MCP tools that map to a parent → child invocation. Surfaced for
-# debugging/symmetry with messages.py — actual edges currently come
-# from callstack ``report.yaml`` files (more authoritative since they
-# carry timestamps + child session ids without needing tool_result
-# correlation).
-CALLSTACK_TOOL_NAMES = frozenset(
-    {
-        # Legacy names — kept so old sessions still match. Current runtime
-        # emits the unprefixed forms below.
-        "mcp__plugin_callstack_call__invoke",
-        "mcp__plugin_callstack_call__invoke_parallel",
-        "mcp__plugin_callstack_call__invoke_resume",
-        "mcp__plugin_callstack_call__call",
-        "mcp__plugin_callstack_call__resume",
-    }
+from .jsonl import (
+    extract_assistant_text as _extract_assistant_text,
+    iter_lines,
+    parse_ts as _parse_ts,
 )
+
 
 # Yield envelope detector. Claude Code's callstack runtime emits
 # ``{"op": "yield", "question": ...}`` inside an assistant message's
@@ -189,32 +176,8 @@ def _is_tool_result_record(rec: dict[str, Any]) -> bool:
     return False
 
 
-def _extract_assistant_text(rec: dict[str, Any]) -> Optional[str]:
-    msg = rec.get("message")
-    if not isinstance(msg, dict):
-        return None
-    content = msg.get("content")
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts: list[str] = []
-        for block in content:
-            if isinstance(block, dict) and block.get("type") == "text":
-                t = block.get("text")
-                if isinstance(t, str):
-                    parts.append(t)
-        return "\n".join(parts) if parts else None
-    return None
 
 
-def _parse_ts(raw: Any) -> Optional[datetime]:
-    if not isinstance(raw, str):
-        return None
-    try:
-        s = raw[:-1] + "+00:00" if raw.endswith("Z") else raw
-        return datetime.fromisoformat(s)
-    except (ValueError, TypeError):
-        return None
 
 
 # --- Invocation enumeration --------------------------------------------

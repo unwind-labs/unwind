@@ -228,16 +228,73 @@ def _file_birth_dt(st) -> Optional[datetime]:
     return None
 
 
-def _parse_ts(raw: Any) -> Optional[datetime]:
+def stringify_tool_result(r: Any) -> str:
+    """Flatten a Claude ``tool_result`` content payload to plain text.
+
+    Accepts ``None``, a plain string, or the list-of-blocks shape that
+    Claude emits when the result has structure. Returns an empty
+    string for anything else; callers that want richer rendering
+    (e.g. JSON pretty-printing) can layer on top.
+    """
+    if r is None:
+        return ""
+    if isinstance(r, str):
+        return r
+    if isinstance(r, list):
+        parts: list[str] = []
+        for block in r:
+            if isinstance(block, dict) and block.get("type") == "text":
+                t = block.get("text")
+                if isinstance(t, str):
+                    parts.append(t)
+        return "\n".join(parts)
+    return ""
+
+
+def extract_assistant_text(rec: dict[str, Any]) -> Optional[str]:
+    """Return the concatenated plain-text content of an assistant record.
+
+    Accepts both the simple string-content shape and the list-of-blocks
+    shape; returns ``None`` when the record carries no plain text (e.g.
+    only tool_use blocks).
+    """
+    msg = rec.get("message")
+    if not isinstance(msg, dict):
+        return None
+    content = msg.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                t = block.get("text")
+                if isinstance(t, str):
+                    parts.append(t)
+        return "\n".join(parts) if parts else None
+    return None
+
+
+def parse_ts(raw: Any) -> Optional[datetime]:
+    """Parse a Claude-style ISO 8601 timestamp into a UTC ``datetime``.
+
+    Accepts both ``"...Z"`` and ``"...+HH:MM"`` shapes. Returns ``None``
+    for non-string or unparseable inputs. Always returns a tz-aware
+    UTC ``datetime`` so callers can compare freely.
+    """
     if not isinstance(raw, str):
         return None
     try:
-        # Claude writes "2026-04-24T08:30:39.485Z" style.
         if raw.endswith("Z"):
             raw = raw[:-1] + "+00:00"
         return datetime.fromisoformat(raw).astimezone(timezone.utc)
     except ValueError:
         return None
+
+
+# Module-private alias retained for backwards compatibility within
+# ``jsonl.py`` itself.
+_parse_ts = parse_ts
 
 
 def _extract_user_text(rec: dict[str, Any]) -> Optional[str]:

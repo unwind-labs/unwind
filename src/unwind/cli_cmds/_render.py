@@ -193,18 +193,14 @@ def _message_body_text(m: Message) -> str:
 
 
 def _stringify_result(r: Any) -> str:
-    if r is None:
-        return ""
-    if isinstance(r, str):
-        return r
-    if isinstance(r, list):
-        out = []
-        for block in r:
-            if isinstance(block, dict) and block.get("type") == "text":
-                t = block.get("text")
-                if isinstance(t, str):
-                    out.append(t)
-        return "\n".join(out)
+    from ..jsonl import stringify_tool_result
+
+    text = stringify_tool_result(r)
+    if text:
+        return text
+    # CLI variant adds a pretty JSON fallback for unrecognised shapes.
+    if r is None or isinstance(r, (str, list)):
+        return text
     return _short_json(r)
 
 

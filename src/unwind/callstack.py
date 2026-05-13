@@ -24,6 +24,8 @@ from datetime import datetime, timezone  # noqa: F401
 from pathlib import Path
 from typing import Any, Optional
 
+from .jsonl import parse_ts as _parse_ts
+
 import yaml
 
 
@@ -585,12 +587,3 @@ def _to_float(v: Any) -> Optional[float]:
         return None
 
 
-def _parse_ts(v: Any) -> Optional[datetime]:
-    if not isinstance(v, str):
-        return None
-    try:
-        if v.endswith("Z"):
-            v = v[:-1] + "+00:00"
-        return datetime.fromisoformat(v).astimezone(timezone.utc)
-    except ValueError:
-        return None

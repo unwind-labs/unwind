@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Literal, Optional
 
-from .jsonl import read_records
+from .jsonl import parse_ts as _parse_ts, read_records
 
 
 Role = Literal["user", "assistant", "tool_use", "tool_result", "system"]
@@ -114,6 +114,8 @@ def base_uuid(message_uuid: str) -> str:
     if ":" in message_uuid:
         return message_uuid.split(":", 1)[0]
     return message_uuid
+
+
 
 
 from .spawns import Spawn, SpawnResolver  # noqa: E402
@@ -528,12 +530,3 @@ def _stringify_meta(rec: dict[str, Any]) -> str:
     return str(rec.get("type", ""))
 
 
-def _parse_ts(raw: Any) -> Optional[datetime]:
-    if not isinstance(raw, str):
-        return None
-    try:
-        if raw.endswith("Z"):
-            raw = raw[:-1] + "+00:00"
-        return datetime.fromisoformat(raw).astimezone(timezone.utc)
-    except ValueError:
-        return None

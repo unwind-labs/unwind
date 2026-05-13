@@ -31,7 +31,12 @@ from typing import Any, Optional
 
 from .callstack import CallstackIndex, TaskNode
 from .fork_detect import ForkDetector
-from .jsonl import iter_lines
+from .jsonl import (
+    extract_assistant_text as _assistant_text,
+    iter_lines,
+    parse_ts as _parse_ts,
+    stringify_tool_result as _stringify_result,
+)
 from .subagents import SUBAGENT_PREFIX, SubagentIndex
 
 
@@ -575,17 +580,6 @@ def _extract_agent_id(result: Any) -> Optional[str]:
     return m.group(1) if m else None
 
 
-def _stringify_result(r: Any) -> str:
-    if isinstance(r, str):
-        return r
-    if isinstance(r, list):
-        parts: list[str] = []
-        for block in r:
-            if isinstance(block, dict):
-                if block.get("type") == "text" and isinstance(block.get("text"), str):
-                    parts.append(block["text"])
-        return "\n".join(parts)
-    return ""
 
 
 def _requested_tasks(tool_input: Any) -> list[str]:
@@ -606,32 +600,8 @@ def _requested_tasks(tool_input: Any) -> list[str]:
     return []
 
 
-def _assistant_text(rec: dict[str, Any]) -> Optional[str]:
-    msg = rec.get("message")
-    if not isinstance(msg, dict):
-        return None
-    content = msg.get("content")
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts: list[str] = []
-        for block in content:
-            if isinstance(block, dict) and block.get("type") == "text":
-                t = block.get("text")
-                if isinstance(t, str):
-                    parts.append(t)
-        return "\n".join(parts) if parts else None
-    return None
 
 
-def _parse_ts(raw: Any) -> Optional[datetime]:
-    if not isinstance(raw, str):
-        return None
-    try:
-        s = raw[:-1] + "+00:00" if raw.endswith("Z") else raw
-        return datetime.fromisoformat(s)
-    except (ValueError, TypeError):
-        return None
 
 
 # Re-export the helpers messages.py still uses for tool_result-status
