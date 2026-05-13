@@ -15,8 +15,6 @@ import logging
 import threading
 import time
 from pathlib import Path
-from typing import Optional
-
 from typing import Any
 
 from watchdog.events import FileSystemEvent, FileSystemEventHandler
@@ -37,13 +35,26 @@ DEBOUNCE_SEC = 0.20
 
 
 class _DebouncedHandler(FileSystemEventHandler):
-    """Batches filesystem events and invokes a callback after a quiet window."""
+    """Batches filesystem events and invokes a callback after a quiet window.
+
+    One long-lived flush thread per handler. on_any_event just adds the
+    path to a set and signals the thread; the thread re-arms its
+    DEBOUNCE_SEC quiet window each time a new event fires, and only
+    invokes ``flush`` after a full window with no activity. Replaces an
+    earlier ``threading.Timer``-per-burst scheme that churned threads
+    on heavy turns.
+    """
 
     def __init__(self, flush) -> None:
         self._flush = flush
         self._dirty: set[str] = set()
         self._lock = threading.Lock()
-        self._timer: Optional[threading.Timer] = None
+        self._wake = threading.Event()
+        self._stop = threading.Event()
+        self._thread = threading.Thread(
+            target=self._run, name="unwind-watcher-flush", daemon=True
+        )
+        self._thread.start()
 
     def on_any_event(self, event: FileSystemEvent) -> None:
         if event.is_directory:
@@ -53,17 +64,33 @@ class _DebouncedHandler(FileSystemEventHandler):
             return
         with self._lock:
             self._dirty.add(path)
-            if self._timer is not None:
-                self._timer.cancel()
-            self._timer = threading.Timer(DEBOUNCE_SEC, self._do_flush)
-            self._timer.daemon = True
-            self._timer.start()
+        self._wake.set()
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._wake.set()
+        self._thread.join(timeout=2.0)
+
+    def _run(self) -> None:
+        while True:
+            self._wake.wait()
+            if self._stop.is_set():
+                return
+            # Drain bursts: keep extending the quiet window until
+            # DEBOUNCE_SEC elapses without a new event.
+            while True:
+                self._wake.clear()
+                if self._wake.wait(timeout=DEBOUNCE_SEC):
+                    if self._stop.is_set():
+                        return
+                    continue
+                break  # quiet
+            self._do_flush()
 
     def _do_flush(self) -> None:
         with self._lock:
             paths = set(self._dirty)
             self._dirty.clear()
-            self._timer = None
         if paths:
             try:
                 self._flush(paths)
@@ -104,6 +131,7 @@ class ProjectWatcher:
 
         self._observer = _Observer()
         handler = _DebouncedHandler(self._handle_paths)
+        self._handler = handler
 
         if project_dir.is_dir():
             self._observer.schedule(handler, str(project_dir), recursive=False)
@@ -123,6 +151,10 @@ class ProjectWatcher:
             self._observer.join(timeout=2.0)
             self._observer = None
             self._started = False
+        handler = getattr(self, "_handler", None)
+        if handler is not None:
+            handler.stop()
+            self._handler = None
 
     # --- event routing ---------------------------------------------------
 
