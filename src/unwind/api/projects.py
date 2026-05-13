@@ -4,10 +4,11 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
 from ..dialog import pick_folder
+from ..security import require_trusted_origin
 from ..projects import slug_for
 from ..registry import (
     callstack_for_slug,
@@ -107,7 +108,11 @@ def get_default_project() -> DefaultProject:
     return DefaultProject(slug=default_slug(), source_path=path)
 
 
-@router.post("/projects/pick-folder", response_model=PickedFolder)
+@router.post(
+    "/projects/pick-folder",
+    response_model=PickedFolder,
+    dependencies=[Depends(require_trusted_origin)],
+)
 def pick_folder_endpoint() -> PickedFolder:
     """Open a native folder-picker on the host and register the result.
 

@@ -1,0 +1,47 @@
+"""State-changing endpoints reject cross-origin requests."""
+from __future__ import annotations
+
+from unittest.mock import patch
+
+from fastapi.testclient import TestClient
+
+from unwind.server import create_app
+
+
+def test_pick_folder_rejects_cross_origin(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("UNWIND_ALLOWED_ORIGINS", raising=False)
+    app = create_app()
+    with TestClient(app) as c:
+        r = c.post(
+            "/api/projects/pick-folder",
+            headers={"origin": "http://evil.example"},
+        )
+        assert r.status_code == 403
+
+
+def test_pick_folder_accepts_same_origin(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    app = create_app()
+    with TestClient(app) as c:
+        # User cancels the picker dialog → endpoint must run, not be rejected.
+        with patch("unwind.api.projects.pick_folder", return_value=None):
+            r = c.post(
+                "/api/projects/pick-folder",
+                headers={
+                    "origin": "http://testserver",
+                    "host": "testserver",
+                },
+            )
+        assert r.status_code == 200
+        assert r.json() == {"cancelled": True, "slug": None, "source_path": None}
+
+
+def test_pick_folder_accepts_no_origin(tmp_path, monkeypatch):
+    """CLI / curl have no Origin header; we trust them (browsers always send it)."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    app = create_app()
+    with TestClient(app) as c:
+        with patch("unwind.api.projects.pick_folder", return_value=None):
+            r = c.post("/api/projects/pick-folder")
+        assert r.status_code == 200

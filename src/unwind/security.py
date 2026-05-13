@@ -9,6 +9,8 @@ from __future__ import annotations
 import os
 from urllib.parse import urlsplit
 
+from fastapi import HTTPException, Request
+
 
 DEFAULT_DEV_ORIGINS: tuple[str, ...] = (
     "http://localhost:5173",
@@ -58,3 +60,17 @@ def is_origin_allowed(origin: str | None, host_header: str | None, *, secure: bo
     if is_same_origin(origin, host_header, secure=secure):
         return True
     return origin in allowed_origins()
+
+
+def require_trusted_origin(request: Request) -> None:
+    """FastAPI dependency: 403 when a state-changing request is cross-origin.
+
+    Browsers always send the Origin header on POST/PUT/DELETE, so this is a
+    reliable CSRF / cross-origin gate for endpoints that mutate server state.
+    """
+    headers = request.headers
+    origin = headers.get("origin")
+    host = headers.get("host")
+    secure = request.url.scheme == "https"
+    if not is_origin_allowed(origin, host, secure=secure):
+        raise HTTPException(status_code=403, detail="cross-origin request rejected")
