@@ -35,6 +35,17 @@ sys.stdout.write(path or "")
 """
 
 
+def _escape_applescript_string(s: str) -> str:
+    """Escape a string for safe embedding inside an AppleScript "..." literal.
+
+    AppleScript string literals only recognise ``\\\\`` and ``\\"`` as escapes,
+    so we strip control characters (which terminate the script anyway) and
+    backslash-escape both metacharacters.
+    """
+    cleaned = "".join(ch for ch in s if ord(ch) >= 0x20)
+    return cleaned.replace("\\", "\\\\").replace('"', '\\"')
+
+
 def _pick_with_osascript(initial: Optional[str]) -> Optional[str]:
     if platform.system() != "Darwin":
         return None
@@ -43,8 +54,9 @@ def _pick_with_osascript(initial: Optional[str]) -> Optional[str]:
         return None
     parts = ['choose folder with prompt "Pick a project folder"']
     if initial:
+        safe = _escape_applescript_string(initial)
         # AppleScript needs a POSIX path coerced to an alias.
-        parts.append(f'default location (POSIX file "{initial}")')
+        parts.append(f'default location (POSIX file "{safe}")')
     script = f'POSIX path of ({" ".join(parts)})'
     proc = subprocess.run(
         [osa, "-e", script],
