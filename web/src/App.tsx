@@ -114,6 +114,11 @@ export function App() {
   );
 }
 
+const PANE_LABELS: Record<import("@/store/ui").PaneKey, string> = {
+  sessions: "Session list",
+  thread: "Canvas",
+};
+
 function PaneFrame({
   paneKey,
   focusedPane,
@@ -134,9 +139,14 @@ function PaneFrame({
   // inset ring on the focused pane adds an explicit accent.
   return (
     <div
+      role="region"
+      aria-label={PANE_LABELS[paneKey]}
+      aria-keyshortcuts="ArrowUp ArrowDown ArrowLeft ArrowRight Enter Escape"
+      tabIndex={0}
+      onFocus={() => onFocus(paneKey)}
       onMouseDown={() => onFocus(paneKey)}
       className={
-        "relative h-full transition-shadow " +
+        "relative h-full transition-shadow outline-none focus-visible:ring-2 focus-visible:ring-primary/40 " +
         (focused
           ? "uw-pane-focused ring-1 ring-inset ring-primary/30"
           : "uw-pane-blurred")
