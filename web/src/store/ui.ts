@@ -105,14 +105,20 @@ export const useUi = create<UiState>((set, get) => ({
   closeDetail: () => set({ detailSessionId: null, detailWindow: null }),
   setCanvasFocusedNodeId: (id) => set({ canvasFocusedNodeId: id }),
   applyUrlState: (next) =>
-    set({
+    set((state) => ({
       slug: next.slug,
       rootSessionId: next.rootSessionId,
-      threadSessionId: next.rootSessionId,
+      // Preserve the user's drilled-in thread when the root hasn't
+      // changed; resetting unconditionally meant refresh / popstate
+      // forgot which child thread the user had open.
+      threadSessionId:
+        next.rootSessionId !== state.rootSessionId
+          ? next.rootSessionId
+          : state.threadSessionId,
       detailSessionId: next.detailSessionId,
       detailWindow: next.detailWindow,
       canvasFocusedNodeId: next.canvasFocusedNodeId,
-    }),
+    })),
   focusPane: (p) => set({ focusedPane: p }),
   rotateFocus: (dir) => {
     // Clamp at the ends rather than wrapping — pressing ← from the

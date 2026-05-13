@@ -27,6 +27,23 @@ import { Badge } from "@/components/ui/badge";
 import { cn, shortId } from "@/lib/utils";
 import { isTypingTarget } from "@/lib/keyboard";
 
+
+/** Strip dangerous link schemes from markdown content.
+ *
+ *  Trace messages can contain arbitrary user-provided text, including
+ *  assistant output that may include links. ReactMarkdown's default
+ *  ``urlTransform`` already drops some schemes, but we want a stricter
+ *  allow-list: only http(s), mailto, and same-document anchors. Anything
+ *  else (``javascript:``, ``data:``, custom schemes) becomes the literal
+ *  text ``#`` so a click is a no-op rather than an XSS vector. */
+function safeUrlTransform(url: string): string {
+  const trimmed = url.trim().toLowerCase();
+  if (trimmed.startsWith("http:") || trimmed.startsWith("https:")) return url;
+  if (trimmed.startsWith("mailto:")) return url;
+  if (trimmed.startsWith("#") || trimmed.startsWith("/")) return url;
+  return "#";
+}
+
 /**
  * Single-pane content view: renders a session's full message trace, where
  * callstack/Agent tool_use blocks expand inline into the spawned child's
@@ -719,7 +736,10 @@ function MessageBubble({ msg }: { msg: Message }) {
         >
           {msg.text ? (
             <div className="uw-markdown">
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>
+              <ReactMarkdown
+                remarkPlugins={[remarkGfm]}
+                urlTransform={safeUrlTransform}
+              >
                 {msg.text}
               </ReactMarkdown>
             </div>

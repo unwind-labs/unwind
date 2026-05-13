@@ -41,6 +41,21 @@ export function useLiveEvents(slug: string | null | undefined) {
 
     let cancelled = false;
     let attempt = 0;
+    let pendingReconnectId: number | null = null;
+
+    const scheduleReconnect = () => {
+      if (cancelled) return;
+      attempt = Math.min(attempt + 1, 6);
+      // Exponential backoff with ±25% jitter so a server bounce doesn't
+      // cause every open tab to reconnect simultaneously.
+      const base = Math.min(500 * 2 ** attempt, 10_000);
+      const jitter = base * 0.25 * (Math.random() * 2 - 1);
+      const delay = Math.max(100, base + jitter);
+      pendingReconnectId = window.setTimeout(() => {
+        pendingReconnectId = null;
+        connect();
+      }, delay);
+    };
 
     const connect = () => {
       if (cancelled) return;
@@ -75,17 +90,40 @@ export function useLiveEvents(slug: string | null | undefined) {
           window.clearInterval(pingRef.current);
           pingRef.current = null;
         }
-        if (cancelled) return;
-        attempt = Math.min(attempt + 1, 6);
-        const delay = Math.min(500 * 2 ** attempt, 10_000);
-        window.setTimeout(connect, delay);
+        scheduleReconnect();
       };
     };
+
+    // Background tabs hit the 10s reconnect cap and then stay disconnected
+    // because the browser throttles timers. When the tab regains focus or
+    // we learn the network is back, drop any pending reconnect and try
+    // immediately instead.
+    const reconnectNow = () => {
+      if (cancelled) return;
+      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) return;
+      if (pendingReconnectId !== null) {
+        window.clearTimeout(pendingReconnectId);
+        pendingReconnectId = null;
+      }
+      attempt = 0;
+      connect();
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") reconnectNow();
+    };
+    window.addEventListener("online", reconnectNow);
+    document.addEventListener("visibilitychange", onVisibility);
 
     connect();
 
     return () => {
       cancelled = true;
+      window.removeEventListener("online", reconnectNow);
+      document.removeEventListener("visibilitychange", onVisibility);
+      if (pendingReconnectId !== null) {
+        window.clearTimeout(pendingReconnectId);
+        pendingReconnectId = null;
+      }
       if (pingRef.current !== null) window.clearInterval(pingRef.current);
       if (wsRef.current) {
         try {
