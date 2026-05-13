@@ -23,6 +23,7 @@ from ..registry import (
     spawn_resolver_for_slug,
     subagent_index_for_slug,
 )
+from ..security import SessionIdPath, SlugPath
 from ..subagents import SUBAGENT_PREFIX
 
 router = APIRouter(tags=["sessions"])
@@ -46,7 +47,7 @@ class SessionRow(BaseModel):
     response_model=list[SessionRow],
 )
 def list_sessions(
-    slug: str,
+    slug: SlugPath,
     include_forks: bool = Query(False),
 ) -> list[SessionRow]:
     """List Claude sessions in the project.
@@ -134,7 +135,7 @@ def list_sessions(
     "/projects/{slug}/sessions/{session_id}",
     response_model=SessionRow,
 )
-def get_session(slug: str, session_id: str) -> SessionRow:
+def get_session(slug: SlugPath, session_id: SessionIdPath) -> SessionRow:
     index = index_for_slug(slug)
     summary = index.get_session(session_id)
     if summary is None:
@@ -274,8 +275,8 @@ class MessagesResponse(BaseModel):
     response_model=MessagesResponse,
 )
 def get_messages(
-    slug: str,
-    session_id: str,
+    slug: SlugPath,
+    session_id: SessionIdPath,
     include_meta: bool = Query(False),
 ) -> MessagesResponse:
     ci = callstack_for_slug(slug)
@@ -383,8 +384,8 @@ class CanvasTreeResponse(BaseModel):
     "/projects/{slug}/sessions/{session_id}/canvas",
 )
 def get_canvas_tree(
-    slug: str,
-    session_id: str,
+    slug: SlugPath,
+    session_id: SessionIdPath,
     if_none_match: Optional[str] = Header(default=None, alias="If-None-Match"),
 ) -> Response:
     """Return the canvas window-tree for a root session.
@@ -462,7 +463,7 @@ class TreeResponse(BaseModel):
     "/projects/{slug}/sessions/{session_id}/tree",
     response_model=TreeResponse,
 )
-def get_tree(slug: str, session_id: str) -> TreeResponse:
+def get_tree(slug: SlugPath, session_id: SessionIdPath) -> TreeResponse:
     from ..callstack import TaskNode
 
     ci = callstack_for_slug(slug)

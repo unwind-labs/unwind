@@ -7,9 +7,35 @@ so policy lives in one place.
 from __future__ import annotations
 
 import os
+import re
+from typing import Annotated
 from urllib.parse import urlsplit
 
-from fastapi import HTTPException, Request
+from fastapi import HTTPException, Path, Request
+
+
+# Claude Code's slug rule: any char outside [A-Za-z0-9-] is replaced with '-'.
+# We anchor to reject path traversal segments like "..".
+SLUG_PATTERN = r"^[A-Za-z0-9-]+$"
+# Standard UUID v1–v5 shape. Session JSONL filenames are UUIDs.
+SESSION_ID_PATTERN = (
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
+
+_SLUG_RE = re.compile(SLUG_PATTERN)
+_SESSION_ID_RE = re.compile(SESSION_ID_PATTERN)
+
+
+SlugPath = Annotated[str, Path(pattern=SLUG_PATTERN, max_length=512)]
+SessionIdPath = Annotated[str, Path(pattern=SESSION_ID_PATTERN)]
+
+
+def is_valid_slug(s: str) -> bool:
+    return bool(_SLUG_RE.match(s))
+
+
+def is_valid_session_id(s: str) -> bool:
+    return bool(_SESSION_ID_RE.match(s))
 
 
 DEFAULT_DEV_ORIGINS: tuple[str, ...] = (

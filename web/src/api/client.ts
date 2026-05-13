@@ -13,6 +13,8 @@ async function j<T>(url: string): Promise<T> {
   return (await r.json()) as T;
 }
 
+const enc = encodeURIComponent;
+
 export type PickedFolder = {
   cancelled: boolean;
   slug: string | null;
@@ -53,7 +55,7 @@ export function useSessions(
     queryKey: ["sessions", slug, includeForks],
     queryFn: () =>
       j<SessionRow[]>(
-        `/api/projects/${slug}/sessions?include_forks=${includeForks}`,
+        `/api/projects/${enc(slug!)}/sessions?include_forks=${includeForks}`,
       ),
     refetchInterval: 3_000,
   });
@@ -71,7 +73,7 @@ export function useCanvasTree(
     queryKey: ["canvas-tree", slug, rootSessionId],
     queryFn: () =>
       j<CanvasTreeResponse>(
-        `/api/projects/${slug}/sessions/${rootSessionId}/canvas`,
+        `/api/projects/${enc(slug!)}/sessions/${enc(rootSessionId!)}/canvas`,
       ),
     // Same cadence as messages — the WS will normally invalidate
     // sooner; this is a safety net.
@@ -89,7 +91,7 @@ export function useMessages(
     queryKey: ["messages", slug, sessionId, includeMeta],
     queryFn: () =>
       j<MessagesResponse>(
-        `/api/projects/${slug}/sessions/${sessionId}/messages?include_meta=${includeMeta}`,
+        `/api/projects/${enc(slug!)}/sessions/${enc(sessionId!)}/messages?include_meta=${includeMeta}`,
       ),
     // Refresh aggressively while a session is in flight so the canvas picks
     // up new spawns and child sessions as callstack updates report.yaml.

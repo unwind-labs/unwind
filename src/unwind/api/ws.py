@@ -7,7 +7,7 @@ import logging
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from ..events import get_bus
-from ..security import is_origin_allowed
+from ..security import is_origin_allowed, is_valid_slug
 from ..watcher import ensure_watcher
 
 log = logging.getLogger("unwind.ws")
@@ -29,6 +29,10 @@ async def ws_endpoint(ws: WebSocket, project: str = "") -> None:
     await ws.accept()
     if not project:
         await ws.send_json({"type": "error", "error": "missing ?project="})
+        await ws.close()
+        return
+    if not is_valid_slug(project):
+        await ws.send_json({"type": "error", "error": "invalid project slug"})
         await ws.close()
         return
 
