@@ -20,6 +20,7 @@ from ..registry import (
     canvas_tree_builder_for_slug,
     fork_detector_for_slug,
     index_for_slug,
+    project_state_signature,
     spawn_resolver_for_slug,
     subagent_index_for_slug,
 )
@@ -400,9 +401,6 @@ def get_canvas_tree(
     ):
         raise HTTPException(status_code=404, detail="session not found")
 
-    builder = canvas_tree_builder_for_slug(slug)
-    resolver = spawn_resolver_for_slug(slug)
-
     project_path = (
         str(index.paths.source_path) if index.paths.has_project_dir else None
     )
@@ -410,6 +408,22 @@ def get_canvas_tree(
         project_path is not None
         and project_activity(project_path).claude_running
     )
+
+    # Cheap ETag derived from filesystem state (no body serialization).
+    # If the (JSONLs + callstack reports) fingerprint matches the
+    # client's If-None-Match we can 304 without touching CanvasTree at
+    # all. The session_id is mixed in because the same project state
+    # produces different trees per root, and claude_running is mixed
+    # in because it flips "live" badges without changing any file.
+    state_sig = (project_state_signature(slug), session_id, claude_running)
+    etag = '"' + hashlib.sha1(
+        _json.dumps(state_sig, default=str, sort_keys=True).encode("utf-8")
+    ).hexdigest() + '"'
+    if if_none_match == etag:
+        return Response(status_code=304, headers={"ETag": etag})
+
+    builder = canvas_tree_builder_for_slug(slug)
+    resolver = spawn_resolver_for_slug(slug)
     summaries = {s.session_id: s for s in index.list_sessions()}
 
     # Compute the project's active session once per request; the
@@ -443,9 +457,6 @@ def get_canvas_tree(
     serialized = _json.dumps(body, sort_keys=True, separators=(",", ":")).encode(
         "utf-8"
     )
-    etag = '"' + hashlib.sha1(serialized).hexdigest() + '"'
-    if if_none_match == etag:
-        return Response(status_code=304, headers={"ETag": etag})
     return Response(
         content=serialized,
         media_type="application/json",

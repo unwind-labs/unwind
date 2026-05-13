@@ -195,6 +195,46 @@ def _project_jsonl_signature(project_dir: Path) -> tuple:
     return tuple(out)
 
 
+def _callstack_log_signature(callstack_log_dir: Path) -> tuple:
+    """Stable fingerprint of every report.yaml under ``callstack_log_dir``.
+
+    Captures both new invocations (new directories) and updates to
+    existing reports (status / task tree mutations after spawn).
+    """
+    if not callstack_log_dir.is_dir():
+        return ()
+    out: list[tuple[str, float, int]] = []
+    try:
+        # Each invocation lives in its own subdir; we only care about the
+        # report files.
+        for report in callstack_log_dir.glob("*/report.yaml"):
+            try:
+                st = report.stat()
+            except OSError:
+                continue
+            out.append((report.parent.name, st.st_mtime, st.st_size))
+    except OSError:
+        return ()
+    out.sort()
+    return tuple(out)
+
+
+def project_state_signature(slug: str) -> tuple:
+    """Cheap project-state fingerprint suitable for HTTP ETags.
+
+    Stat-based; never reads or parses any file. Invalidates on:
+
+    * Any JSONL created/grown/deleted (covers new messages + new sessions)
+    * Any callstack report created/updated (covers new spawns + status
+      transitions)
+    """
+    index = index_for_slug(slug)
+    return (
+        _project_jsonl_signature(index.paths.project_dir),
+        _callstack_log_signature(index.paths.callstack_log_dir),
+    )
+
+
 def invoke_index_for_slug(slug: str, project_dir: Path) -> dict[str, str]:
     """Return the slug-level ``invoke_id → parent_session_id`` map.
 
