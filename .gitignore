@@ -27,3 +27,6 @@ web/*.tsbuildinfo
 
 # Built frontend bundle (populated by `pnpm build`, included in wheels)
 src/unwind/static/
+
+# Local Claude Code scratch (callstack logs, skills, worktrees)
+.claude/
