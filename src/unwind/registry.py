@@ -26,6 +26,10 @@ _fork_detectors: dict[str, ForkDetector] = {}
 _subagents: dict[str, SubagentIndex] = {}
 _canvas_builders: dict[str, CanvasTreeBuilder] = {}
 _slug_to_source: dict[str, Path] = {}
+# (signature, invoke_id → parent_session_id) per slug. The signature is the
+# (mtime, size) summary of every JSONL in the project dir; rebuilds when
+# anything moves.
+_invoke_indexes: dict[str, tuple[tuple, dict[str, str]]] = {}
 
 
 def _auto_register_default() -> None:
@@ -62,6 +66,7 @@ def forget_slug(slug: str) -> None:
         _subagents.pop(slug, None)
         _canvas_builders.pop(slug, None)
         _slug_to_source.pop(slug, None)
+        _invoke_indexes.pop(slug, None)
 
 
 def index_for_slug(slug: str) -> SessionIndex:
@@ -171,6 +176,45 @@ def subagent_index_for_slug(slug: str) -> SubagentIndex:
     return si
 
 
+def _project_jsonl_signature(project_dir: Path) -> tuple:
+    """Stable fingerprint of every JSONL in ``project_dir``.
+
+    Cheap to compute (one stat per file) but invalidates the moment any
+    JSONL is created, deleted, grown, or modified.
+    """
+    if not project_dir.is_dir():
+        return ()
+    out: list[tuple[str, float, int]] = []
+    for jsonl in project_dir.glob("*.jsonl"):
+        try:
+            st = jsonl.stat()
+        except OSError:
+            continue
+        out.append((jsonl.name, st.st_mtime, st.st_size))
+    out.sort()
+    return tuple(out)
+
+
+def invoke_index_for_slug(slug: str, project_dir: Path) -> dict[str, str]:
+    """Return the slug-level ``invoke_id → parent_session_id`` map.
+
+    Computed by scanning every project JSONL for callstack tool_use →
+    tool_result envelopes. Cached at the registry; rebuilds when any
+    JSONL's (mtime, size) changes.
+    """
+    from .spawns import compute_invoke_index_for_project
+
+    sig = _project_jsonl_signature(project_dir)
+    with _lock:
+        cached = _invoke_indexes.get(slug)
+        if cached is not None and cached[0] == sig:
+            return cached[1]
+    fresh = compute_invoke_index_for_project(project_dir)
+    with _lock:
+        _invoke_indexes[slug] = (sig, fresh)
+    return fresh
+
+
 def spawn_resolver_for_slug(slug: str) -> SpawnResolver:
     """Compose a fresh ``SpawnResolver`` over this slug's three indexes.
 
@@ -180,11 +224,13 @@ def spawn_resolver_for_slug(slug: str) -> SpawnResolver:
     request sees the latest filesystem state.
     """
     index = index_for_slug(slug)
+    project_dir = index.paths.project_dir
     return SpawnResolver(
         callstack_for_slug(slug),
         fork_detector_for_slug(slug),
         subagent_index_for_slug(slug),
-        project_dir=index.paths.project_dir,
+        project_dir=project_dir,
+        invoke_index=invoke_index_for_slug(slug, project_dir),
     )
 
 

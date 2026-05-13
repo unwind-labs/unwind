@@ -62,6 +62,56 @@ _RETURN_RE = re.compile(r'"op"\s*:\s*"return"')
 _YIELD_RE = re.compile(r'"op"\s*:\s*"yield"')
 
 
+def compute_invoke_index_for_project(project_dir: Path) -> dict[str, str]:
+    """Scan every JSONL in ``project_dir`` for callstack tool_use/tool_result
+    envelopes and return an ``invoke_id → parent_session_id`` map.
+
+    First-wins on collision (invoke_ids are timestamp+random; collision is
+    essentially impossible). Safe to call repeatedly — the registry caches
+    the result by directory state.
+    """
+    out: dict[str, str] = {}
+    if not project_dir.is_dir():
+        return out
+    for jsonl in project_dir.glob("*.jsonl"):
+        parent_sid = jsonl.stem
+        tool_use_names: dict[str, str] = {}
+        for rec in iter_lines(jsonl):
+            rtype = rec.get("type")
+            msg = rec.get("message")
+            if not isinstance(msg, dict):
+                continue
+            content = msg.get("content")
+            if not isinstance(content, list):
+                continue
+            if rtype == "assistant":
+                for block in content:
+                    if (
+                        isinstance(block, dict)
+                        and block.get("type") == "tool_use"
+                        and block.get("name") in CALLSTACK_TOOL_NAMES
+                    ):
+                        tu_id = block.get("id")
+                        if isinstance(tu_id, str):
+                            tool_use_names[tu_id] = block["name"]
+            elif rtype == "user":
+                for block in content:
+                    if not isinstance(block, dict):
+                        continue
+                    if block.get("type") != "tool_result":
+                        continue
+                    tu_id = block.get("tool_use_id")
+                    if not isinstance(tu_id, str) or tu_id not in tool_use_names:
+                        continue
+                    result_text = _stringify_result(block.get("content"))
+                    m = _INVOKE_ID_RE.search(result_text)
+                    if m:
+                        invoke_id = m.group(1)
+                        if invoke_id not in out:
+                            out[invoke_id] = parent_sid
+    return out
+
+
 @dataclass
 class Spawn:
     """One ``parent_session → child_session`` invocation, from any source.
@@ -103,12 +153,18 @@ class SpawnResolver:
         subagents: SubagentIndex,
         *,
         project_dir: Path,
+        invoke_index: Optional[dict[str, str]] = None,
     ) -> None:
         self._cs = callstack
         self._fd = forks
         self._sa = subagents
         self._project_dir = project_dir
         self._cached: Optional[dict[str, list[Spawn]]] = None
+        # Pre-computed invoke_id → parent_session_id. When provided (by
+        # registry.spawn_resolver_for_slug), we skip the per-request full-
+        # project JSONL scan in _invoke_id_to_parent_session.
+        if invoke_index is not None:
+            self._invoke_index_cache = invoke_index
 
     # --- enumeration ----------------------------------------------------
 
@@ -423,61 +479,17 @@ class SpawnResolver:
             self._absorb_callstack(out, seen_pairs, next_parent, child, rep)
 
     def _invoke_id_to_parent_session(self) -> dict[str, str]:
-        """Scan every project JSONL once and map ``invoke_id`` → the
-        session id whose tool_use produced that callstack invoke.
+        """Map ``invoke_id`` → the session id whose tool_use produced it.
 
-        Used to heal reports whose ``parent_session`` doesn't match any
-        real JSONL — the tool_use's containing JSONL is the ground truth
-        for which session actually invoked the callstack.
-
-        Returned mapping is "first wins": if two different parents
-        produced the same invoke_id (shouldn't happen — invoke_ids are
-        timestamp + random suffix), the first-discovered wins. Result
-        is cached on the resolver instance.
+        Heals reports whose ``parent_session`` doesn't match any real
+        JSONL — the tool_use's containing JSONL is the ground truth.
+        Result is cached on the resolver instance, or (preferred)
+        injected by the registry so all requests share one scan.
         """
         cached = getattr(self, "_invoke_index_cache", None)
         if cached is not None:
             return cached
-        out: dict[str, str] = {}
-        if not self._project_dir.is_dir():
-            self._invoke_index_cache = out
-            return out
-        for jsonl in self._project_dir.glob("*.jsonl"):
-            parent_sid = jsonl.stem
-            tool_use_names: dict[str, str] = {}
-            for rec in iter_lines(jsonl):
-                rtype = rec.get("type")
-                msg = rec.get("message")
-                if not isinstance(msg, dict):
-                    continue
-                content = msg.get("content")
-                if not isinstance(content, list):
-                    continue
-                if rtype == "assistant":
-                    for block in content:
-                        if (
-                            isinstance(block, dict)
-                            and block.get("type") == "tool_use"
-                            and block.get("name") in CALLSTACK_TOOL_NAMES
-                        ):
-                            tu_id = block.get("id")
-                            if isinstance(tu_id, str):
-                                tool_use_names[tu_id] = block["name"]
-                elif rtype == "user":
-                    for block in content:
-                        if not isinstance(block, dict):
-                            continue
-                        if block.get("type") != "tool_result":
-                            continue
-                        tu_id = block.get("tool_use_id")
-                        if not isinstance(tu_id, str) or tu_id not in tool_use_names:
-                            continue
-                        result_text = _stringify_result(block.get("content"))
-                        m = _INVOKE_ID_RE.search(result_text)
-                        if m:
-                            invoke_id = m.group(1)
-                            if invoke_id not in out:
-                                out[invoke_id] = parent_sid
+        out = compute_invoke_index_for_project(self._project_dir)
         self._invoke_index_cache = out
         return out
 
