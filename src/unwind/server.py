@@ -47,13 +47,24 @@ async def _lifespan(app: FastAPI):
         stop_all_watchers()
 
 
+def _docs_enabled() -> bool:
+    """OpenAPI docs are off unless UNWIND_DOCS=1.
+
+    The default deployment binds to 127.0.0.1, so anyone with local access
+    could browse the full API schema. We keep /api/docs available for
+    development but require an explicit opt-in.
+    """
+    return os.environ.get("UNWIND_DOCS", "").strip() in {"1", "true", "yes"}
+
+
 def create_app() -> FastAPI:
+    docs_on = _docs_enabled()
     app = FastAPI(
         title="unwind",
         version=__version__,
-        docs_url="/api/docs",
+        docs_url="/api/docs" if docs_on else None,
         redoc_url=None,
-        openapi_url="/api/openapi.json",
+        openapi_url="/api/openapi.json" if docs_on else None,
         lifespan=_lifespan,
     )
 
