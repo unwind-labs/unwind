@@ -19,6 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from . import __version__
 from .api import routers
 from .events import get_bus
+from .security import allowed_origins
 from .watcher import ensure_watcher, stop_all_watchers
 
 
@@ -58,10 +59,7 @@ def create_app() -> FastAPI:
 
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=[
-            "http://localhost:5173",
-            "http://127.0.0.1:5173",
-        ],
+        allow_origins=allowed_origins(),
         allow_credentials=False,
         allow_methods=["GET", "POST"],
         allow_headers=["*"],

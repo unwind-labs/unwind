@@ -238,6 +238,183 @@ def test_fork_spawn_marked_yielded_when_child_yielded(tmp_path: Path):
     assert fork_spawns[0].status == "yielded"
 
 
+def test_report_with_stale_parent_session_heals_to_invoking_jsonl(
+    tmp_path: Path,
+):
+    """Regression: callstack runtimes have been observed writing the
+    wrong ``parent_session`` into ``report.yaml`` — e.g. a session id
+    from an unrelated project bleeds into a fresh run, so the report
+    points to a session that doesn't exist as a JSONL in this project.
+
+    The fix: when the recorded ``parent_session`` has no JSONL but the
+    report's ``invoke_id`` appears as the result of a callstack tool_use
+    somewhere in the project, attribute the spawn to the session
+    actually holding that tool_use. The tool_use → invoke_id binding is
+    authoritative (it's what the tool_result contains); the
+    ``parent_session`` field is metadata that can drift.
+
+    Setup: ORCHESTRATOR.jsonl has a callstack ``call`` tool_use whose
+    tool_result carries ``invoke_id: i-stale``. The matching report
+    records ``parent_session: GHOST`` — but no GHOST.jsonl exists. The
+    resolver must still surface the spawn under ORCHESTRATOR.
+    """
+    proj = tmp_path / "proj"
+    log = tmp_path / "log"
+
+    inv = log / "i-stale"
+    inv.mkdir(parents=True)
+    (inv / "report.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "invoke_id": "i-stale",
+                "parent_session": "GHOST-NO-JSONL",
+                "started_at": "2026-05-04T10:00:00+00:00",
+                "ended_at": "2026-05-04T10:00:30+00:00",
+                "status": "complete",
+                "tasks": [
+                    {
+                        "task": "/inner",
+                        "status": "complete",
+                        "depth": 1,
+                        "session_id": "CHILD",
+                    }
+                ],
+            }
+        )
+    )
+
+    # The real parent: a session with a callstack tool_use whose
+    # tool_result carries ``invoke_id: i-stale``. This is what the
+    # runtime would have written when it actually fired the call.
+    parent = proj / "ORCHESTRATOR.jsonl"
+    parent.parent.mkdir(parents=True, exist_ok=True)
+    parent.write_text(
+        "\n".join(
+            json.dumps(r)
+            for r in [
+                {
+                    "type": "assistant",
+                    "uuid": "a1",
+                    "sessionId": "ORCHESTRATOR",
+                    "timestamp": "2026-05-04T10:00:01.000Z",
+                    "message": {
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "id": "tu-1",
+                                "name": "mcp__plugin_callstack_call__call",
+                                "input": {"task": "/inner"},
+                            }
+                        ],
+                    },
+                },
+                {
+                    "type": "user",
+                    "uuid": "u1",
+                    "sessionId": "ORCHESTRATOR",
+                    "timestamp": "2026-05-04T10:00:02.000Z",
+                    "message": {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": "tu-1",
+                                "content": '{"invoke_id": "i-stale"}',
+                            }
+                        ],
+                    },
+                },
+            ]
+        )
+        + "\n"
+    )
+    # Minimal child JSONL so canvas BFS can reach it.
+    (proj / "CHILD.jsonl").write_text(
+        json.dumps({
+            "uuid": "u",
+            "type": "user",
+            "sessionId": "CHILD",
+            "timestamp": "2026-05-04T10:00:02.000Z",
+            "message": {"role": "user", "content": "/inner"},
+        }) + "\n"
+    )
+
+    res = _make_resolver(proj, log)
+
+    # The spawn must be re-keyed under the actual parent (ORCHESTRATOR),
+    # not the GHOST session named in the report.
+    assert res.for_parent("GHOST-NO-JSONL") == []
+    orch_spawns = res.for_parent("ORCHESTRATOR")
+    assert len(orch_spawns) == 1
+    assert orch_spawns[0].child_session_id == "CHILD"
+    assert orch_spawns[0].invoke_id == "i-stale"
+
+    # End-to-end: the canvas tree rooted at ORCHESTRATOR shows CHILD.
+    root_w, _ = build_canvas_tree(proj, "ORCHESTRATOR", spawn_resolver=res)
+    assert [c.session_id for c in root_w.children] == ["CHILD"]
+
+
+def test_report_with_valid_parent_session_is_not_rewritten(tmp_path: Path):
+    """Companion: when ``parent_session`` corresponds to a real JSONL
+    in the project, the healing pass must NOT touch it — even if the
+    invoke_id also appears via tool_use somewhere unexpected. Avoids
+    silently re-keying correctly-recorded reports based on stray
+    string matches in unrelated sessions."""
+    proj = tmp_path / "proj"
+    log = tmp_path / "log"
+
+    inv = log / "i-good"
+    inv.mkdir(parents=True)
+    (inv / "report.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "invoke_id": "i-good",
+                "parent_session": "REAL-PARENT",
+                "started_at": "2026-05-04T10:00:00+00:00",
+                "ended_at": "2026-05-04T10:00:30+00:00",
+                "status": "complete",
+                "tasks": [
+                    {
+                        "task": "/inner",
+                        "status": "complete",
+                        "depth": 1,
+                        "session_id": "CHILD",
+                    }
+                ],
+            }
+        )
+    )
+
+    # The real parent JSONL exists (no tool_use needed for the heal
+    # path, since the heal only kicks in when the recorded parent is
+    # missing). Just an empty session.
+    (proj / "REAL-PARENT.jsonl").parent.mkdir(parents=True, exist_ok=True)
+    (proj / "REAL-PARENT.jsonl").write_text(
+        json.dumps({
+            "uuid": "u1",
+            "type": "user",
+            "sessionId": "REAL-PARENT",
+            "timestamp": "2026-05-04T10:00:00.000Z",
+            "message": {"role": "user", "content": "go"},
+        }) + "\n"
+    )
+    (proj / "CHILD.jsonl").write_text(
+        json.dumps({
+            "uuid": "u",
+            "type": "user",
+            "sessionId": "CHILD",
+            "timestamp": "2026-05-04T10:00:02.000Z",
+            "message": {"role": "user", "content": "/inner"},
+        }) + "\n"
+    )
+
+    res = _make_resolver(proj, log)
+    real_spawns = res.for_parent("REAL-PARENT")
+    assert len(real_spawns) == 1
+    assert real_spawns[0].child_session_id == "CHILD"
+
+
 def test_fork_spawn_under_nested_callstack_parent_no_phantom_at_root(
     tmp_path: Path,
 ):

@@ -136,11 +136,30 @@ class SpawnResolver:
         out: dict[str, list[Spawn]] = {}
 
         # 1. Callstack reports. Walk every report's task tree once.
+        #
+        # A ``report.yaml`` records ``parent_session`` at the time the
+        # callstack runtime wrote it; we've seen runtimes record stale
+        # session ids from unrelated projects when callstack state from a
+        # prior run leaked across cwd boundaries. The tool_use → invoke_id
+        # binding in the actual parent JSONL is authoritative: if a
+        # session has a callstack tool_use whose tool_result carries
+        # invoke_id X, THAT session invoked X — regardless of what
+        # ``report.parent_session`` claims. Only override when the
+        # recorded parent has no JSONL in this project (the common
+        # symptom of a stale/wrong parent_session); leave correctly
+        # recorded reports alone.
+        invoke_to_real_parent = self._invoke_id_to_parent_session()
         callstack_pairs: set[tuple[str, str]] = set()
         for rep in self._cs.all_reports():
+            parent_sid = rep.parent_session
+            if (
+                not (self._project_dir / f"{parent_sid}.jsonl").is_file()
+                and rep.invoke_id in invoke_to_real_parent
+            ):
+                parent_sid = invoke_to_real_parent[rep.invoke_id]
             for task in rep.tasks:
                 self._absorb_callstack(
-                    out, callstack_pairs, rep.parent_session, task, rep
+                    out, callstack_pairs, parent_sid, task, rep
                 )
 
         # 2. Fork detector — only for sessions not already covered above.
@@ -402,6 +421,65 @@ class SpawnResolver:
         next_parent = task.session_id or parent_sid
         for child in task.children:
             self._absorb_callstack(out, seen_pairs, next_parent, child, rep)
+
+    def _invoke_id_to_parent_session(self) -> dict[str, str]:
+        """Scan every project JSONL once and map ``invoke_id`` → the
+        session id whose tool_use produced that callstack invoke.
+
+        Used to heal reports whose ``parent_session`` doesn't match any
+        real JSONL — the tool_use's containing JSONL is the ground truth
+        for which session actually invoked the callstack.
+
+        Returned mapping is "first wins": if two different parents
+        produced the same invoke_id (shouldn't happen — invoke_ids are
+        timestamp + random suffix), the first-discovered wins. Result
+        is cached on the resolver instance.
+        """
+        cached = getattr(self, "_invoke_index_cache", None)
+        if cached is not None:
+            return cached
+        out: dict[str, str] = {}
+        if not self._project_dir.is_dir():
+            self._invoke_index_cache = out
+            return out
+        for jsonl in self._project_dir.glob("*.jsonl"):
+            parent_sid = jsonl.stem
+            tool_use_names: dict[str, str] = {}
+            for rec in iter_lines(jsonl):
+                rtype = rec.get("type")
+                msg = rec.get("message")
+                if not isinstance(msg, dict):
+                    continue
+                content = msg.get("content")
+                if not isinstance(content, list):
+                    continue
+                if rtype == "assistant":
+                    for block in content:
+                        if (
+                            isinstance(block, dict)
+                            and block.get("type") == "tool_use"
+                            and block.get("name") in CALLSTACK_TOOL_NAMES
+                        ):
+                            tu_id = block.get("id")
+                            if isinstance(tu_id, str):
+                                tool_use_names[tu_id] = block["name"]
+                elif rtype == "user":
+                    for block in content:
+                        if not isinstance(block, dict):
+                            continue
+                        if block.get("type") != "tool_result":
+                            continue
+                        tu_id = block.get("tool_use_id")
+                        if not isinstance(tu_id, str) or tu_id not in tool_use_names:
+                            continue
+                        result_text = _stringify_result(block.get("content"))
+                        m = _INVOKE_ID_RE.search(result_text)
+                        if m:
+                            invoke_id = m.group(1)
+                            if invoke_id not in out:
+                                out[invoke_id] = parent_sid
+        self._invoke_index_cache = out
+        return out
 
     def _infer_fork_status(
         self, fork_sid: str

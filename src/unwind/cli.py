@@ -49,6 +49,24 @@ def _pick_port(preferred: Optional[int]) -> int:
         return s.getsockname()[1]
 
 
+def _paths_for_serve(chosen_path: Path) -> ProjectPaths:
+    """Resolve ProjectPaths, handling the case where ``chosen_path`` is itself
+    a Claude project storage directory (``~/.claude/projects/<slug>/``).
+
+    Without this, slugging that path produces a doubled slug like
+    ``-Users-me--claude-projects--<orig-slug>`` which doesn't match any real
+    project directory.
+    """
+    try:
+        rel = chosen_path.relative_to(claude_projects_root())
+    except ValueError:
+        return ProjectPaths.for_path(chosen_path)
+    # rel parts: first component is the slug; anything deeper is unrelated.
+    if not rel.parts:
+        return ProjectPaths.for_path(chosen_path)
+    return ProjectPaths.for_slug(rel.parts[0])
+
+
 def _open_browser_later(url: str, delay_s: float = 0.4) -> None:
     def _go() -> None:
         time.sleep(delay_s)
@@ -88,6 +106,7 @@ def serve(
 ) -> None:
     """Launch the unwind observer for the given folder (or CWD)."""
     chosen_path = Path(path).resolve() if path else Path.cwd().resolve()
+    paths = _paths_for_serve(chosen_path)
 
     if all_projects:
         if not claude_projects_root().is_dir():
@@ -97,7 +116,6 @@ def serve(
             raise typer.Exit(1)
         query = ""
     else:
-        paths = ProjectPaths.for_path(chosen_path)
         if not paths.has_project_dir:
             console.print(
                 f"[yellow]No Claude sessions found for this folder yet.[/]\n"
@@ -113,7 +131,7 @@ def serve(
 
     os.environ["UNWIND_DEFAULT_PATH"] = str(chosen_path)
     if not all_projects:
-        os.environ["UNWIND_DEFAULT_SLUG"] = ProjectPaths.for_path(chosen_path).slug
+        os.environ["UNWIND_DEFAULT_SLUG"] = paths.slug
 
     console.print(f"[bold]unwind[/] serving on [cyan]{url}[/]")
     console.print(f"  project: {chosen_path}")

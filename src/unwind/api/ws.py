@@ -7,6 +7,7 @@ import logging
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from ..events import get_bus
+from ..security import is_origin_allowed
 from ..watcher import ensure_watcher
 
 log = logging.getLogger("unwind.ws")
@@ -16,6 +17,15 @@ router = APIRouter()
 
 @router.websocket("/ws")
 async def ws_endpoint(ws: WebSocket, project: str = "") -> None:
+    origin = ws.headers.get("origin")
+    host = ws.headers.get("host")
+    secure = ws.url.scheme == "wss"
+    if not is_origin_allowed(origin, host, secure=secure):
+        # Reject without ACCEPT so the browser sees the handshake fail.
+        log.warning("ws origin rejected origin=%s host=%s", origin, host)
+        await ws.close(code=1008)
+        return
+
     await ws.accept()
     if not project:
         await ws.send_json({"type": "error", "error": "missing ?project="})

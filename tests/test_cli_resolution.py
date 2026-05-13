@@ -92,3 +92,42 @@ def test_project_path_known_slug(
     result = runner.invoke(app, ["project", "path", "my-slug"])
     assert result.exit_code == 0, result.output
     assert str(proj) in result.output
+
+
+def test_paths_for_serve_uses_existing_slug_when_pointed_at_project_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pointing unwind at ``~/.claude/projects/<slug>/`` must NOT re-slug it.
+
+    Why: re-slugging the projects-dir path produces a doubled slug like
+    ``-Users-me--claude-projects--<orig-slug>`` that doesn't match any real
+    project directory, so the UI shows no sessions.
+    """
+    home = _setup_home(tmp_path, monkeypatch)
+    slug = "-private-tmp-it-1165aef1"
+    proj_dir = home / ".claude" / "projects" / slug
+    proj_dir.mkdir()
+    _reload_unwind()
+    import unwind.cli as cli_mod
+    importlib.reload(cli_mod)
+
+    paths = cli_mod._paths_for_serve(proj_dir)
+    assert paths.slug == slug
+    assert paths.project_dir == proj_dir
+    assert paths.has_project_dir is True
+
+
+def test_paths_for_serve_normal_path_still_slugged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _setup_home(tmp_path, monkeypatch)
+    _reload_unwind()
+    import unwind.cli as cli_mod
+    importlib.reload(cli_mod)
+
+    src = tmp_path / "work" / "some-proj"
+    src.mkdir(parents=True)
+    paths = cli_mod._paths_for_serve(src)
+    # Slug derived from the source path, not a "project dir" shortcut.
+    assert paths.source_path == src
+    assert paths.slug.endswith("-work-some-proj")
