@@ -9,10 +9,9 @@ from pydantic import BaseModel
 
 import hashlib
 import json as _json
-from pathlib import Path
 
 from ..canvas_tree import build_canvas_tree
-from ..jsonl import collect_uuids, iter_lines, iter_lines_from
+from ..jsonl import collect_uuids
 from ..messages import annotate_spawns, base_uuid, read_messages
 from ..processes import project_activity, session_status
 from ..registry import (
@@ -112,6 +111,7 @@ def list_sessions(
             s.cwd,
             last_epoch,
             project_path,
+            slug=slug,
             active_session_id=active_session_id,
         )
 
@@ -149,7 +149,7 @@ def get_session(slug: SlugPath, session_id: SessionIdPath) -> SessionRow:
         summary.last_timestamp.timestamp() if summary.last_timestamp else None
     )
     status = _compute_session_status(
-        index, ci, summary.session_id, summary.cwd, last_epoch, project_path
+        index, ci, summary.session_id, summary.cwd, last_epoch, project_path, slug=slug
     )
     return SessionRow(
         session_id=summary.session_id,
@@ -200,6 +200,7 @@ def _compute_session_status(
     last_epoch: Optional[float],
     project_path: Optional[str],
     *,
+    slug: str,
     active_session_id: Optional[str] = None,
 ) -> str:
     """Single-source-of-truth for session status. See ``list_sessions`` for
@@ -234,8 +235,11 @@ def _compute_session_status(
         return "done"
     if cs_norm == "yielded":
         return "yield"
-    jsonl = index.jsonl_path_for(session_id)
-    if jsonl is not None and _is_at_user_yield(jsonl):
+    # Reuse the canvas builder's cached SessionScan (mtime/size-keyed)
+    # instead of re-walking the JSONL: the at-user-prompt state machine
+    # is identical, and sharing the cache means /sessions and /canvas
+    # pay the scan once between them.
+    if canvas_tree_builder_for_slug(slug).get_scan(session_id).at_user_prompt:
         return "yield"
     return "live"
 
@@ -527,105 +531,6 @@ def get_tree(slug: SlugPath, session_id: SessionIdPath) -> TreeResponse:
         children=[n.to_dict() for n in children],
         has_callstack_logs=ci.has_logs,
     )
-
-
-# Bytes of tail to consult for the at_user_yield state machine. The yield
-# envelope plus the last few assistant/user records easily fit in 64 KiB;
-# scanning more is wasted I/O on every session-list refresh.
-_YIELD_TAIL_BYTES = 64 * 1024
-
-
-def _is_at_user_yield(jsonl: Path) -> bool:
-    """Whether ``jsonl``'s last record indicates Claude paused for input.
-
-    Two yield signals — both produce True:
-
-    1. An ``assistant`` message containing the ``{"op": "yield"}``
-       envelope (the callstack-runtime yield format), with no user
-       reply since.
-    2. A ``system / stop_hook_summary`` record (Claude finished its
-       turn) with no user reply since — this catches interactive
-       pauses where Claude asked the user a question and is now idle
-       awaiting input.
-
-    Note: ``type: system / subtype: away_summary`` is NOT a yield —
-    it's the recap Claude writes when finishing work while the user
-    was away.
-
-    Reads only the last ~64 KiB of the JSONL: the final state-machine
-    value depends only on the most recent ``assistant`` / ``user`` /
-    ``system`` records, so a full-file scan was pure waste on every
-    session-list refresh.
-
-    Returns ``False`` on any error so the caller safely falls back
-    to the prior status.
-    """
-    try:
-        try:
-            size = jsonl.stat().st_size
-        except OSError:
-            return False
-        if size <= _YIELD_TAIL_BYTES:
-            iterator = iter_lines(jsonl)
-        else:
-            iterator, _ = iter_lines_from(jsonl, size - _YIELD_TAIL_BYTES)
-            # iter_lines_from already splits on newline and skips empties,
-            # but its first item may be a partial line if we didn't land on
-            # a record boundary. iter_lines_from already returns parsed
-            # records (json.loads above), so a partial line would have
-            # raised JSONDecodeError and been skipped — no extra work
-            # needed here.
-        at_prompt = False
-        for rec in iterator:
-            t = rec.get("type")
-            if t == "assistant":
-                msg = rec.get("message")
-                text = ""
-                if isinstance(msg, dict):
-                    content = msg.get("content")
-                    if isinstance(content, str):
-                        text = content
-                    elif isinstance(content, list):
-                        parts = []
-                        for block in content:
-                            if (
-                                isinstance(block, dict)
-                                and block.get("type") == "text"
-                                and isinstance(block.get("text"), str)
-                            ):
-                                parts.append(block["text"])
-                        text = "\n".join(parts)
-                if '"op": "yield"' in text or '"op":"yield"' in text:
-                    at_prompt = True
-                else:
-                    # Claude is still talking — clear any prior
-                    # at-prompt state from earlier in the session.
-                    at_prompt = False
-            elif t == "system" and rec.get("subtype") == "stop_hook_summary":
-                # Turn ended; waiting for user input.
-                at_prompt = True
-            elif t == "user":
-                # Tool results are recorded as type=user with
-                # content blocks of type=tool_result; those don't
-                # clear the prompt state (Claude is processing the
-                # tool response, still mid-turn).
-                msg = rec.get("message")
-                is_tool_result = False
-                if isinstance(msg, dict):
-                    content = msg.get("content")
-                    if isinstance(content, list):
-                        for block in content:
-                            if (
-                                isinstance(block, dict)
-                                and block.get("type") == "tool_result"
-                            ):
-                                is_tool_result = True
-                                break
-                if not is_tool_result:
-                    at_prompt = False
-        return at_prompt
-    except OSError:
-        return False
 
 
 def _subagent_nodes(slug: str, parent_session_id: str, depth: int):

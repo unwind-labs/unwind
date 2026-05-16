@@ -142,10 +142,15 @@ def scan_session(path: Path) -> SessionScan:
         rtype = rec.get("type")
         if rtype == "assistant":
             text = _extract_assistant_text(rec)
-            if text and _YIELD_RE.search(text) and ts is not None:
-                scan.yields.append(ts)
-            # Claude is producing output → not at user prompt.
-            at_user_prompt = False
+            if text and _YIELD_RE.search(text):
+                # Yield envelope: Claude paused for input. Mirrors the
+                # stop_hook_summary case below — both mean the same
+                # thing for ``at_user_prompt``.
+                if ts is not None:
+                    scan.yields.append(ts)
+                at_user_prompt = True
+            else:
+                at_user_prompt = False
         elif rtype == "user":
             # Tool results are recorded as ``type: user`` with content
             # blocks of type ``tool_result``; those don't reset the

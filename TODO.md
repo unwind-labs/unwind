@@ -1,75 +1,49 @@
-# unwind — Prioritized TODO
+# TODO — Architectural Review Follow-ups (2026-05-15)
 
-Derived from the architectural review. Ordered by impact × urgency.
+Ordered for incremental, low-risk execution. Each item is one commit.
+Status: `[ ]` pending · `[~]` in progress · `[x]` done
 
-## P0 — Security (ship this week)
+## Phase 1 — Pure deletions (zero behavior risk)
 
-- [ ] **Path traversal in SPA fallback** — `src/unwind/server.py:101`
-  Resolve `target` and require `STATIC_DIR.resolve()` is an ancestor before `FileResponse`.
-- [ ] **WebSocket Origin check** — `src/unwind/api/ws.py:18`
-  Add an Origin allow-list before `ws.accept()` (CORS does not apply to WS; DNS-rebinding risk).
-- [ ] **Unauthenticated folder-picker endpoint** — `src/unwind/api/projects.py:110`
-  Require an opaque per-launch token issued by the CLI to the spawned browser tab.
-- [ ] **URL-encode path segments in frontend client** — `web/src/api/client.ts:56,74,91`
-  Use `encodeURIComponent` for `slug`/`sessionId` (mirror `ws/client.ts:48`).
-- [ ] **Validate `slug` and `session_id` at route layer** — `src/unwind/sessions.py:57`, `src/unwind/registry.py:69`
-  Strict regex (UUID for session_id, `^[A-Za-z0-9-]+$` for slug). Reject `..` segments.
-- [ ] **Latent AppleScript injection** — `src/unwind/dialog.py:46`
-  Switch to `osascript -e SCRIPT -- ARG` or escape `"` / `\` even though `initial` is currently `None`.
-- [ ] **Confirm uvicorn bind is `127.0.0.1`-only**; gate `/api/docs` behind a debug flag — `src/unwind/server.py:53`.
+- [x] **T1** Delete `_is_at_user_yield` in `sessions_api.py`; route `_compute_session_status` through `canvas_tree_builder_for_slug(slug).get_scan(session_id).at_user_prompt`. (Review: C4)
+- [ ] **T2** Delete dead `read_messages_with_lineage`, `annotate_origins`, `Message.origin_session_id`, `Message.is_inherited`, `MessagePage.ancestors`, `AncestorRef`. Also `ancestors=[]` returns in `sessions_api.py`. (Review: C5)
+- [ ] **T3** Delete unused `CallstackIndex` methods: `task_status_for_session`, `reports_with_session_node`, `children_in_report`, `children_for_invoke`, `report_for_invoke`. (Review: D-H1)
 
-## P1 — Performance (request-rate hot paths)
+## Phase 2 — Internal refactors (DRY win, small surface)
 
-- [ ] **Cache `SpawnResolver._invoke_id_to_parent_session`** — `src/unwind/spawns.py:425`
-  Slug-level cache on the registry, mtime-keyed; invalidate from the watcher. Single biggest win.
-- [ ] **Tail-read for `_is_at_user_yield`** — `src/unwind/api/sessions_api.py:520`
-  Read last ~64 KB via `iter_lines_from(path, max(0, size-65536))` instead of full file.
-- [ ] **Memoize `collect_uuids` by (slug, session_id, mtime, size)** — `src/unwind/api/sessions_api.py:326`.
-- [ ] **Cache `read_messages_with_lineage`** ancestor parses — `src/unwind/messages.py:330`
-  Same mtime+size invalidation pattern.
-- [ ] **Canvas ETag from project-state hash** — `src/unwind/api/sessions_api.py:430`
-  Derive ETag from `max(mtime)` of project_dir JSONLs + callstack_log_dir mtime; only serialize body on miss.
-- [ ] **Drop frontend 3s polling, lean on WS** — `web/src/api/client.ts:58,78,98`
-  Keep 30s safety net; ~10× fewer requests.
-- [ ] **Lift `useMessages` out of CompactCardNode**; memoize `rows` — `web/src/panes/CompactCard.tsx:125`
-  Pass memoized `messagesBySession` map down from `CanvasInner`.
-- [ ] **Single flush thread in watcher** instead of `threading.Timer` per burst — `src/unwind/watcher.py:36`.
-- [ ] **Drop pydantic for messages payload**; stream via `orjson` — `src/unwind/messages.py` + response layer.
+- [ ] **T4** Add `_text_blocks(msg, sep)` in `jsonl.py`; collapse `extract_assistant_text`, `_extract_user_text`, and the two inline copies in `sessions_api.py` / `fork_detect.py`. (Review: D-H5)
+- [ ] **T5** Consolidate registry per-slug lock-dance into one `_per_slug(cache, slug, factory)` helper; drive `forget_slug` / `_upgrade_to_real_path` from one cache list. (Review: D-H2)
+- [ ] **T6** Replace bespoke mtime caches in `CallstackIndex._cache`, `ForkDetector._probes`, `CanvasTreeBuilder._scans` with `_PathCache`. (Review: D-H3)
+- [ ] **T7** Bound `PathCache` (LRU `maxsize≈512`) so long-running process doesn't retain every JSONL ever parsed. Add registry-level LRU caps. (Review: C3)
+- [ ] **T8** Single `EPOCH` constant in `jsonl.py`; remove 5 inline copies. Unify `_file_birth_dt` / `_file_birth_ts`. Move `_YIELD_RE`/`_RETURN_RE` into one module. (Review: M2, M3, L1)
 
-## P2 — DRY / architecture
+## Phase 3 — Perf hot path
 
-### Big consolidation: unify the two spawn stacks (~300 LOC out)
+- [ ] **T9** Cache `_latest_view` and `reports_by_parent` on `CallstackIndex` keyed by callstack-log signature; hoist precomputation in `list_sessions` so per-row helpers do dict lookups. (Review: C1)
+- [ ] **T10** Cache subagent `_build_one` per `(path, mtime, size)`; in `SpawnResolver.spawns_by_parent`, probe `<sid>/subagents/` via `stat` before opening JSONLs. (Review: C2)
+- [ ] **T11** Add TTL (~1 s) or signature-based skip to `ForkDetector._refresh`. (Review: P-H1)
+- [ ] **T12** `list_projects` should use lightweight `os.scandir` for `last_activity` / `session_count`; defer full indexing to project-open. (Review: P-H2)
+- [ ] **T13** Watcher: incremental session-summary update from new records only; full re-parse only on cold start or file shrink. (Review: P-H3)
+- [ ] **T14** `compute_invoke_index_for_project` → cached `read_records` instead of uncached `iter_lines`. (Review: P-H4)
+- [ ] **T15** Centralize project `*.jsonl` listing on the registry (cached by dir mtime); registry/canvas_tree/spawns/fork_detect/watcher all read from it. (Review: M4)
 
-- [ ] Make `SpawnResolver` the only composer of `(CallstackIndex, ForkDetector, SubagentIndex)`. Delete `_resolver_from_legacy_args` in `src/unwind/messages.py:179` and the matching block in `src/unwind/canvas_tree.py:248-258`. Update tests to pass real resolvers.
-- [ ] Move `Spawn → window` mapping (`_compute_windows` + `collect_invocations`) onto `SpawnResolver`; reduce `canvas_tree.py` (633 LOC → ~400) to pure layout.
-- [ ] Move `annotate_spawns` from `src/unwind/messages.py:179` into `SpawnResolver.annotate(messages)` in `src/unwind/spawns.py`.
+## Phase 4 — API contract (additive)
 
-### Small duplications
+- [ ] **T16** `GET /messages` accepts `since_offset`/`since_uuid`; client (`ws/client.ts`) uses delta fetch on reconnect. (Review: P-H5)
 
-- [ ] Collapse `_parse_ts` (5 copies) into one in `src/unwind/jsonl.py`: `jsonl.py:199`, `callstack.py:588`, `canvas_tree.py:210`, `messages.py:524`, `spawns.py:615`.
-- [ ] Delete unused `CALLSTACK_TOOL_NAMES` from `src/unwind/canvas_tree.py:39` (kept "for symmetry", never read).
-- [ ] Merge `_assistant_text` (`spawns.py:597`) and `_extract_assistant_text` (`canvas_tree.py:192`).
-- [ ] Promote `_stringify_result` to `messages.py`; remove copies in `spawns.py:566` and `cli_cmds/_render.py:195`.
-- [ ] Extract `MTimeCache` helper used across `fork_detect`, `subagents`, `callstack`, `canvas_tree.CanvasTreeBuilder`, `registry` (~40 LOC saved).
-- [ ] Split `fork_detect.py`: move `_enrich_divergence_for_root` + `find_session_by_divergence_text` to `sessions.py`.
+## Phase 5 — Security
 
-### Frontend DRY
+- [ ] **T17** Refuse non-loopback `--host` unless `UNWIND_AUTH_TOKEN` set; Bearer-token middleware when set. Treat missing `Origin` as untrusted for state-changing endpoints. (Review: S-H1+S-H2)
+- [ ] **T18** `pick_folder_endpoint`: single in-flight lock (409 if busy), drop timeout to 120 s, per-process nonce from prior GET. (Review: S-H3)
+- [ ] **T19** `_pick_with_tk`: pass `initial` via argv/env, not f-string `{initial!r}`. (Review: S-H4)
+- [ ] **T20** Harden `UNWIND_ALLOWED_ORIGINS` parsing: reject `null`, `*`, scheme-less entries; warn. (Review: M)
+- [ ] **T21** Cap `iter_lines_from` per-tick read to ~16 MiB. (Review: M)
+- [ ] **T22** SPA static fallback: assert `is_relative_to(static_root)` and reject symlinks pre-resolve. (Review: M)
 
-- [ ] Extract `isTypingTarget(e)` into `web/src/lib/keyboard.ts`; replace copies in `App.tsx:41`, `CanvasPane.tsx:370`, `TracePane.tsx:60`.
-- [ ] Hoist `filterExtrasByWindow` into `web/src/panes/instances.ts`; replace copies in `CompactCard.tsx:113` and `TracePane.tsx:227`.
-- [ ] Replace `writeHistory` + `writeHistoryDirect` with one function plus `{ force?: boolean }` arg — `web/src/lib/url-sync.ts:63,163`.
-- [ ] Centralize the three independent global `keydown` listeners (`App.tsx:71`, CanvasPane, TracePane) into a single dispatcher keyed off `focusedPane`.
+## Phase 6 — Architecture & polish
 
-## P3 — Bugs & polish
-
-- [ ] **`applyUrlState` clobbers `threadSessionId`** with `rootSessionId` — `web/src/store/ui.ts:107`. URL-sync the field or drop it.
-- [ ] **WS backoff lacks jitter + refocus reconnect** — `web/src/ws/client.ts:79`. Add ±25% jitter and reconnect on `visibilitychange`/`online`. Clear pending `setTimeout` on unmount.
-- [ ] **CanvasPane `navStateRef` hack** — `web/src/panes/CanvasPane.tsx:345-366`. Split into `useCanvasKeyboard` + `useCanvasAutoFit` + `useCanvasTree`; file drops 761 → ~400 LOC.
-- [ ] **Split TracePane renderers** into `MessageGroup` + `SpawnCard` components — `web/src/panes/TracePane.tsx`.
-- [ ] **`ReactMarkdown` `urlTransform`** to strip `javascript:` URIs in link `href`s.
-
-## P4 — Accessibility
-
-- [ ] `PaneFrame` keyboard-focusable + labeled — `web/src/App.tsx:122` (add `tabIndex={0}`, `role="region"`, `aria-label`).
-- [ ] Add `aria-keyshortcuts` to card buttons matching the README shortcuts.
-- [ ] Broader `aria-*` pass across panes (only ~3 attributes today).
+- [ ] **T23** Coalesce watcher `session_updated` events to ≤1 emit per 1–2 s of activity per session. (Review: M)
+- [ ] **T24** Per-request state-pack on `Request.state` (resolved `SpawnResolver`, precomputed `_latest_view`, active session, project JSONL listing). (Review: cross-cutting)
+- [ ] **T25** Central `Settings` object loaded once at startup; remove env-on-every-accessor pattern. (Review: A-H3+A-H4)
+- [ ] **T26** Drain WS pending tasks on disconnect (`await asyncio.gather(*pending, return_exceptions=True)`). (Review: L)
+- [ ] **T27** `Message.to_dict` → `dataclasses.asdict` with datetime post-processing. (Review: M)
