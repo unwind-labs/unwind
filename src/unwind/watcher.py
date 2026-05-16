@@ -33,6 +33,72 @@ log = logging.getLogger("unwind.watcher")
 
 
 DEBOUNCE_SEC = 0.20
+SESSION_UPDATE_COALESCE_SEC = 1.5
+
+
+class _SessionUpdateCoalescer:
+    """Rate-limit ``session_updated`` emissions per session.
+
+    During a busy turn the watcher flushes 5-10×/sec; the frontend re-sorts
+    the session list on every ``session_updated``. We keep ``messages_appended``
+    at full rate (frontend needs the delta) but emit ``session_updated`` at
+    most once per ``window`` seconds per session. A trailing-edge timer
+    ensures the final post-burst summary always lands.
+    """
+
+    def __init__(self, emit, window: float = SESSION_UPDATE_COALESCE_SEC) -> None:
+        self._emit = emit  # called as emit(session_id, payload)
+        self._window = window
+        self._last_emit: dict[str, float] = {}
+        self._pending: dict[str, dict] = {}
+        self._timers: dict[str, threading.Timer] = {}
+        self._lock = threading.Lock()
+
+    def request(self, session_id: str, payload: dict) -> None:
+        now = time.monotonic()
+        fire_now = False
+        with self._lock:
+            last = self._last_emit.get(session_id, 0.0)
+            elapsed = now - last
+            if elapsed >= self._window:
+                self._last_emit[session_id] = now
+                self._pending.pop(session_id, None)
+                fire_now = True
+            else:
+                self._pending[session_id] = payload
+                if session_id not in self._timers:
+                    delay = max(0.0, self._window - elapsed)
+                    timer = threading.Timer(
+                        delay, self._fire_pending, args=(session_id,)
+                    )
+                    timer.daemon = True
+                    self._timers[session_id] = timer
+                    timer.start()
+        if fire_now:
+            try:
+                self._emit(session_id, payload)
+            except Exception:
+                log.exception("session_updated emit failed")
+
+    def _fire_pending(self, session_id: str) -> None:
+        with self._lock:
+            payload = self._pending.pop(session_id, None)
+            self._timers.pop(session_id, None)
+            if payload is not None:
+                self._last_emit[session_id] = time.monotonic()
+        if payload is not None:
+            try:
+                self._emit(session_id, payload)
+            except Exception:
+                log.exception("session_updated emit failed (trailing)")
+
+    def stop(self) -> None:
+        with self._lock:
+            timers = list(self._timers.values())
+            self._timers.clear()
+            self._pending.clear()
+        for t in timers:
+            t.cancel()
 
 
 class _DebouncedHandler(FileSystemEventHandler):
@@ -110,6 +176,17 @@ class ProjectWatcher:
         self._offsets: dict[str, int] = {}  # session_id -> file bytes seen
         self._last_size: dict[str, int] = {}
         self._started = False
+        self._su_coalescer = _SessionUpdateCoalescer(self._emit_session_updated)
+
+    def _emit_session_updated(self, session_id: str, payload: dict) -> None:
+        self._bus.publish_threadsafe(
+            Event(
+                type="session_updated",
+                slug=self._slug,
+                session_id=session_id,
+                payload=payload,
+            )
+        )
 
     def start(self) -> None:
         if self._started:
@@ -153,6 +230,7 @@ class ProjectWatcher:
         if handler is not None:
             handler.stop()
             self._handler = None
+        self._su_coalescer.stop()
 
     # --- event routing ---------------------------------------------------
 
@@ -260,13 +338,8 @@ class ProjectWatcher:
                 # fall back to a full parse.
                 summary = index.get_session(session_id)
             if summary is not None:
-                self._bus.publish_threadsafe(
-                    Event(
-                        type="session_updated",
-                        slug=self._slug,
-                        session_id=session_id,
-                        payload={"summary": _summary_dict(summary)},
-                    )
+                self._su_coalescer.request(
+                    session_id, {"summary": _summary_dict(summary)}
                 )
 
     def _handle_callstack(self) -> None:
