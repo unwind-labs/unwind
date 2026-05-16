@@ -19,12 +19,12 @@ their last-known status; the UI displays them as in-progress.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone  # noqa: F401
+from datetime import datetime  # noqa: F401
 from pathlib import Path
 from typing import Any, Optional
 
 from ._cache import PathCache
-from .jsonl import parse_ts as _parse_ts
+from .jsonl import EPOCH, parse_ts as _parse_ts
 
 import yaml
 
@@ -155,10 +155,8 @@ class CallstackIndex:
         root_status: dict[str, str] = {}
         root_status_ts: dict[str, Optional[datetime]] = {}
 
-        epoch = datetime.fromtimestamp(0, timezone.utc)
-
         def newer(a: Optional[datetime], b: Optional[datetime]) -> bool:
-            return (a or epoch) > (b or epoch)
+            return (a or EPOCH) > (b or EPOCH)
 
         def absorb(node: TaskNode, ts: Optional[datetime]) -> None:
             sid = node.session_id
@@ -298,7 +296,6 @@ class CallstackIndex:
         Returned in chronological order by ``started_at`` (TaskNodes
         without a timestamp sort to the front).
         """
-        epoch = datetime.fromtimestamp(0, timezone.utc)
         out: list[TaskNode] = []
 
         for rep in self.all_reports():
@@ -320,7 +317,7 @@ class CallstackIndex:
             for t in rep.tasks:
                 visit(t)
 
-        out.sort(key=lambda n: n.started_at or epoch)
+        out.sort(key=lambda n: n.started_at or EPOCH)
         return out
 
     def all_child_session_ids(self) -> set[str]:

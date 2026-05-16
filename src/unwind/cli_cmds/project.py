@@ -8,6 +8,7 @@ from typing import Optional
 import typer
 
 from ..api.projects import ProjectSummary, fork_ids_for
+from ..jsonl import EPOCH
 from ..projects import ProjectPaths, claude_projects_root
 from ..registry import (
     index_for_slug,
@@ -49,7 +50,7 @@ def _build_summaries() -> list[ProjectSummary]:
             )
         )
     out.sort(
-        key=lambda p: p.last_activity or datetime.fromtimestamp(0, tz=timezone.utc),
+        key=lambda p: p.last_activity or EPOCH,
         reverse=True,
     )
     return out

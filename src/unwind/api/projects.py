@@ -7,6 +7,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
+from ..jsonl import EPOCH
 from ..dialog import pick_folder
 from ..security import require_trusted_origin
 from ..projects import slug_for
@@ -82,7 +83,7 @@ def list_projects() -> list[ProjectSummary]:
             )
         )
     out.sort(
-        key=lambda p: p.last_activity or datetime.fromtimestamp(0, tz=timezone.utc),
+        key=lambda p: p.last_activity or EPOCH,
         reverse=True,
     )
     return out

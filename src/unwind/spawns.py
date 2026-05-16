@@ -32,6 +32,8 @@ from typing import Any, Optional
 from .callstack import CallstackIndex, TaskNode
 from .fork_detect import ForkDetector
 from .jsonl import (
+    RETURN_RE as _RETURN_RE,
+    YIELD_RE as _YIELD_RE,
     extract_assistant_text as _assistant_text,
     iter_lines,
     parse_ts as _parse_ts,
@@ -59,14 +61,6 @@ _AGENT_ID_RE = re.compile(r"agentId:\s*([0-9a-f]{8,})")
 _INVOKE_ID_RE = re.compile(
     r'\\?"invoke_id\\?"\s*:\s*\\?"([0-9A-Za-z._-]+)\\?"'
 )
-# Callstack child-return envelope. Mirror of ``canvas_tree._YIELD_RE`` — when
-# no ``report.yaml`` exists (older runtime, or report not yet written) the
-# envelope in the child's last assistant message is the only signal that the
-# fork actually completed.
-_RETURN_RE = re.compile(r'"op"\s*:\s*"return"')
-_YIELD_RE = re.compile(r'"op"\s*:\s*"yield"')
-
-
 def compute_invoke_index_for_project(project_dir: Path) -> dict[str, str]:
     """Scan every JSONL in ``project_dir`` for callstack tool_use/tool_result
     envelopes and return an ``invoke_id → parent_session_id`` map.

@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Optional
 
 from ._cache import PathCache
-from .jsonl import _text_blocks, iter_lines
+from .jsonl import _text_blocks, file_birth_ts, iter_lines
 
 
 # How many leading uuids to sample from each JSONL.
@@ -261,7 +261,7 @@ def _build_probe(path: Path, mtime: float, size: int) -> _Probe:
             uuids.append(u)
         if len(uuids) >= PROBE_N and scanned >= PROBE_PROLOGUE_N:
             break
-    birth = _file_birth_ts(path, fallback=mtime)
+    birth = file_birth_ts(path, fallback=mtime)
     return _Probe(
         first_uuids=uuids,
         birth_ts=birth,
@@ -269,20 +269,6 @@ def _build_probe(path: Path, mtime: float, size: int) -> _Probe:
         size=size,
         is_callstack_fork=is_callstack_fork,
     )
-
-
-def _file_birth_ts(path: Path, fallback: float) -> float:
-    """Return file creation time, with sensible fallbacks across platforms."""
-    try:
-        st = path.stat()
-    except OSError:
-        return fallback
-    bt = getattr(st, "st_birthtime", None)
-    if isinstance(bt, (int, float)) and bt > 0:
-        return float(bt)
-    # Linux: st_ctime is last metadata change, but on a newly created append-
-    # only file it will be ≈ creation time and nothing rewrites the inode.
-    return float(st.st_ctime)
 
 
 _STARTING_TASK_RE = re.compile(

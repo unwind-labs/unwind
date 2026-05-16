@@ -21,26 +21,18 @@ Producing a single immutable tree the frontend renders directly.
 """
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Optional
 
 from ._cache import PathCache
 from .jsonl import (
+    EPOCH,
+    YIELD_RE as _YIELD_RE,
     extract_assistant_text as _extract_assistant_text,
     iter_lines,
     parse_ts as _parse_ts,
-)
-
-
-# Yield envelope detector. Claude Code's callstack runtime emits
-# ``{"op": "yield", "question": ...}`` inside an assistant message's
-# fenced code block when the session pauses for user input. There's no
-# atomic record type; the envelope IS the signal.
-_YIELD_RE = re.compile(
-    r'"op"\s*:\s*"yield"',
 )
 
 
@@ -248,9 +240,8 @@ def collect_invocations(
                 )
             )
 
-    epoch = datetime.fromtimestamp(0, timezone.utc)
     for invs in out.values():
-        invs.sort(key=lambda i: i.started_at or epoch)
+        invs.sort(key=lambda i: i.started_at or EPOCH)
     return out
 
 
@@ -502,7 +493,6 @@ def build_canvas_tree(
     # primary sort key. Fall back to ``window_start`` for parents
     # without a JSONL (subagent leaves) or when the resolver isn't
     # plumbed through.
-    epoch = datetime.fromtimestamp(0, timezone.utc)
     display_order_cache: dict[str, dict[str, int]] = {}
 
     def _display_order_for(parent_sid: str) -> dict[str, int]:
@@ -531,7 +521,7 @@ def build_canvas_tree(
         w.children.sort(
             key=lambda c: (
                 order.get(c.session_id, 10**9),
-                c.window_start or epoch,
+                c.window_start or EPOCH,
             )
         )
 

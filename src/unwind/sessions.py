@@ -3,11 +3,10 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from .jsonl import SessionSummary, extract_session_summary
+from .jsonl import EPOCH, SessionSummary, extract_session_summary
 from .projects import ProjectPaths
 
 
@@ -46,9 +45,8 @@ class SessionIndex:
             summary = self._get_summary(jsonl)
             if summary is not None:
                 results.append(summary)
-        epoch = datetime.fromtimestamp(0, timezone.utc)
         results.sort(
-            key=lambda s: s.last_timestamp or s.first_timestamp or epoch,
+            key=lambda s: s.last_timestamp or s.first_timestamp or EPOCH,
             reverse=True,
         )
         return results

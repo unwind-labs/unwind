@@ -1,12 +1,12 @@
 """``unwind session`` verbs: list, show, tree."""
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from typing import Optional
 
 import typer
 
 from ..api.projects import fork_ids_for
+from ..jsonl import EPOCH
 from ..api.sessions_api import SessionRow, TreeResponse
 from ..callstack import TaskNode
 from ..processes import session_status
@@ -98,11 +98,10 @@ def list_sessions(
     if status != "all":
         rows = [r for r in rows if r.status == status]
 
-    epoch_zero = datetime.fromtimestamp(0, tz=timezone.utc)
     if sort == "created":
-        rows.sort(key=lambda r: r.first_timestamp or epoch_zero, reverse=True)
+        rows.sort(key=lambda r: r.first_timestamp or EPOCH, reverse=True)
     else:
-        rows.sort(key=lambda r: r.last_timestamp or epoch_zero, reverse=True)
+        rows.sort(key=lambda r: r.last_timestamp or EPOCH, reverse=True)
 
     if limit is not None:
         rows = rows[:limit]

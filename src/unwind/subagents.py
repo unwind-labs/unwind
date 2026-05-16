@@ -20,6 +20,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from .jsonl import EPOCH
+
 
 SUBAGENT_PREFIX = "agent-"
 
@@ -66,7 +68,7 @@ class SubagentIndex:
             inv = self._build_one(jsonl)
             if inv is not None:
                 out.append(inv)
-        out.sort(key=lambda i: i.created_at or datetime.fromtimestamp(0, tz=timezone.utc))
+        out.sort(key=lambda i: i.created_at or EPOCH)
 
         with self._lock:
             self._cache[session_id] = (stat_mtime, out)

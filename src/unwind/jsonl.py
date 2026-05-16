@@ -14,12 +14,23 @@ on it for rendering, since the JSONL is written in order and we render in order.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator, Optional
 
 from ._cache import PathCache as _PathCache
+
+
+# Unix-epoch sentinel used as a sort fallback when a record has no timestamp.
+EPOCH = datetime.fromtimestamp(0, timezone.utc)
+
+# Callstack-runtime envelope detectors. The runtime emits these inside an
+# assistant message's fenced code block; there's no atomic record type so the
+# envelope text IS the signal.
+YIELD_RE = re.compile(r'"op"\s*:\s*"yield"')
+RETURN_RE = re.compile(r'"op"\s*:\s*"return"')
 
 
 # --- raw line iteration --------------------------------------------------
@@ -200,7 +211,9 @@ def extract_session_summary(path: Path, session_id: str) -> Optional[SessionSumm
     # sessions visible at the top of the list instead of sinking to the bottom
     # with a None first_timestamp.
     if first_ts is None and st is not None:
-        first_ts = _file_birth_dt(st)
+        bts = _birth_ts_from_stat(st)
+        if bts is not None:
+            first_ts = datetime.fromtimestamp(bts, tz=timezone.utc)
     if last_ts is None:
         last_ts = first_ts
 
@@ -219,13 +232,24 @@ def extract_session_summary(path: Path, session_id: str) -> Optional[SessionSumm
     )
 
 
-def _file_birth_dt(st) -> Optional[datetime]:
+def _birth_ts_from_stat(st) -> Optional[float]:
+    """Return birth/creation timestamp from a stat result, or None."""
     bt = getattr(st, "st_birthtime", None)
     if isinstance(bt, (int, float)) and bt > 0:
-        return datetime.fromtimestamp(bt, tz=timezone.utc)
+        return float(bt)
     if st.st_ctime > 0:
-        return datetime.fromtimestamp(st.st_ctime, tz=timezone.utc)
+        return float(st.st_ctime)
     return None
+
+
+def file_birth_ts(path: Path, fallback: float) -> float:
+    """Path-based variant: returns fallback on stat failure or zero ctime."""
+    try:
+        st = path.stat()
+    except OSError:
+        return fallback
+    ts = _birth_ts_from_stat(st)
+    return ts if ts is not None else fallback
 
 
 def stringify_tool_result(r: Any) -> str:
