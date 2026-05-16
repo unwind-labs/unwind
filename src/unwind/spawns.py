@@ -23,6 +23,7 @@ pick it up automatically.
 """
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -252,14 +253,26 @@ class SpawnResolver:
                 )
             )
 
-        # 3. Subagents. We only need to scan for sessions that exist on
-        # disk — the SubagentIndex is keyed per-session. The set of
-        # interesting parents is the union of every parent we've already
-        # seen (callstack + fork) plus every JSONL in the project dir.
+        # 3. Subagents. We only care about session ids whose
+        # ``<sid>/subagents/`` directory exists on disk — those are the
+        # only sessions that *can* have a subagent trace. One os.scandir
+        # walk of project_dir is far cheaper than globbing every ``*.jsonl``
+        # just to harvest session ids; most sessions don't have subagents.
         candidate_parents: set[str] = set(out.keys())
         if self._project_dir.is_dir():
-            for jsonl in self._project_dir.glob("*.jsonl"):
-                candidate_parents.add(jsonl.stem)
+            try:
+                with os.scandir(self._project_dir) as it:
+                    for entry in it:
+                        if not entry.is_dir(follow_symlinks=False):
+                            continue
+                        sub_dir = os.path.join(entry.path, "subagents")
+                        try:
+                            if os.path.isdir(sub_dir):
+                                candidate_parents.add(entry.name)
+                        except OSError:
+                            pass
+            except OSError:
+                pass
         for parent_sid in candidate_parents:
             for sa in self._sa.list_for_session(parent_sid):
                 out.setdefault(parent_sid, []).append(

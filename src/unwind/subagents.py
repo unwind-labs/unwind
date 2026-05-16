@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from ._cache import PathCache
 from .jsonl import EPOCH
 
 
@@ -47,6 +48,12 @@ class SubagentIndex:
     def __init__(self, project_dir: Path) -> None:
         self._project_dir = project_dir
         self._lock = threading.Lock()
+        # Per-file (path, mtime, size) cache so touching one subagent JSONL
+        # doesn't force re-parsing every other file in the same session.
+        self._file_cache: PathCache = PathCache(self._build_one)
+        # Per-session listing cache, keyed by the subagent dir's mtime.
+        # Cheap fast-path for the common "nothing changed" case so repeated
+        # list_for_session calls in one request don't re-glob.
         self._cache: dict[str, tuple[float, list[SubagentInvocation]]] = {}
 
     def list_for_session(self, session_id: str) -> list[SubagentInvocation]:
@@ -65,7 +72,7 @@ class SubagentIndex:
 
         out: list[SubagentInvocation] = []
         for jsonl in sub_dir.glob("agent-*.jsonl"):
-            inv = self._build_one(jsonl)
+            inv = self._file_cache.get(jsonl)
             if inv is not None:
                 out.append(inv)
         out.sort(key=lambda i: i.created_at or EPOCH)
@@ -95,7 +102,7 @@ class SubagentIndex:
         path = self.resolve(synthetic_id)
         if path is None:
             return None
-        return self._build_one(path)
+        return self._file_cache.get(path)
 
     # --- internals --------------------------------------------------------
 

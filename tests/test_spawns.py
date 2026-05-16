@@ -560,6 +560,48 @@ def test_fork_spawn_drops_when_callstack_report_arrives(tmp_path: Path):
     assert child_spawns[0].source == "callstack"
 
 
+def test_subagent_index_caches_per_file_not_per_dir(tmp_path: Path):
+    """Touching one subagent file must NOT force a re-parse of siblings."""
+    from unwind.subagents import SubagentIndex
+
+    proj = tmp_path / "proj"
+    sub_dir = proj / "ROOT" / "subagents"
+    sub_dir.mkdir(parents=True)
+    for tag in ("aaaa", "bbbb"):
+        (sub_dir / f"agent-{tag}.meta.json").write_text(
+            json.dumps({"agentType": "general-purpose", "description": tag})
+        )
+        (sub_dir / f"agent-{tag}.jsonl").write_text("")
+
+    si = SubagentIndex(proj)
+
+    # Spy on _build_one calls.
+    calls: list[str] = []
+    real_build = si._build_one
+    def spy(path):
+        calls.append(path.name)
+        return real_build(path)
+    si._file_cache._loader = spy
+
+    si.list_for_session("ROOT")
+    initial = list(calls)
+    assert sorted(initial) == ["agent-aaaa.jsonl", "agent-bbbb.jsonl"]
+
+    # Modify only one file. Bump its mtime so PathCache invalidates that
+    # entry; the OTHER file should still come from cache.
+    target = sub_dir / "agent-aaaa.jsonl"
+    target.write_text('{"type":"user","message":{"role":"user","content":"hi"}}\n')
+    # Also bump the dir's mtime so the per-session listing fast-path doesn't
+    # short-circuit the per-file path we want to exercise.
+    (sub_dir / "tickle.tmp").write_text("")
+    (sub_dir / "tickle.tmp").unlink()
+    calls.clear()
+
+    si.list_for_session("ROOT")
+    # Only the changed file re-parsed; the unchanged one stays cached.
+    assert calls == ["agent-aaaa.jsonl"], calls
+
+
 def test_subagent_yields_spawn(tmp_path: Path):
     proj = tmp_path / "proj"
     log = tmp_path / "log"
