@@ -187,23 +187,27 @@ class ProjectWatcher:
             self._known_sessions.add(session_id)
 
         try:
-            size = path.stat().st_size
+            st = path.stat()
         except OSError:
             return
+        size = st.st_size
+        mtime = st.st_mtime
         prev = self._offsets.get(session_id, 0)
 
-        # If file shrank (rotation / rewrite), reset offset.
-        if size < prev:
+        # If file shrank (rotation / rewrite), reset offset and force a
+        # full re-parse so summary fields don't drift.
+        shrank = size < prev
+        if shrank:
             prev = 0
+            index.invalidate(session_id)
 
         records, new_offset = iter_lines_from(path, prev)
         self._offsets[session_id] = new_offset
         self._last_size[session_id] = size
-
-        # Invalidate summary cache so next list-sessions reflects new count.
-        index.invalidate(session_id)
+        records_list = list(records)
 
         if is_new:
+            # Cold start path: cache miss → full parse via get_session.
             summary = index.get_session(session_id)
             self._bus.publish_threadsafe(
                 Event(
@@ -217,7 +221,6 @@ class ProjectWatcher:
             )
 
         # Tail: normalize and push as messages_appended.
-        records_list = list(records)
         if records_list:
             msgs = normalize_records(records_list, include_meta=False)
             if msgs:
@@ -233,7 +236,14 @@ class ProjectWatcher:
                     )
                 )
             # Always emit an updated summary when the JSONL grew.
-            summary = index.get_session(session_id)
+            summary = index.apply_increment(
+                session_id, records_list, size, mtime
+            )
+            if summary is None:
+                # No cached entry (e.g. shrink-triggered invalidate, or the
+                # session existed at startup but no one has listed yet) —
+                # fall back to a full parse.
+                summary = index.get_session(session_id)
             if summary is not None:
                 self._bus.publish_threadsafe(
                     Event(

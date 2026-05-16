@@ -2,11 +2,16 @@
 from __future__ import annotations
 
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
-from .jsonl import EPOCH, SessionSummary, extract_session_summary
+from .jsonl import (
+    EPOCH,
+    SessionSummary,
+    extract_session_summary,
+    parse_ts,
+)
 from .projects import ProjectPaths
 
 
@@ -64,6 +69,60 @@ class SessionIndex:
     def invalidate(self, session_id: str) -> None:
         with self._lock:
             self._cache.pop(session_id, None)
+
+    def apply_increment(
+        self,
+        session_id: str,
+        new_records: list[dict[str, Any]],
+        new_size: int,
+        new_mtime: float,
+    ) -> Optional[SessionSummary]:
+        """Fold ``new_records`` into the cached summary without re-parsing.
+
+        Returns the updated summary, or ``None`` if no cached entry exists
+        (caller should fall back to a full parse via ``get_session``).
+        Only fields cheaply derivable from the appended records are updated:
+        ``message_count``, ``last_timestamp``, ``custom_title``/``title``,
+        and ``file_size_bytes``. Bootstrap-only fields (``cwd``,
+        ``git_branch``, ``first_timestamp``, original first-user title) are
+        kept as-is from the cached summary.
+        """
+        with self._lock:
+            cached = self._cache.get(session_id)
+        if cached is None:
+            return None
+        summary = cached.summary
+
+        added = 0
+        last_ts = summary.last_timestamp
+        custom_title = summary.custom_title
+        for rec in new_records:
+            rtype = rec.get("type")
+            if rtype == "custom-title":
+                ct = rec.get("customTitle")
+                if isinstance(ct, str) and ct.strip():
+                    custom_title = ct.strip()
+                continue
+            ts = parse_ts(rec.get("timestamp"))
+            if ts is not None and (last_ts is None or ts > last_ts):
+                last_ts = ts
+            if rtype in ("user", "assistant"):
+                added += 1
+
+        title = custom_title or summary.title
+        updated = replace(
+            summary,
+            message_count=summary.message_count + added,
+            last_timestamp=last_ts,
+            custom_title=custom_title,
+            title=title,
+            file_size_bytes=new_size,
+        )
+        with self._lock:
+            self._cache[session_id] = _CacheEntry(
+                summary=updated, mtime=new_mtime, size=new_size
+            )
+        return updated
 
     # --- internals --------------------------------------------------------
 
