@@ -22,7 +22,7 @@ Status: `[ ]` pending · `[~]` in progress · `[x]` done
 - [x] **T9** Cache `_latest_view` and `reports_by_parent` on `CallstackIndex` keyed by callstack-log signature; hoist precomputation in `list_sessions` so per-row helpers do dict lookups. (Review: C1)
 - [x] **T10** Cache subagent `_build_one` per `(path, mtime, size)`; in `SpawnResolver.spawns_by_parent`, probe `<sid>/subagents/` via `stat` before opening JSONLs. (Review: C2)
 - [x] **T11** Add TTL (~1 s) or signature-based skip to `ForkDetector._refresh`. (Review: P-H1)
-- [ ] **T12** `list_projects` should use lightweight `os.scandir` for `last_activity` / `session_count`; defer full indexing to project-open. (Review: P-H2)
+- [x] **T12** `list_projects` should use lightweight `os.scandir` for `last_activity` / `session_count`; defer full indexing to project-open. (Review: P-H2)
 - [ ] **T13** Watcher: incremental session-summary update from new records only; full re-parse only on cold start or file shrink. (Review: P-H3)
 - [ ] **T14** `compute_invoke_index_for_project` → cached `read_records` instead of uncached `iter_lines`. (Review: P-H4)
 - [ ] **T15** Centralize project `*.jsonl` listing on the registry (cached by dir mtime); registry/canvas_tree/spawns/fork_detect/watcher all read from it. (Review: M4)
