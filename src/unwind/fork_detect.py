@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from .jsonl import iter_lines
+from .jsonl import _text_blocks, iter_lines
 
 
 # How many leading uuids to sample from each JSONL.
@@ -331,22 +331,6 @@ def _first_divergent_user_text(path: Path, ancestor_uuids: set[str]) -> Optional
         u = rec.get("uuid")
         if not isinstance(u, str) or u in ancestor_uuids:
             continue
-        msg = rec.get("message")
-        if not isinstance(msg, dict):
-            continue
-        content = msg.get("content")
-        text: Optional[str] = None
-        if isinstance(content, str):
-            text = content
-        elif isinstance(content, list):
-            for block in content:
-                if (
-                    isinstance(block, dict)
-                    and block.get("type") == "text"
-                    and isinstance(block.get("text"), str)
-                ):
-                    text = block["text"]
-                    break
-        fallback_user_text = text
+        fallback_user_text = _text_blocks(rec.get("message"), " ")
 
     return queue_text or fallback_user_text

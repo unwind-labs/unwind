@@ -251,28 +251,31 @@ def stringify_tool_result(r: Any) -> str:
     return ""
 
 
-def extract_assistant_text(rec: dict[str, Any]) -> Optional[str]:
-    """Return the concatenated plain-text content of an assistant record.
+def _text_blocks(msg: Any, sep: str) -> Optional[str]:
+    """Return the joined ``text`` content of a message dict.
 
-    Accepts both the simple string-content shape and the list-of-blocks
-    shape; returns ``None`` when the record carries no plain text (e.g.
-    only tool_use blocks).
+    Handles both the simple string-content shape and the list-of-blocks
+    shape. Returns ``None`` for non-dict messages or messages whose
+    content carries no plain text (e.g. tool_use-only).
     """
-    msg = rec.get("message")
     if not isinstance(msg, dict):
         return None
     content = msg.get("content")
     if isinstance(content, str):
         return content
     if isinstance(content, list):
-        parts: list[str] = []
-        for block in content:
-            if isinstance(block, dict) and block.get("type") == "text":
-                t = block.get("text")
-                if isinstance(t, str):
-                    parts.append(t)
-        return "\n".join(parts) if parts else None
+        parts = [
+            b["text"]
+            for b in content
+            if isinstance(b, dict) and b.get("type") == "text" and isinstance(b.get("text"), str)
+        ]
+        return sep.join(parts) if parts else None
     return None
+
+
+def extract_assistant_text(rec: dict[str, Any]) -> Optional[str]:
+    """Return the concatenated plain-text content of an assistant record."""
+    return _text_blocks(rec.get("message"), "\n")
 
 
 def parse_ts(raw: Any) -> Optional[datetime]:
@@ -298,21 +301,7 @@ _parse_ts = parse_ts
 
 
 def _extract_user_text(rec: dict[str, Any]) -> Optional[str]:
-    msg = rec.get("message")
-    if not isinstance(msg, dict):
-        return None
-    content = msg.get("content")
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts: list[str] = []
-        for block in content:
-            if isinstance(block, dict) and block.get("type") == "text":
-                t = block.get("text")
-                if isinstance(t, str):
-                    parts.append(t)
-        return " ".join(parts) if parts else None
-    return None
+    return _text_blocks(rec.get("message"), " ")
 
 
 def _normalize_title(text: Optional[str]) -> Optional[str]:
