@@ -98,20 +98,45 @@ def collect_uuids(path: Path) -> set[str]:
     return _UUID_CACHE.get(path)  # type: ignore[return-value]
 
 
-def iter_lines_from(path: Path, byte_offset: int) -> tuple[Iterator[dict[str, Any]], int]:
+# Cap per-tick read so a runaway tool dumping a huge tool_result block can't
+# OOM the watcher in a single read. If more bytes are pending past the cap,
+# the caller's loop should re-invoke until ``new_offset`` reaches file size.
+MAX_TICK_READ_BYTES = 16 * 1024 * 1024
+
+
+def iter_lines_from(
+    path: Path,
+    byte_offset: int,
+    max_bytes: int = MAX_TICK_READ_BYTES,
+) -> tuple[Iterator[dict[str, Any]], int]:
     """Yield records starting at ``byte_offset``; return new offset.
 
     Helper used by the watcher to tail growing files without re-reading.
+    Reads at most ``max_bytes``; if the file has more pending past the cap,
+    truncates the slice at the last complete newline and leaves the rest
+    for a subsequent call. ``new_offset`` reflects the actual processed
+    bytes so callers can detect short reads via ``new_offset < file_size``
+    and loop until drained.
     """
     new_offset = byte_offset
     records: list[dict[str, Any]] = []
     try:
         with path.open("rb") as fh:
             fh.seek(byte_offset)
-            buf = fh.read()
-            new_offset = byte_offset + len(buf)
+            buf = fh.read(max_bytes)
     except OSError:
         return iter(records), byte_offset
+    if not buf:
+        return iter(records), new_offset
+    # Truncate at last newline only if we hit the cap (i.e. the file may
+    # have more data we haven't read). When we read less than max_bytes,
+    # the file ended (or appended record is being written) and we should
+    # consume to the last newline naturally via splitlines.
+    if len(buf) >= max_bytes:
+        last_nl = buf.rfind(b"\n")
+        if last_nl >= 0:
+            buf = buf[: last_nl + 1]
+    new_offset = byte_offset + len(buf)
     for raw in buf.splitlines():
         line = raw.decode("utf-8", errors="replace").strip()
         if not line:

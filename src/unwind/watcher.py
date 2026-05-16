@@ -205,10 +205,21 @@ class ProjectWatcher:
             prev = 0
             index.invalidate(session_id)
 
-        records, new_offset = iter_lines_from(path, prev)
+        # iter_lines_from caps each read at MAX_TICK_READ_BYTES to bound
+        # memory; loop here so a single huge append still drains within one
+        # flush rather than stalling until the next FS event.
+        records_list: list[dict] = []
+        new_offset = prev
+        while True:
+            chunk_records, next_offset = iter_lines_from(path, new_offset)
+            if next_offset == new_offset:
+                break
+            records_list.extend(chunk_records)
+            new_offset = next_offset
+            if new_offset >= size:
+                break
         self._offsets[session_id] = new_offset
         self._last_size[session_id] = size
-        records_list = list(records)
 
         if is_new:
             # Cold start path: cache miss → full parse via get_session.
