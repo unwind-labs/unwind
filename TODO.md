@@ -38,7 +38,7 @@ Status: `[ ]` pending · `[~]` in progress · `[x]` done
 - [x] **T19** `_pick_with_tk`: pass `initial` via argv/env, not f-string `{initial!r}`. (Review: S-H4)
 - [x] **T20** Harden `UNWIND_ALLOWED_ORIGINS` parsing: reject `null`, `*`, scheme-less entries; warn. (Review: M)
 - [x] **T21** Cap `iter_lines_from` per-tick read to ~16 MiB. (Review: M)
-- [ ] **T22** SPA static fallback: assert `is_relative_to(static_root)` and reject symlinks pre-resolve. (Review: M)
+- [x] **T22** SPA static fallback: assert `is_relative_to(static_root)` and reject symlinks pre-resolve. (Review: M)
 
 ## Phase 6 — Architecture & polish
 

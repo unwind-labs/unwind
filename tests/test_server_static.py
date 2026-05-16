@@ -36,6 +36,37 @@ def test_spa_falls_back_to_index_for_unknown(tmp_path, monkeypatch):
         assert "spa" in r.text
 
 
+def test_spa_rejects_symlink_to_file_outside(tmp_path, monkeypatch):
+    """A symlink inside static/ pointing outside must not leak its target."""
+    static = _setup_static(tmp_path, monkeypatch)
+    outside = tmp_path / "secret.txt"
+    outside.write_text("TOPSECRET")
+    (static / "leak").symlink_to(outside)
+
+    app = server_mod.create_app()
+    with TestClient(app) as c:
+        r = c.get("/leak")
+        assert r.status_code == 200
+        assert "TOPSECRET" not in r.text
+        assert "spa" in r.text
+
+
+def test_spa_rejects_symlink_dir_component(tmp_path, monkeypatch):
+    """A symlinked directory component must not let nested files leak."""
+    static = _setup_static(tmp_path, monkeypatch)
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir()
+    (outside_dir / "secret.txt").write_text("TOPSECRET")
+    (static / "linkdir").symlink_to(outside_dir)
+
+    app = server_mod.create_app()
+    with TestClient(app) as c:
+        r = c.get("/linkdir/secret.txt")
+        assert r.status_code == 200
+        assert "TOPSECRET" not in r.text
+        assert "spa" in r.text
+
+
 def test_spa_rejects_traversal_via_resolved_target(tmp_path, monkeypatch):
     """Even if path-resolution lands outside STATIC_DIR, only index.html is served."""
     static = _setup_static(tmp_path, monkeypatch)

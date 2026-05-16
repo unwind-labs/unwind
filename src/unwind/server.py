@@ -108,6 +108,36 @@ def create_app() -> FastAPI:
     return app
 
 
+def _safe_static_target(static_dir: Path, static_root: Path, rel: str) -> Path | None:
+    """Resolve ``rel`` under ``static_dir`` only if the path is symlink-free and
+    fully contained within the (resolved) static root.
+
+    Returns the candidate Path on success or None on any rejection (caller
+    falls through to index.html).
+    """
+    pre = static_dir / rel
+    # Walk pre and each parent up to static_dir; refuse any symlinked component.
+    # Stops at static_dir even if it is itself a symlink (operators may want to
+    # mount static/ via a link; that's fine — we just don't follow links inside).
+    check: Path = pre
+    while True:
+        if check.is_symlink():
+            return None
+        if check == static_dir:
+            break
+        parent = check.parent
+        if parent == check:
+            return None
+        check = parent
+    try:
+        resolved = pre.resolve()
+    except (OSError, RuntimeError):
+        return None
+    if resolved != static_root and not resolved.is_relative_to(static_root):
+        return None
+    return resolved
+
+
 def _mount_static(app: FastAPI) -> None:
     """Serve the Vite build output at the root, with SPA fallback."""
     if STATIC_DIR.is_dir() and (STATIC_DIR / "index.html").is_file():
@@ -132,13 +162,9 @@ def _mount_static(app: FastAPI) -> None:
             if full_path.startswith("api/") or full_path.startswith("assets/"):
                 # 404 — FastAPI would already have matched a registered route.
                 return FileResponse(index_html, status_code=404)
-            try:
-                target = (STATIC_DIR / full_path).resolve()
-            except (OSError, RuntimeError):
-                return FileResponse(index_html)
-            if target == static_root or static_root in target.parents:
-                if target.is_file():
-                    return FileResponse(target)
+            target = _safe_static_target(STATIC_DIR, static_root, full_path)
+            if target is not None and target.is_file():
+                return FileResponse(target)
             return FileResponse(index_html)
 
     else:
