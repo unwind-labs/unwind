@@ -37,11 +37,16 @@ def test_pick_folder_accepts_same_origin(tmp_path, monkeypatch):
         assert r.json() == {"cancelled": True, "slug": None, "source_path": None}
 
 
-def test_pick_folder_accepts_no_origin(tmp_path, monkeypatch):
-    """CLI / curl have no Origin header; we trust them (browsers always send it)."""
+def test_pick_folder_rejects_no_origin(tmp_path, monkeypatch):
+    """State-changing endpoints reject missing-Origin requests.
+
+    A local non-browser process (any other CLI on the box, any subprocess of
+    an installed app) could otherwise bypass the Origin-based CSRF guard.
+    """
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("UNWIND_ALLOWED_ORIGINS", raising=False)
     app = create_app()
     with TestClient(app) as c:
         with patch("unwind.api.projects.pick_folder", return_value=None):
             r = c.post("/api/projects/pick-folder")
-        assert r.status_code == 200
+        assert r.status_code == 403

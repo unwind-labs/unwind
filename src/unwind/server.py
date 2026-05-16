@@ -11,7 +11,7 @@ import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -19,7 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from . import __version__
 from .api import routers
 from .events import get_bus
-from .security import allowed_origins
+from .security import allowed_origins, auth_token, extract_bearer, is_token_valid
 from .watcher import ensure_watcher, stop_all_watchers
 
 
@@ -75,6 +75,22 @@ def create_app() -> FastAPI:
         allow_methods=["GET", "POST"],
         allow_headers=["*"],
     )
+
+    if auth_token() is not None:
+
+        @app.middleware("http")
+        async def _require_bearer(request: Request, call_next):
+            # Static SPA assets bootstrap the page before any auth state exists;
+            # they're inert HTML/JS/CSS, so they're exempted. /api/* and /ws are
+            # the protected surface.
+            path = request.url.path
+            if path.startswith("/api/") or path.startswith("/ws"):
+                token = extract_bearer(request.headers.get("authorization"))
+                if not is_token_valid(token):
+                    return JSONResponse(
+                        {"detail": "unauthorized"}, status_code=401
+                    )
+            return await call_next(request)
 
     @app.get("/api/health")
     def health() -> dict:

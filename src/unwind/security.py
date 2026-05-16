@@ -6,6 +6,7 @@ so policy lives in one place.
 """
 from __future__ import annotations
 
+import hmac
 import os
 import re
 from typing import Annotated
@@ -77,12 +78,22 @@ def is_same_origin(origin: str, host_header: str | None, *, secure: bool) -> boo
     return o == h
 
 
-def is_origin_allowed(origin: str | None, host_header: str | None, *, secure: bool) -> bool:
-    """Allow if Origin is missing (non-browser client), same-origin, or whitelisted."""
+def is_origin_allowed(
+    origin: str | None,
+    host_header: str | None,
+    *,
+    secure: bool,
+    allow_missing_origin: bool = True,
+) -> bool:
+    """Allow if same-origin or whitelisted.
+
+    ``allow_missing_origin``: when True (default), a missing Origin header is
+    permitted — fine for read-only GETs and WS where non-browser clients
+    legitimately omit it. State-changing endpoints pass False so any local
+    non-browser process that bypasses the Origin-based CSRF guard is rejected.
+    """
     if not origin:
-        # Non-browser clients (curl, python-websockets in tests) omit Origin.
-        # Browsers always send it, so absence cannot be forged from a browser.
-        return True
+        return allow_missing_origin
     if is_same_origin(origin, host_header, secure=secure):
         return True
     return origin in allowed_origins()
@@ -93,10 +104,38 @@ def require_trusted_origin(request: Request) -> None:
 
     Browsers always send the Origin header on POST/PUT/DELETE, so this is a
     reliable CSRF / cross-origin gate for endpoints that mutate server state.
+    Missing Origin is treated as untrusted: a local non-browser process could
+    otherwise bypass this guard.
     """
     headers = request.headers
     origin = headers.get("origin")
     host = headers.get("host")
     secure = request.url.scheme == "https"
-    if not is_origin_allowed(origin, host, secure=secure):
+    if not is_origin_allowed(
+        origin, host, secure=secure, allow_missing_origin=False
+    ):
         raise HTTPException(status_code=403, detail="cross-origin request rejected")
+
+
+def auth_token() -> str | None:
+    """Configured bearer token, or None when auth is disabled (loopback default)."""
+    tok = os.environ.get("UNWIND_AUTH_TOKEN", "").strip()
+    return tok or None
+
+
+def is_token_valid(presented: str | None) -> bool:
+    """Constant-time compare ``presented`` against the configured token."""
+    expected = auth_token()
+    if not expected or not presented:
+        return False
+    return hmac.compare_digest(presented, expected)
+
+
+def extract_bearer(authorization: str | None) -> str | None:
+    """Parse an ``Authorization: Bearer <token>`` header value."""
+    if not authorization:
+        return None
+    parts = authorization.split(None, 1)
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        return None
+    return parts[1].strip() or None

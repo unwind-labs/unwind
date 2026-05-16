@@ -67,6 +67,30 @@ def _paths_for_serve(chosen_path: Path) -> ProjectPaths:
     return ProjectPaths.for_slug(rel.parts[0])
 
 
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "0:0:0:0:0:0:0:1"})
+
+
+def _enforce_bind_policy(host: str) -> None:
+    """Refuse non-loopback binds unless an auth token is configured.
+
+    The server has no auth by default; binding 0.0.0.0 (or any LAN-reachable
+    address) would expose every session JSONL (source, secrets, file
+    contents) to anyone on the network. Require an explicit token so the
+    bearer middleware in :mod:`unwind.server` can gate access.
+    """
+    if host.lower() in _LOOPBACK_HOSTS:
+        return
+    if os.environ.get("UNWIND_AUTH_TOKEN", "").strip():
+        return
+    console.print(
+        f"[red]Refusing to bind {host} without UNWIND_AUTH_TOKEN.[/]\n"
+        "Set UNWIND_AUTH_TOKEN=<long-random-string> and require\n"
+        "  Authorization: Bearer <token> on every /api/* and /ws request,\n"
+        "or use the loopback default (127.0.0.1)."
+    )
+    raise typer.Exit(2)
+
+
 def _open_browser_later(url: str, delay_s: float = 0.4) -> None:
     def _go() -> None:
         time.sleep(delay_s)
@@ -105,6 +129,7 @@ def serve(
     ),
 ) -> None:
     """Launch the unwind observer for the given folder (or CWD)."""
+    _enforce_bind_policy(host)
     chosen_path = Path(path).resolve() if path else Path.cwd().resolve()
     paths = _paths_for_serve(chosen_path)
 

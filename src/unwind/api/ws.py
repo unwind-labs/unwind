@@ -7,7 +7,13 @@ import logging
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from ..events import get_bus
-from ..security import is_origin_allowed, is_valid_slug
+from ..security import (
+    auth_token,
+    extract_bearer,
+    is_origin_allowed,
+    is_token_valid,
+    is_valid_slug,
+)
 from ..watcher import ensure_watcher
 
 log = logging.getLogger("unwind.ws")
@@ -16,7 +22,7 @@ router = APIRouter()
 
 
 @router.websocket("/ws")
-async def ws_endpoint(ws: WebSocket, project: str = "") -> None:
+async def ws_endpoint(ws: WebSocket, project: str = "", token: str = "") -> None:
     origin = ws.headers.get("origin")
     host = ws.headers.get("host")
     secure = ws.url.scheme == "wss"
@@ -25,6 +31,19 @@ async def ws_endpoint(ws: WebSocket, project: str = "") -> None:
         log.warning("ws origin rejected origin=%s host=%s", origin, host)
         await ws.close(code=1008)
         return
+
+    if auth_token() is not None:
+        # Browsers can't set Authorization headers on the WS handshake; accept
+        # the token via Sec-WebSocket-Protocol or ?token= query.
+        presented = (
+            extract_bearer(ws.headers.get("authorization"))
+            or token.strip()
+            or None
+        )
+        if not is_token_valid(presented):
+            log.warning("ws auth rejected origin=%s", origin)
+            await ws.close(code=1008)
+            return
 
     await ws.accept()
     if not project:
