@@ -23,7 +23,17 @@ export type PickedFolder = {
 };
 
 export async function pickFolder(): Promise<PickedFolder> {
-  const r = await fetch("/api/projects/pick-folder", { method: "POST" });
+  // The POST endpoint requires a short-lived single-use nonce — fetched
+  // here, consumed immediately by the POST. Blocks blind-CSRF attempts
+  // from triggering the native folder dialog.
+  const nr = await fetch("/api/projects/pick-folder-nonce");
+  if (!nr.ok) throw new Error(`pick-folder-nonce -> ${nr.status}`);
+  const { nonce } = (await nr.json()) as { nonce: string };
+  const r = await fetch("/api/projects/pick-folder", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ nonce }),
+  });
   if (!r.ok) throw new Error(`pick-folder -> ${r.status}`);
   return (await r.json()) as PickedFolder;
 }

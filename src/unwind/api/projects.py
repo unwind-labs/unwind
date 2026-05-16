@@ -3,11 +3,14 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
+import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from ..jsonl import EPOCH
@@ -49,6 +52,50 @@ class PickedFolder(BaseModel):
     cancelled: bool
     slug: Optional[str] = None
     source_path: Optional[str] = None
+
+
+class PickFolderNonce(BaseModel):
+    nonce: str
+
+
+class PickFolderRequest(BaseModel):
+    nonce: str
+
+
+# Single-use nonces required by POST /projects/pick-folder. Together with the
+# in-flight lock and the Origin guard, this blocks blind-CSRF / replay attempts
+# from triggering the native folder dialog. Nonces expire after 60s.
+_NONCE_TTL = 60.0
+_nonces: dict[str, float] = {}
+_nonces_lock = threading.Lock()
+# Held while a folder-picker dialog is open. A second concurrent request
+# returns 409 instead of stacking another modal on the user's desktop.
+_picker_inflight = threading.Lock()
+
+
+def _prune_expired_nonces(now: float) -> None:
+    """Drop expired entries. Must be called with ``_nonces_lock`` held."""
+    expired = [n for n, exp in _nonces.items() if exp <= now]
+    for n in expired:
+        _nonces.pop(n, None)
+
+
+def _issue_nonce() -> str:
+    now = time.monotonic()
+    token = secrets.token_urlsafe(24)
+    with _nonces_lock:
+        _prune_expired_nonces(now)
+        _nonces[token] = now + _NONCE_TTL
+    return token
+
+
+def _consume_nonce(token: str) -> bool:
+    """Pop ``token`` if present and unexpired. Single-use."""
+    now = time.monotonic()
+    with _nonces_lock:
+        _prune_expired_nonces(now)
+        exp = _nonces.pop(token, None)
+    return exp is not None and exp > now
 
 
 @router.get("/projects", response_model=list[ProjectSummary])
@@ -173,19 +220,43 @@ def get_default_project() -> DefaultProject:
     return DefaultProject(slug=default_slug(), source_path=path)
 
 
+@router.get(
+    "/projects/pick-folder-nonce",
+    response_model=PickFolderNonce,
+    dependencies=[Depends(require_trusted_origin)],
+)
+def pick_folder_nonce() -> PickFolderNonce:
+    """Issue a short-lived single-use token for the folder picker.
+
+    The POST endpoint requires this nonce so a blind-CSRF attempt (or any
+    background script that didn't first read from the same origin) can't
+    spawn the native dialog on the user's desktop.
+    """
+    return PickFolderNonce(nonce=_issue_nonce())
+
+
 @router.post(
     "/projects/pick-folder",
     response_model=PickedFolder,
     dependencies=[Depends(require_trusted_origin)],
 )
-def pick_folder_endpoint() -> PickedFolder:
+def pick_folder_endpoint(body: PickFolderRequest) -> PickedFolder:
     """Open a native folder-picker on the host and register the result.
 
-    The dialog blocks the request until the user picks or cancels. On pick we
+    Requires a nonce issued by ``GET /projects/pick-folder-nonce`` and is
+    serialized via an in-flight lock — a second concurrent request returns
+    409 rather than stacking another modal on the user's desktop. On pick we
     register the folder so future ``/api/projects`` calls surface its real
     source path (not just a slug-derived synthetic one).
     """
-    chosen = pick_folder()
+    if not _consume_nonce(body.nonce):
+        raise HTTPException(status_code=403, detail="invalid or expired nonce")
+    if not _picker_inflight.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail="folder picker already open")
+    try:
+        chosen = pick_folder()
+    finally:
+        _picker_inflight.release()
     if chosen is None:
         return PickedFolder(cancelled=True)
     # The slug may already have a cached index built from the synthetic

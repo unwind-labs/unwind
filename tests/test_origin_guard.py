@@ -8,6 +8,18 @@ from fastapi.testclient import TestClient
 from unwind.server import create_app
 
 
+def _same_origin_headers() -> dict[str, str]:
+    return {"origin": "http://testserver", "host": "testserver"}
+
+
+def _fetch_nonce(client) -> str:
+    r = client.get(
+        "/api/projects/pick-folder-nonce", headers=_same_origin_headers()
+    )
+    assert r.status_code == 200
+    return r.json()["nonce"]
+
+
 def test_pick_folder_rejects_cross_origin(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.delenv("UNWIND_ALLOWED_ORIGINS", raising=False)
@@ -16,6 +28,7 @@ def test_pick_folder_rejects_cross_origin(tmp_path, monkeypatch):
         r = c.post(
             "/api/projects/pick-folder",
             headers={"origin": "http://evil.example"},
+            json={"nonce": "anything"},
         )
         assert r.status_code == 403
 
@@ -24,14 +37,13 @@ def test_pick_folder_accepts_same_origin(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
     app = create_app()
     with TestClient(app) as c:
+        nonce = _fetch_nonce(c)
         # User cancels the picker dialog → endpoint must run, not be rejected.
         with patch("unwind.api.projects.pick_folder", return_value=None):
             r = c.post(
                 "/api/projects/pick-folder",
-                headers={
-                    "origin": "http://testserver",
-                    "host": "testserver",
-                },
+                headers=_same_origin_headers(),
+                json={"nonce": nonce},
             )
         assert r.status_code == 200
         assert r.json() == {"cancelled": True, "slug": None, "source_path": None}
@@ -48,5 +60,5 @@ def test_pick_folder_rejects_no_origin(tmp_path, monkeypatch):
     app = create_app()
     with TestClient(app) as c:
         with patch("unwind.api.projects.pick_folder", return_value=None):
-            r = c.post("/api/projects/pick-folder")
+            r = c.post("/api/projects/pick-folder", json={"nonce": "anything"})
         assert r.status_code == 403

@@ -62,7 +62,7 @@ def _pick_with_osascript(initial: Optional[str]) -> Optional[str]:
         [osa, "-e", script],
         capture_output=True,
         text=True,
-        timeout=600,
+        timeout=120,
     )
     if proc.returncode != 0:
         # User cancelled (-128) or another osascript error — treat as no-op.
@@ -84,7 +84,7 @@ def _pick_with_tk(initial: Optional[str]) -> Optional[str]:
         [sys.executable, "-c", script],
         capture_output=True,
         text=True,
-        timeout=600,
+        timeout=120,
     )
     if proc.returncode != 0:
         return None
