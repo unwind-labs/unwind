@@ -70,21 +70,25 @@ async def ws_endpoint(ws: WebSocket, project: str = "", token: str = "") -> None
             done, pending = await asyncio.wait(
                 {recv_task, send_task}, return_when=asyncio.FIRST_COMPLETED
             )
-            for t in pending:
-                t.cancel()
-            if recv_task in done:
-                try:
-                    msg = recv_task.result()
-                except WebSocketDisconnect:
-                    break
-                if msg == "ping":
-                    await ws.send_json({"type": "pong"})
-            if send_task in done:
-                try:
-                    event = send_task.result()
-                except asyncio.CancelledError:
-                    continue
-                await ws.send_json(event.to_dict())
+            try:
+                if recv_task in done:
+                    try:
+                        msg = recv_task.result()
+                    except WebSocketDisconnect:
+                        break
+                    if msg == "ping":
+                        await ws.send_json({"type": "pong"})
+                if send_task in done:
+                    try:
+                        event = send_task.result()
+                    except asyncio.CancelledError:
+                        continue
+                    await ws.send_json(event.to_dict())
+            finally:
+                for t in pending:
+                    t.cancel()
+                if pending:
+                    await asyncio.gather(*pending, return_exceptions=True)
     except WebSocketDisconnect:
         pass
     except Exception:
