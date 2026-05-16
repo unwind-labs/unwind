@@ -120,47 +120,6 @@ class CallstackIndex:
             by_parent.setdefault(rep.parent_session, []).append(rep)
         return by_parent
 
-    def children_for_invoke(self, invoke_id: str) -> list[str]:
-        """Return top-level task session_ids for a given ``invoke_id``."""
-        rep = self.report_for_invoke(invoke_id)
-        if rep is None:
-            return []
-        return [t.session_id for t in rep.tasks if t.session_id]
-
-    def report_for_invoke(self, invoke_id: str) -> Optional[InvokeReport]:
-        for rep in self.all_reports():
-            if rep.invoke_id == invoke_id:
-                return rep
-        return None
-
-    def task_status_for_session(self, session_id: str) -> Optional[str]:
-        """Return the callstack task status for a session, if any report has it.
-
-        Walks every report's task tree (and matches root-callers by
-        ``parent_session``). Returns the task's ``status`` (e.g.
-        ``complete``, ``running``, ``failed``); returns ``None`` if no
-        report references this session.
-        """
-
-        def visit(node: TaskNode) -> Optional[str]:
-            if node.session_id == session_id:
-                return node.status or None
-            for c in node.children:
-                hit = visit(c)
-                if hit is not None:
-                    return hit
-            return None
-
-        for rep in self.all_reports():
-            if rep.parent_session == session_id:
-                # Root caller — its overall status is the report's status.
-                return rep.status or None
-            for t in rep.tasks:
-                hit = visit(t)
-                if hit is not None:
-                    return hit
-        return None
-
     def _latest_view(
         self,
     ) -> tuple[
@@ -262,8 +221,8 @@ class CallstackIndex:
         return session_id in canonical
 
     def aggregate_status_for_session(self, session_id: str) -> Optional[str]:
-        """Like ``task_status_for_session``, but propagates the status of the
-        most-active descendant up.
+        """Return a single status for ``session_id`` that propagates the
+        status of its most-active descendant up.
 
         A parent that's ``awaiting_child`` for a yielded grandchild should
         itself surface as yielded so the whole chain lights up in the UI.
@@ -309,54 +268,6 @@ class CallstackIndex:
             if s in ("complete", "failed", "error"):
                 return s
         return statuses[0] if statuses else None
-
-    def reports_with_session_node(self, session_id: str) -> list[InvokeReport]:
-        """Reports whose task tree contains a node with ``session_id``.
-
-        Used for nested invokes: a session deeper in the tree (e.g. /task-c)
-        appears as a TaskNode inside a report whose parent_session is the
-        outer root. Sorted by ``started_at`` ascending.
-        """
-        out: list[InvokeReport] = []
-
-        def has_node(node: TaskNode) -> bool:
-            if node.session_id == session_id:
-                return True
-            return any(has_node(c) for c in node.children)
-
-        for rep in self.all_reports():
-            if rep.parent_session == session_id:
-                out.append(rep)
-                continue
-            if any(has_node(t) for t in rep.tasks):
-                out.append(rep)
-
-        out.sort(key=lambda r: r.started_at or datetime.fromtimestamp(0, timezone.utc))
-        return out
-
-    def children_in_report(
-        self, report: InvokeReport, session_id: str
-    ) -> list["TaskNode"]:
-        """Return ``session_id``'s direct children inside ``report``.
-
-        For a top-level (root) caller whose parent_session matches, returns
-        ``report.tasks``. For nested callers, walks the task tree to find the
-        matching node and returns its children.
-        """
-        if report.parent_session == session_id:
-            return list(report.tasks)
-        out: list[TaskNode] = []
-
-        def visit(node: TaskNode) -> None:
-            if node.session_id == session_id:
-                out.extend(node.children)
-                return
-            for c in node.children:
-                visit(c)
-
-        for t in report.tasks:
-            visit(t)
-        return out
 
     def direct_children_of(self, session_id: str) -> list["TaskNode"]:
         """Find this session's direct children across every report.

@@ -86,8 +86,8 @@ def index_for_slug(slug: str) -> SessionIndex:
     # If we built the index from a synthetic slug (no real path registered
     # yet), peek at any session's ``cwd`` and upgrade the registry. Without
     # this the callstack log dir stays pinned at ``/dev/null/no-callstack``
-    # and ``report_for_invoke`` always returns None — so callstack invokes
-    # never resolve their children and the UI shows "resolving…" forever.
+    # and report lookups all miss — so callstack invokes never resolve their
+    # children and the UI shows "resolving…" forever.
     if source is None:
         real_cwd = _peek_session_cwd(index)
         if real_cwd is not None:
