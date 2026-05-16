@@ -37,6 +37,7 @@ from .jsonl import (
     YIELD_RE as _YIELD_RE,
     extract_assistant_text as _assistant_text,
     iter_lines,
+    read_records,
     parse_ts as _parse_ts,
     stringify_tool_result as _stringify_result,
 )
@@ -76,7 +77,7 @@ def compute_invoke_index_for_project(project_dir: Path) -> dict[str, str]:
     for jsonl in project_dir.glob("*.jsonl"):
         parent_sid = jsonl.stem
         tool_use_names: dict[str, str] = {}
-        for rec in iter_lines(jsonl):
+        for rec in read_records(jsonl):
             rtype = rec.get("type")
             msg = rec.get("message")
             if not isinstance(msg, dict):
