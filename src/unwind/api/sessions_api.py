@@ -277,7 +277,18 @@ def get_messages(
     slug: SlugPath,
     session_id: SessionIdPath,
     include_meta: bool = Query(False),
+    since_uuid: Optional[str] = Query(None),
 ) -> MessagesResponse:
+    """Return normalized messages for a session.
+
+    Pass ``since_uuid`` (typically the ``last_uuid`` from a prior response)
+    to get only messages whose record landed AFTER that uuid. The wire
+    payload shrinks to the delta while ``file_offset`` and ``last_uuid``
+    still reflect the full file so the client can resume tailing.
+    ``extra_spawns`` always reflects the full file (it's cheap to recompute
+    from the cached records and the client expects it to be authoritative
+    on every response).
+    """
     ci = callstack_for_slug(slug)
     si = subagent_index_for_slug(slug)
     resolver = spawn_resolver_for_slug(slug)
@@ -294,9 +305,10 @@ def get_messages(
             current_session_id=session_id,
             spawn_resolver=resolver,
         )
+        tail = _slice_after_uuid(page.messages, since_uuid)
         return MessagesResponse(
             session_id=session_id,
-            messages=[m.to_dict() for m in page.messages],
+            messages=[m.to_dict() for m in tail],
             last_uuid=page.last_uuid,
             file_offset=page.file_offset,
         )
@@ -356,13 +368,33 @@ def get_messages(
             )
         )
 
+    tail = _slice_after_uuid(page.messages, since_uuid)
     return MessagesResponse(
         session_id=session_id,
-        messages=[m.to_dict() for m in page.messages],
+        messages=[m.to_dict() for m in tail],
         last_uuid=page.last_uuid,
         file_offset=page.file_offset,
         extra_spawns=extra,
     )
+
+
+def _slice_after_uuid(messages, since_uuid):
+    """Return messages whose record landed AFTER ``since_uuid``.
+
+    Matching is by ``base_uuid`` because the normalizer can fan one record
+    into multiple ``f"{uuid}:{order}"`` messages — they all share the same
+    base uuid and must be skipped together. Unknown / missing uuid → full
+    list (the client probably reset its cache).
+    """
+    if not since_uuid:
+        return messages
+    last_idx = -1
+    for i, m in enumerate(messages):
+        if base_uuid(m.uuid) == since_uuid:
+            last_idx = i
+    if last_idx < 0:
+        return messages
+    return messages[last_idx + 1:]
 
 
 class CanvasTreeResponse(BaseModel):

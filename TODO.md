@@ -29,7 +29,7 @@ Status: `[ ]` pending · `[~]` in progress · `[x]` done
 
 ## Phase 4 — API contract (additive)
 
-- [ ] **T16** `GET /messages` accepts `since_offset`/`since_uuid`; client (`ws/client.ts`) uses delta fetch on reconnect. (Review: P-H5)
+- [x] **T16** `GET /messages` accepts `since_offset`/`since_uuid`; client (`ws/client.ts`) uses delta fetch on reconnect. (Review: P-H5)
 
 ## Phase 5 — Security
 

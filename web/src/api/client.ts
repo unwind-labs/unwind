@@ -1,7 +1,8 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import type {
   CanvasTreeResponse,
   DefaultProject,
+  Message,
   MessagesResponse,
   ProjectSummary,
   SessionRow,
@@ -87,13 +88,45 @@ export function useMessages(
   sessionId: string | null | undefined,
   includeMeta: boolean = false,
 ) {
+  const qc = useQueryClient();
   return useQuery({
     enabled: !!slug && !!sessionId,
     queryKey: ["messages", slug, sessionId, includeMeta],
-    queryFn: () =>
-      j<MessagesResponse>(
-        `/api/projects/${enc(slug!)}/sessions/${enc(sessionId!)}/messages?include_meta=${includeMeta}`,
-      ),
+    queryFn: async () => {
+      const key = ["messages", slug, sessionId, includeMeta];
+      const prev = qc.getQueryData<MessagesResponse>(key);
+      const params = new URLSearchParams({ include_meta: String(includeMeta) });
+      // Delta fetch: when we already hold a snapshot, ask the server only
+      // for messages that landed after the last record we saw. Server still
+      // returns the full file_offset / last_uuid so we can keep tailing.
+      if (prev?.last_uuid) params.set("since_uuid", prev.last_uuid);
+      const fresh = await j<MessagesResponse>(
+        `/api/projects/${enc(slug!)}/sessions/${enc(sessionId!)}/messages?${params}`,
+      );
+      if (!prev?.last_uuid) return fresh;
+      return mergeMessagesDelta(prev, fresh);
+    },
     refetchInterval: POLL_SAFETY_NET_MS,
   });
+}
+
+/** Merge a delta response into the cached snapshot. Dedup by uuid in case
+ *  the server falls back to a full payload (e.g. unknown since_uuid after
+ *  file rotation) or the WS already patched in some of the same rows. */
+function mergeMessagesDelta(
+  prev: MessagesResponse,
+  delta: MessagesResponse,
+): MessagesResponse {
+  const seen = new Set(prev.messages.map((m) => m.uuid));
+  const merged: Message[] = [...prev.messages];
+  for (const m of delta.messages) {
+    if (!seen.has(m.uuid)) {
+      merged.push(m);
+      seen.add(m.uuid);
+    }
+  }
+  return {
+    ...delta,
+    messages: merged,
+  };
 }

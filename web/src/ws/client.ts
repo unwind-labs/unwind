@@ -42,6 +42,7 @@ export function useLiveEvents(slug: string | null | undefined) {
     let cancelled = false;
     let attempt = 0;
     let pendingReconnectId: number | null = null;
+    let everConnected = false;
 
     const scheduleReconnect = () => {
       if (cancelled) return;
@@ -66,6 +67,14 @@ export function useLiveEvents(slug: string | null | undefined) {
 
       ws.onopen = () => {
         attempt = 0;
+        // Reconnect after a drop: refetch open message queries so the
+        // delta path catches up on anything that landed while we were
+        // offline. Sessions and canvas queries are already invalidated
+        // by their own server events on the next push.
+        if (everConnected) {
+          qc.invalidateQueries({ queryKey: ["messages", slug], exact: false });
+        }
+        everConnected = true;
         pingRef.current = window.setInterval(() => {
           if (ws.readyState === WebSocket.OPEN) ws.send("ping");
         }, 25_000);

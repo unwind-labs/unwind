@@ -328,3 +328,78 @@ def test_active_main_session_with_completed_forks_is_live(
 
     assert rows[main_sid]["status"] == "live", rows[main_sid]
     assert rows[fork_sid]["status"] == "done", rows[fork_sid]
+
+
+def test_messages_since_uuid_returns_only_delta(app_client):
+    """``GET /messages?since_uuid=<u>`` returns messages that landed after
+    the record with that uuid. ``file_offset`` and ``last_uuid`` continue
+    to reflect the FULL file so the client can keep tailing."""
+    client, home, projects_mod, _ = app_client
+
+    real_cwd = home.parent / "work" / "delta-proj"
+    real_cwd.mkdir(parents=True)
+    slug = projects_mod.slug_for(real_cwd)
+
+    sid = "33333333-aaaa-bbbb-cccc-333333333333"
+    proj_dir = home / ".claude" / "projects" / slug
+    _write_session(
+        proj_dir,
+        sid,
+        [
+            {
+                "uuid": "u-1",
+                "type": "user",
+                "sessionId": sid,
+                "timestamp": "2026-04-24T09:00:00.000Z",
+                "message": {"role": "user", "content": "hello"},
+            },
+            {
+                "uuid": "u-2",
+                "type": "assistant",
+                "sessionId": sid,
+                "timestamp": "2026-04-24T09:00:01.000Z",
+                "message": {"role": "assistant", "content": "hi"},
+            },
+            {
+                "uuid": "u-3",
+                "type": "user",
+                "sessionId": sid,
+                "timestamp": "2026-04-24T09:00:02.000Z",
+                "message": {"role": "user", "content": "bye"},
+            },
+        ],
+    )
+
+    full = client.get(f"/api/projects/{slug}/sessions/{sid}/messages")
+    assert full.status_code == 200, full.text
+    full_body = full.json()
+    assert [m["uuid"] for m in full_body["messages"]] == ["u-1", "u-2", "u-3"]
+    assert full_body["last_uuid"] == "u-3"
+    full_offset = full_body["file_offset"]
+
+    delta = client.get(
+        f"/api/projects/{slug}/sessions/{sid}/messages?since_uuid=u-2"
+    )
+    assert delta.status_code == 200, delta.text
+    delta_body = delta.json()
+    # Only the third record's normalized messages — u-2 itself is dropped.
+    assert [m["uuid"] for m in delta_body["messages"]] == ["u-3"]
+    # Cursor fields still describe the full file so the client can keep
+    # tailing on the next refetch.
+    assert delta_body["last_uuid"] == "u-3"
+    assert delta_body["file_offset"] == full_offset
+
+    # Unknown since_uuid falls back to the full payload (client may have
+    # dropped its cache or the file was rotated).
+    miss = client.get(
+        f"/api/projects/{slug}/sessions/{sid}/messages?since_uuid=does-not-exist"
+    )
+    assert miss.status_code == 200
+    assert [m["uuid"] for m in miss.json()["messages"]] == ["u-1", "u-2", "u-3"]
+
+    # since_uuid pointing at the last record returns no messages.
+    tail = client.get(
+        f"/api/projects/{slug}/sessions/{sid}/messages?since_uuid=u-3"
+    )
+    assert tail.status_code == 200
+    assert tail.json()["messages"] == []
