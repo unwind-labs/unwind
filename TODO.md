@@ -6,7 +6,7 @@ Status: `[ ]` pending · `[~]` in progress · `[x]` done
 ## Phase 1 — Pure deletions (zero behavior risk)
 
 - [x] **T1** Delete `_is_at_user_yield` in `sessions_api.py`; route `_compute_session_status` through `canvas_tree_builder_for_slug(slug).get_scan(session_id).at_user_prompt`. (Review: C4)
-- [ ] **T2** Delete dead `read_messages_with_lineage`, `annotate_origins`, `Message.origin_session_id`, `Message.is_inherited`, `MessagePage.ancestors`, `AncestorRef`. Also `ancestors=[]` returns in `sessions_api.py`. (Review: C5)
+- [x] **T2** Delete dead `read_messages_with_lineage`, `annotate_origins`, `Message.origin_session_id`, `Message.is_inherited`, `MessagePage.ancestors`, `AncestorRef`. Also `ancestors=[]` returns in `sessions_api.py`. (Review: C5)
 - [ ] **T3** Delete unused `CallstackIndex` methods: `task_status_for_session`, `reports_with_session_node`, `children_in_report`, `children_for_invoke`, `report_for_invoke`. (Review: D-H1)
 
 ## Phase 2 — Internal refactors (DRY win, small surface)

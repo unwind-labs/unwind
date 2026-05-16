@@ -17,8 +17,6 @@ function baseMsg(over: Partial<Message>): Message {
     is_error: false,
     model: null,
     raw_type: null,
-    origin_session_id: null,
-    is_inherited: false,
     spawn_kind: null,
     spawn_session_ids: [],
     spawn_tasks: [],

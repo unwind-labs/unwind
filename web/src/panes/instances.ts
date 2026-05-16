@@ -36,8 +36,7 @@ export function filterExtrasByWindow(
 /** Filter a child session's messages to a window ``[start, end)``.
  *
  *  ``start === null`` means "from the beginning"; ``end === null`` means
- *  "to the end". Inherited messages (``is_inherited``) are kept since they
- *  predate any invocation and the activity-bucket logic handles them. */
+ *  "to the end". */
 export function filterMessagesByWindow(
   messages: Message[],
   start: string | null,

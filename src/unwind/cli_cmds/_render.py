@@ -154,8 +154,7 @@ def _role_header(m: Message, *, plain: bool = False) -> str:
     role = m.role
     ts = _fmt_ts(m.timestamp)
     tool = f" {m.tool_name}" if m.tool_name else ""
-    inherited = " (inherited)" if m.is_inherited else ""
-    base = f"{role}{tool} · {ts}{inherited}"
+    base = f"{role}{tool} · {ts}"
     if plain:
         return base
     color = {

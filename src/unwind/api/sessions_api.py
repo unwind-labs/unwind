@@ -244,11 +244,6 @@ def _compute_session_status(
     return "live"
 
 
-class AncestorRef(BaseModel):
-    session_id: str
-    title: Optional[str] = None
-
-
 class SpawnCard(BaseModel):
     """A callstack spawn that's not anchored to any tool_use in this JSONL.
 
@@ -271,7 +266,6 @@ class MessagesResponse(BaseModel):
     messages: list[dict]
     last_uuid: Optional[str]
     file_offset: int
-    ancestors: list[AncestorRef] = []
     extra_spawns: list[SpawnCard] = []
 
 
@@ -305,7 +299,6 @@ def get_messages(
             messages=[m.to_dict() for m in page.messages],
             last_uuid=page.last_uuid,
             file_offset=page.file_offset,
-            ancestors=[],
         )
 
     index = index_for_slug(slug)
@@ -368,7 +361,6 @@ def get_messages(
         messages=[m.to_dict() for m in page.messages],
         last_uuid=page.last_uuid,
         file_offset=page.file_offset,
-        ancestors=[],
         extra_spawns=extra,
     )
 

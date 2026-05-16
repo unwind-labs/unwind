@@ -66,8 +66,6 @@ export type Message = {
   is_error: boolean;
   model: string | null;
   raw_type: string | null;
-  origin_session_id: string | null;
-  is_inherited: boolean;
   spawn_kind: "call" | "subagent" | null;
   spawn_session_ids: string[];
   spawn_tasks: string[];
@@ -80,11 +78,6 @@ export type Message = {
   // Unwind renders per spawn row. Older messages without this field fall
   // back to "fork" so the UI still renders.
   spawn_call_types?: CallType[];
-};
-
-export type AncestorRef = {
-  session_id: string;
-  title: string | null;
 };
 
 export type SpawnCardData = {
@@ -101,7 +94,6 @@ export type MessagesResponse = {
   messages: Message[];
   last_uuid: string | null;
   file_offset: number;
-  ancestors: AncestorRef[];
   extra_spawns: SpawnCardData[];
 };
 

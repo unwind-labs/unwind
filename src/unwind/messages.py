@@ -13,7 +13,7 @@ it as a collapsible card with its eventual ``tool_result`` paired in.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable, Literal, Optional
 
@@ -47,13 +47,6 @@ class Message:
 
     model: Optional[str] = None
     raw_type: Optional[str] = None
-
-    # Fork-aware fields. ``origin_session_id`` is the session that *first*
-    # produced this message (i.e. the deepest ancestor that contains its uuid).
-    # ``is_inherited`` is True iff origin != self, meaning the message was
-    # copied in by ``--fork-session`` and is part of the inherited prefix.
-    origin_session_id: Optional[str] = None
-    is_inherited: bool = False
 
     # When this is a tool_use for a callstack invoke* / Agent call, contains
     # the session_ids the call produced. Used by the inline-trace UI to
@@ -91,8 +84,6 @@ class Message:
             "is_error": self.is_error,
             "model": self.model,
             "raw_type": self.raw_type,
-            "origin_session_id": self.origin_session_id,
-            "is_inherited": self.is_inherited,
             "spawn_kind": self.spawn_kind,
             "spawn_session_ids": list(self.spawn_session_ids),
             "spawn_tasks": list(self.spawn_tasks),
@@ -106,7 +97,6 @@ class MessagePage:
     messages: list[Message] = field(default_factory=list)
     last_uuid: Optional[str] = None
     file_offset: int = 0
-    ancestors: list[str] = field(default_factory=list)
 
 
 def base_uuid(message_uuid: str) -> str:
@@ -284,91 +274,6 @@ def normalize_records(
     for rec in records:
         out.extend(_normalize_record(rec, include_meta=include_meta))
     return out
-
-
-def annotate_origins(
-    page: MessagePage,
-    self_session_id: str,
-    ancestor_uuid_sets: list[tuple[str, set[str]]],
-) -> None:
-    """Tag each message with which ancestor first produced it.
-
-    ``ancestor_uuid_sets`` is ordered immediate-parent-first up to root —
-    matching ``CallstackIndex.parent_chain``. A message uuid present in the
-    deepest (root-most) ancestor that contains it wins, since that's where
-    the message *originated* before being copy-inherited downstream.
-    """
-    for m in page.messages:
-        bid = base_uuid(m.uuid)
-        origin = self_session_id
-        # Walk ancestors from immediate parent to root. The last (deepest)
-        # ancestor that contains this uuid is the origin.
-        for ancestor_id, uuids in ancestor_uuid_sets:
-            if bid in uuids:
-                origin = ancestor_id
-        m.origin_session_id = origin
-        m.is_inherited = origin != self_session_id
-
-
-def read_messages_with_lineage(
-    self_path: Path,
-    self_session_id: str,
-    ancestor_paths: list[tuple[str, Optional[Path]]],
-    *,
-    include_meta: bool = False,
-) -> MessagePage:
-    """Load this session's messages plus every ancestor's, with origin tags.
-
-    For callstack-style fork chains, intermediate ancestors typically don't
-    contribute new conversation context BEFORE forking. So an inherited band
-    that only shows messages-attributable-by-uuid sees ~all root content.
-    This function instead reads every ancestor's full thread and merges them
-    by timestamp, deduping by uuid (deepest ancestor wins, so a message that
-    originated in root and was copied down to F is attributed to root, not F).
-
-    ``ancestor_paths`` is ordered immediate-parent-first up to root, matching
-    ``CallstackIndex.parent_chain``. Pass ``None`` for any ancestor whose
-    JSONL is missing — it's silently skipped.
-    """
-    out: list[Message] = []
-    seen: set[str] = set()
-    epoch_zero = datetime.fromtimestamp(0, tz=timezone.utc)
-
-    # Walk ancestors from root downward so root claims uuids first; an
-    # intermediate ancestor only "owns" a uuid the root doesn't have.
-    for ancestor_id, path in reversed(ancestor_paths):
-        if path is None:
-            continue
-        try:
-            page = read_messages(path, include_meta=include_meta)
-        except FileNotFoundError:
-            continue
-        for m in page.messages:
-            bid = base_uuid(m.uuid)
-            if bid in seen:
-                continue
-            m.origin_session_id = ancestor_id
-            m.is_inherited = True
-            out.append(m)
-            seen.add(bid)
-
-    # Self last — anything not already claimed by an ancestor is own work.
-    self_page = read_messages(self_path, include_meta=include_meta)
-    last_uuid = self_page.last_uuid
-    file_offset = self_page.file_offset
-    for m in self_page.messages:
-        bid = base_uuid(m.uuid)
-        if bid in seen:
-            # Inherited via ancestor — skip the self-side copy; already
-            # represented with the proper ancestor attribution.
-            continue
-        m.origin_session_id = self_session_id
-        m.is_inherited = False
-        out.append(m)
-        seen.add(bid)
-
-    out.sort(key=lambda m: m.timestamp or epoch_zero)
-    return MessagePage(messages=out, last_uuid=last_uuid, file_offset=file_offset)
 
 
 # --- internals -----------------------------------------------------------
