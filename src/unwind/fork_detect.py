@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from ._cache import PathCache
 from .jsonl import _text_blocks, iter_lines
 
 
@@ -56,12 +57,21 @@ class _Probe:
         return self.first_uuids[0] if self.first_uuids else None
 
 
+def _build_probe_from_path(path: Path) -> Optional[_Probe]:
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return _build_probe(path, stat.st_mtime, stat.st_size)
+
+
 class ForkDetector:
     """Per-project heuristic fork classifier."""
 
     def __init__(self, project_dir: Path) -> None:
         self._project_dir = project_dir
         self._lock = threading.Lock()
+        self._probe_cache = PathCache(_build_probe_from_path)
         self._probes: dict[str, _Probe] = {}
         # divergence_text is computed once per fork session and never changes
         # (it's the assigned task name from the queue-operation record). Keep
@@ -223,26 +233,11 @@ class ForkDetector:
     def _refresh(self) -> None:
         if not self._project_dir.is_dir():
             return
-        with self._lock:
-            existing = dict(self._probes)
         new_probes: dict[str, _Probe] = {}
         for jsonl in self._project_dir.glob("*.jsonl"):
-            try:
-                stat = jsonl.stat()
-            except OSError:
-                continue
-            sid = jsonl.stem
-            cached = existing.get(sid)
-            if (
-                cached is not None
-                and cached.mtime == stat.st_mtime
-                and cached.size == stat.st_size
-            ):
-                new_probes[sid] = cached
-                continue
-            probe = _build_probe(jsonl, stat.st_mtime, stat.st_size)
-            new_probes[sid] = probe
-
+            probe = self._probe_cache.get(jsonl)
+            if probe is not None:
+                new_probes[jsonl.stem] = probe
         with self._lock:
             self._probes = new_probes
 

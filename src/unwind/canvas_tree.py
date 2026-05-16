@@ -22,12 +22,12 @@ Producing a single immutable tree the frontend renders directly.
 from __future__ import annotations
 
 import re
-import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from ._cache import PathCache
 from .jsonl import (
     extract_assistant_text as _extract_assistant_text,
     iter_lines,
@@ -573,8 +573,7 @@ class CanvasTreeBuilder:
 
     def __init__(self, project_dir: Path) -> None:
         self._project_dir = project_dir
-        self._scans: dict[str, SessionScan] = {}
-        self._lock = threading.Lock()
+        self._cache = PathCache(scan_session)
 
     @property
     def project_dir(self) -> Path:
@@ -582,20 +581,4 @@ class CanvasTreeBuilder:
 
     def get_scan(self, session_id: str) -> SessionScan:
         path = self._project_dir / f"{session_id}.jsonl"
-        try:
-            st = path.stat()
-        except OSError:
-            # No JSONL on disk — placeholder scan.
-            return SessionScan(session_id=session_id, path=path)
-        with self._lock:
-            cached = self._scans.get(session_id)
-        if (
-            cached is not None
-            and cached.mtime == st.st_mtime
-            and cached.size == st.st_size
-        ):
-            return cached
-        scan = scan_session(path)
-        with self._lock:
-            self._scans[session_id] = scan
-        return scan
+        return self._cache.get(path)

@@ -13,7 +13,7 @@ Status: `[ ]` pending · `[~]` in progress · `[x]` done
 
 - [x] **T4** Add `_text_blocks(msg, sep)` in `jsonl.py`; collapse `extract_assistant_text`, `_extract_user_text`, and the two inline copies in `sessions_api.py` / `fork_detect.py`. (Review: D-H5)
 - [x] **T5** Consolidate registry per-slug lock-dance into one `_per_slug(cache, slug, factory)` helper; drive `forget_slug` / `_upgrade_to_real_path` from one cache list. (Review: D-H2)
-- [ ] **T6** Replace bespoke mtime caches in `CallstackIndex._cache`, `ForkDetector._probes`, `CanvasTreeBuilder._scans` with `_PathCache`. (Review: D-H3)
+- [x] **T6** Replace bespoke mtime caches in `CallstackIndex._cache`, `ForkDetector._probes`, `CanvasTreeBuilder._scans` with `_PathCache`. (Review: D-H3)
 - [ ] **T7** Bound `PathCache` (LRU `maxsize≈512`) so long-running process doesn't retain every JSONL ever parsed. Add registry-level LRU caps. (Review: C3)
 - [ ] **T8** Single `EPOCH` constant in `jsonl.py`; remove 5 inline copies. Unify `_file_birth_dt` / `_file_birth_ts`. Move `_YIELD_RE`/`_RETURN_RE` into one module. (Review: M2, M3, L1)
 

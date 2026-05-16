@@ -18,12 +18,12 @@ their last-known status; the UI displays them as in-progress.
 """
 from __future__ import annotations
 
-import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone  # noqa: F401
 from pathlib import Path
 from typing import Any, Optional
 
+from ._cache import PathCache
 from .jsonl import parse_ts as _parse_ts
 
 import yaml
@@ -88,8 +88,7 @@ class CallstackIndex:
 
     def __init__(self, log_dir: Path) -> None:
         self._log_dir = log_dir
-        self._lock = threading.Lock()
-        self._cache: dict[str, tuple[float, InvokeReport]] = {}
+        self._cache = PathCache(self._load_report)
 
     @property
     def log_dir(self) -> Path:
@@ -109,7 +108,7 @@ class CallstackIndex:
             report_path = invoke_dir / "report.yaml"
             if not report_path.is_file():
                 continue
-            rep = self._load(report_path)
+            rep = self._cache.get(report_path)
             if rep is not None:
                 out.append(rep)
         return out
@@ -417,15 +416,7 @@ class CallstackIndex:
 
     # --- parsing ----------------------------------------------------------
 
-    def _load(self, path: Path) -> Optional[InvokeReport]:
-        try:
-            stat = path.stat()
-        except OSError:
-            return None
-        with self._lock:
-            cached = self._cache.get(str(path))
-            if cached is not None and cached[0] == stat.st_mtime:
-                return cached[1]
+    def _load_report(self, path: Path) -> Optional[InvokeReport]:
         try:
             with path.open("r", encoding="utf-8") as fh:
                 raw = yaml.safe_load(fh)
@@ -445,7 +436,7 @@ class CallstackIndex:
             for t in (raw.get("tasks") or [])
             if isinstance(t, dict)
         ]
-        rep = InvokeReport(
+        return InvokeReport(
             invoke_id=invoke_id,
             parent_session=parent,
             started_at=started,
@@ -454,9 +445,6 @@ class CallstackIndex:
             tasks=tasks,
             path=path,
         )
-        with self._lock:
-            self._cache[str(path)] = (stat.st_mtime, rep)
-        return rep
 
 
 def _task_node(
