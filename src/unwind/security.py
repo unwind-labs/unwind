@@ -7,15 +7,13 @@ so policy lives in one place.
 from __future__ import annotations
 
 import hmac
-import logging
-import os
 import re
 from typing import Annotated
 from urllib.parse import urlsplit
 
 from fastapi import HTTPException, Path, Request
 
-logger = logging.getLogger(__name__)
+from .settings import get_settings
 
 
 # Claude Code's slug rule: any char outside [A-Za-z0-9-] is replaced with '-'.
@@ -42,49 +40,9 @@ def is_valid_session_id(s: str) -> bool:
     return bool(_SESSION_ID_RE.match(s))
 
 
-DEFAULT_DEV_ORIGINS: tuple[str, ...] = (
-    "http://localhost:5173",
-    "http://127.0.0.1:5173",
-)
-
-
-def _is_valid_origin_entry(entry: str) -> bool:
-    """Strict allow-list validator: must be ``scheme://host[:port]``.
-
-    Rejects ``null`` (sandboxed iframe / file:// pages), the wildcard ``*``
-    (would otherwise become a literal origin that never matches but signals
-    misconfiguration), and any value missing a scheme or hostname.
-    """
-    lowered = entry.lower()
-    if lowered in {"null", "*"}:
-        return False
-    parts = urlsplit(entry)
-    if parts.scheme not in {"http", "https"}:
-        return False
-    if not parts.hostname:
-        return False
-    return True
-
-
 def allowed_origins() -> list[str]:
     """Explicit cross-origin allow-list. Same-origin is always permitted."""
-    extra = os.environ.get("UNWIND_ALLOWED_ORIGINS", "").strip()
-    if not extra:
-        return list(DEFAULT_DEV_ORIGINS)
-    out: list[str] = []
-    for raw in extra.split(","):
-        entry = raw.strip()
-        if not entry:
-            continue
-        if not _is_valid_origin_entry(entry):
-            logger.warning(
-                "UNWIND_ALLOWED_ORIGINS: rejecting invalid entry %r "
-                "(must be http(s)://host[:port], not 'null' or '*')",
-                entry,
-            )
-            continue
-        out.append(entry)
-    return out
+    return list(get_settings().allowed_origins)
 
 
 def _normalise(origin: str) -> tuple[str, str, int] | None:
@@ -153,8 +111,7 @@ def require_trusted_origin(request: Request) -> None:
 
 def auth_token() -> str | None:
     """Configured bearer token, or None when auth is disabled (loopback default)."""
-    tok = os.environ.get("UNWIND_AUTH_TOKEN", "").strip()
-    return tok or None
+    return get_settings().auth_token
 
 
 def is_token_valid(presented: str | None) -> bool:

@@ -26,6 +26,7 @@ from .cli_cmds import project as project_cmd
 from .cli_cmds import session as session_cmd
 from .cli_cmds import task as task_cmd
 from .projects import ProjectPaths, claude_projects_root
+from .settings import get_settings
 
 console = Console()
 
@@ -80,7 +81,7 @@ def _enforce_bind_policy(host: str) -> None:
     """
     if host.lower() in _LOOPBACK_HOSTS:
         return
-    if os.environ.get("UNWIND_AUTH_TOKEN", "").strip():
+    if get_settings().auth_token:
         return
     console.print(
         f"[red]Refusing to bind {host} without UNWIND_AUTH_TOKEN.[/]\n"

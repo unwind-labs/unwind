@@ -7,7 +7,6 @@ runs separately on :5173 and proxies ``/api`` (including WebSocket) here.
 from __future__ import annotations
 
 import asyncio
-import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -20,25 +19,18 @@ from . import __version__
 from .api import routers
 from .events import get_bus
 from .security import allowed_origins, auth_token, extract_bearer, is_token_valid
+from .settings import get_settings
 from .watcher import ensure_watcher, stop_all_watchers
 
 
 STATIC_DIR = Path(__file__).parent / "static"
 
 
-def _default_slug() -> str | None:
-    return os.environ.get("UNWIND_DEFAULT_SLUG") or None
-
-
-def _default_path() -> str | None:
-    return os.environ.get("UNWIND_DEFAULT_PATH") or None
-
-
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
     bus = get_bus()
     bus.bind_loop(asyncio.get_running_loop())
-    slug = _default_slug()
+    slug = get_settings().default_slug
     if slug:
         ensure_watcher(slug, bus)
     try:
@@ -47,18 +39,9 @@ async def _lifespan(app: FastAPI):
         stop_all_watchers()
 
 
-def _docs_enabled() -> bool:
-    """OpenAPI docs are off unless UNWIND_DOCS=1.
-
-    The default deployment binds to 127.0.0.1, so anyone with local access
-    could browse the full API schema. We keep /api/docs available for
-    development but require an explicit opt-in.
-    """
-    return os.environ.get("UNWIND_DOCS", "").strip() in {"1", "true", "yes"}
-
-
 def create_app() -> FastAPI:
-    docs_on = _docs_enabled()
+    settings = get_settings()
+    docs_on = settings.docs_enabled
     app = FastAPI(
         title="unwind",
         version=__version__,
@@ -94,11 +77,12 @@ def create_app() -> FastAPI:
 
     @app.get("/api/health")
     def health() -> dict:
+        s = get_settings()
         return {
             "ok": True,
             "version": __version__,
-            "default_slug": _default_slug(),
-            "default_path": _default_path(),
+            "default_slug": s.default_slug,
+            "default_path": s.default_path,
         }
 
     for router in routers():
