@@ -12,7 +12,12 @@ from typing import Optional
 from .callstack import CallstackIndex
 from .canvas_tree import CanvasTreeBuilder
 from .fork_detect import ForkDetector
-from .projects import ProjectPaths, claude_projects_root, slug_for
+from .projects import (
+    ProjectPaths,
+    claude_projects_root,
+    project_jsonl_listing,
+    slug_for,
+)
 from .server_state import default_source_path
 from .sessions import SessionIndex
 from .spawns import SpawnResolver
@@ -172,17 +177,14 @@ def _project_jsonl_signature(project_dir: Path) -> tuple:
     Cheap to compute (one stat per file) but invalidates the moment any
     JSONL is created, deleted, grown, or modified.
     """
-    if not project_dir.is_dir():
-        return ()
-    out: list[tuple[str, float, int]] = []
-    for jsonl in project_dir.glob("*.jsonl"):
-        try:
-            st = jsonl.stat()
-        except OSError:
-            continue
-        out.append((jsonl.name, st.st_mtime, st.st_size))
-    out.sort()
-    return tuple(out)
+    # Bypass the listing cache: in-place writes to a child JSONL don't bump
+    # the directory mtime, so the cached listing's stats could be stale.
+    # Callers use this fingerprint as an HTTP ETag and cache key — staleness
+    # masks real changes.
+    return tuple(
+        (e.path.name, e.mtime, e.size)
+        for e in project_jsonl_listing(project_dir, fresh=True)
+    )
 
 
 def _callstack_log_signature(callstack_log_dir: Path) -> tuple:
@@ -286,8 +288,5 @@ def list_known_projects() -> list[tuple[str, Path]]:
 def last_activity_for(slug: str) -> Optional[float]:
     """Max mtime across JSONLs in a project, for project-picker sorting."""
     index = index_for_slug(slug)
-    project_dir = index.paths.project_dir
-    if not project_dir.is_dir():
-        return None
-    mtimes = [p.stat().st_mtime for p in project_dir.glob("*.jsonl") if p.is_file()]
-    return max(mtimes) if mtimes else None
+    entries = project_jsonl_listing(index.paths.project_dir)
+    return max((e.mtime for e in entries), default=None)

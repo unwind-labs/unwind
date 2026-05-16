@@ -27,6 +27,7 @@ from typing import Optional
 
 from ._cache import PathCache
 from .jsonl import _text_blocks, file_birth_ts, iter_lines
+from .projects import project_jsonl_listing
 
 
 # How many leading uuids to sample from each JSONL.
@@ -256,26 +257,19 @@ class ForkDetector:
                 and dir_mtime == self._last_dir_mtime
             ):
                 return
-        # One stat-pass to compute the signature; skip probe rebuild if unchanged.
-        sig_entries: list[tuple[str, float, int, Path]] = []
-        for jsonl in self._project_dir.glob("*.jsonl"):
-            try:
-                st = jsonl.stat()
-            except OSError:
-                continue
-            sig_entries.append((jsonl.name, st.st_mtime, st.st_size, jsonl))
-        sig_entries.sort()
-        signature = tuple((n, m, s) for n, m, s, _ in sig_entries)
+        # Shared listing: one os.scandir pass per request, cached by dir mtime.
+        listing = project_jsonl_listing(self._project_dir)
+        signature = tuple((e.path.name, e.mtime, e.size) for e in listing)
         with self._lock:
             if signature == self._last_signature:
                 self._last_refresh_ts = now
                 self._last_dir_mtime = dir_mtime
                 return
         new_probes: dict[str, _Probe] = {}
-        for _, _, _, jsonl in sig_entries:
-            probe = self._probe_cache.get(jsonl)
+        for entry in listing:
+            probe = self._probe_cache.get(entry.path)
             if probe is not None:
-                new_probes[jsonl.stem] = probe
+                new_probes[entry.sid] = probe
         with self._lock:
             self._probes = new_probes
             self._last_signature = signature

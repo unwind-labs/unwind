@@ -12,7 +12,7 @@ from .jsonl import (
     extract_session_summary,
     parse_ts,
 )
-from .projects import ProjectPaths
+from .projects import ProjectPaths, project_jsonl_listing
 
 
 @dataclass
@@ -46,8 +46,8 @@ class SessionIndex:
         if not self._paths.project_dir.is_dir():
             return []
         results: list[SessionSummary] = []
-        for jsonl in self._paths.project_dir.glob("*.jsonl"):
-            summary = self._get_summary(jsonl)
+        for entry in project_jsonl_listing(self._paths.project_dir):
+            summary = self._get_summary(entry.path)
             if summary is not None:
                 results.append(summary)
         results.sort(

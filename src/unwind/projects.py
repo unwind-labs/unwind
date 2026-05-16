@@ -10,9 +10,14 @@ callstack plugin additionally writes invocation logs under
 """
 from __future__ import annotations
 
+import os
 import re
+import stat
+import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import NamedTuple
 
 
 # Match Claude Code's slugging: anything that isn't [A-Za-z0-9-] becomes "-".
@@ -77,3 +82,90 @@ class ProjectPaths:
     @property
     def has_project_dir(self) -> bool:
         return self.project_dir.is_dir()
+
+
+class ProjectJsonl(NamedTuple):
+    """One entry in a project's JSONL listing."""
+    sid: str
+    path: Path
+    mtime: float
+    size: int
+
+
+_LISTING_TTL_SECONDS = 1.0
+# Keyed by project_dir Path. Value: (last_scan_monotonic, dir_mtime, entries).
+_listing_lock = threading.Lock()
+_listings: dict[Path, tuple[float, float, tuple[ProjectJsonl, ...]]] = {}
+
+
+def project_jsonl_listing(
+    project_dir: Path, *, fresh: bool = False
+) -> tuple[ProjectJsonl, ...]:
+    """Cached ``(sid, path, mtime, size)`` listing of a project's JSONL files.
+
+    Centralizes the ``*.jsonl`` directory walk that previously happened
+    independently in ``SessionIndex.list_sessions``, ``_project_jsonl_signature``,
+    ``last_activity_for``, ``compute_invoke_index_for_project``,
+    ``ForkDetector._refresh``, and the watcher startup. Multiple consumers in
+    one request now share a single ``os.scandir`` pass.
+
+    Cache key is ``(project_dir, dir_mtime)`` with a 1 s TTL. Note that
+    in-place writes to a child JSONL do NOT bump the directory mtime, so
+    callers that need accurate fingerprints across in-place growth (e.g. an
+    HTTP ETag) should pass ``fresh=True`` to bypass the cache.
+    """
+    if not project_dir.is_dir():
+        return ()
+    try:
+        dir_mtime = project_dir.stat().st_mtime
+    except OSError:
+        return ()
+    now = time.monotonic()
+    if not fresh:
+        with _listing_lock:
+            cached = _listings.get(project_dir)
+            if cached is not None:
+                ts, cached_dir_mtime, entries = cached
+                if now - ts < _LISTING_TTL_SECONDS and cached_dir_mtime == dir_mtime:
+                    return entries
+
+    new_entries: list[ProjectJsonl] = []
+    try:
+        with os.scandir(project_dir) as it:
+            for de in it:
+                if not de.name.endswith(".jsonl"):
+                    continue
+                try:
+                    st = de.stat()
+                except OSError:
+                    continue
+                if not stat.S_ISREG(st.st_mode):
+                    continue
+                new_entries.append(
+                    ProjectJsonl(
+                        sid=de.name[: -len(".jsonl")],
+                        path=Path(de.path),
+                        mtime=st.st_mtime,
+                        size=st.st_size,
+                    )
+                )
+    except OSError:
+        return ()
+    new_entries.sort(key=lambda e: e.sid)
+    result = tuple(new_entries)
+    with _listing_lock:
+        _listings[project_dir] = (now, dir_mtime, result)
+    return result
+
+
+def invalidate_jsonl_listing(project_dir: Path | None = None) -> None:
+    """Drop the cached listing.
+
+    With ``project_dir`` set, drops only that entry. With ``None``, drops the
+    whole cache (used by test fixtures that reload modules).
+    """
+    with _listing_lock:
+        if project_dir is None:
+            _listings.clear()
+        else:
+            _listings.pop(project_dir, None)

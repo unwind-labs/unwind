@@ -32,6 +32,7 @@ from typing import Any, Optional
 
 from .callstack import CallstackIndex, TaskNode
 from .fork_detect import ForkDetector
+from .projects import project_jsonl_listing
 from .jsonl import (
     RETURN_RE as _RETURN_RE,
     YIELD_RE as _YIELD_RE,
@@ -74,10 +75,10 @@ def compute_invoke_index_for_project(project_dir: Path) -> dict[str, str]:
     out: dict[str, str] = {}
     if not project_dir.is_dir():
         return out
-    for jsonl in project_dir.glob("*.jsonl"):
-        parent_sid = jsonl.stem
+    for entry in project_jsonl_listing(project_dir):
+        parent_sid = entry.sid
         tool_use_names: dict[str, str] = {}
-        for rec in read_records(jsonl):
+        for rec in read_records(entry.path):
             rtype = rec.get("type")
             msg = rec.get("message")
             if not isinstance(msg, dict):

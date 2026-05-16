@@ -169,24 +169,27 @@ def test_refresh_skipped_within_ttl_and_when_signature_unchanged(
     fd = ForkDetector(tmp_path)
     fd.fork_session_ids()  # warm
 
-    glob_calls = {"n": 0}
-    original_glob = Path.glob
+    import os
+    scan_calls = {"n": 0}
+    original_scandir = os.scandir
 
-    def counting_glob(self, pattern):  # noqa: ANN001
-        if self == tmp_path and pattern == "*.jsonl":
-            glob_calls["n"] += 1
-        return original_glob(self, pattern)
+    def counting_scandir(path):  # noqa: ANN001
+        if Path(path) == tmp_path:
+            scan_calls["n"] += 1
+        return original_scandir(path)
 
-    monkeypatch.setattr(Path, "glob", counting_glob)
+    monkeypatch.setattr(os, "scandir", counting_scandir)
 
-    # TTL fast-path: three back-to-back calls must do zero globs.
+    # TTL fast-path: three back-to-back calls must do zero filesystem scans.
     fd.fork_session_ids()
     fd.is_fork("s")
     fd.children_of("s")
-    assert glob_calls["n"] == 0, "TTL fast-path should suppress all globs"
+    assert scan_calls["n"] == 0, "TTL fast-path should suppress all scans"
 
-    # Force past the TTL but with no filesystem change: signature-skip path
-    # still does one glob (to compute the signature), but no probe rebuild.
+    # Force past the detector's TTL AND drop the shared listing cache: the
+    # signature-skip path still does exactly one scandir, but no probe rebuild.
     fd._last_refresh_ts = 0.0
+    from unwind.projects import invalidate_jsonl_listing
+    invalidate_jsonl_listing(tmp_path)
     fd.fork_session_ids()
-    assert glob_calls["n"] == 1
+    assert scan_calls["n"] == 1

@@ -25,6 +25,7 @@ _Observer: Any = Observer  # factory; concrete type varies by platform
 from .events import Event, EventBus
 from .jsonl import iter_lines_from
 from .messages import normalize_records
+from .projects import invalidate_jsonl_listing, project_jsonl_listing
 from .registry import callstack_for_slug, index_for_slug
 
 
@@ -121,13 +122,10 @@ class ProjectWatcher:
 
         # Seed known state so we don't re-emit historical messages as new.
         if project_dir.is_dir():
-            for jsonl in project_dir.glob("*.jsonl"):
-                self._known_sessions.add(jsonl.stem)
-                try:
-                    self._offsets[jsonl.stem] = jsonl.stat().st_size
-                    self._last_size[jsonl.stem] = jsonl.stat().st_size
-                except OSError:
-                    self._offsets[jsonl.stem] = 0
+            for entry in project_jsonl_listing(project_dir):
+                self._known_sessions.add(entry.sid)
+                self._offsets[entry.sid] = entry.size
+                self._last_size[entry.sid] = entry.size
 
         self._observer = _Observer()
         handler = _DebouncedHandler(self._handle_paths)
@@ -171,6 +169,12 @@ class ProjectWatcher:
                 touched_jsonls.append(p)
             elif callstack_dir.is_dir() and callstack_dir in p.parents:
                 callstack_dirty = True
+
+        if touched_jsonls:
+            # The shared listing cache stat-snapshots mtime/size at scan time;
+            # bust it so downstream consumers (status checks, ETag, fork
+            # detector) see fresh stats after this write.
+            invalidate_jsonl_listing(project_dir)
 
         for jsonl in touched_jsonls:
             self._handle_jsonl(jsonl)

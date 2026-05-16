@@ -25,7 +25,7 @@ Status: `[ ]` pending · `[~]` in progress · `[x]` done
 - [x] **T12** `list_projects` should use lightweight `os.scandir` for `last_activity` / `session_count`; defer full indexing to project-open. (Review: P-H2)
 - [x] **T13** Watcher: incremental session-summary update from new records only; full re-parse only on cold start or file shrink. (Review: P-H3)
 - [x] **T14** `compute_invoke_index_for_project` → cached `read_records` instead of uncached `iter_lines`. (Review: P-H4)
-- [ ] **T15** Centralize project `*.jsonl` listing on the registry (cached by dir mtime); registry/canvas_tree/spawns/fork_detect/watcher all read from it. (Review: M4)
+- [x] **T15** Centralize project `*.jsonl` listing on the registry (cached by dir mtime); registry/canvas_tree/spawns/fork_detect/watcher all read from it. (Review: M4)
 
 ## Phase 4 — API contract (additive)
 
