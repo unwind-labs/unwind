@@ -24,13 +24,17 @@ except Exception as exc:  # pragma: no cover - depends on host Python build
     sys.stderr.write(f"tkinter unavailable: {exc}\\n")
     sys.exit(2)
 
+initial = sys.argv[1] if len(sys.argv) > 1 else ""
 root = tk.Tk()
 root.withdraw()
 try:
     root.attributes("-topmost", True)
 except tk.TclError:
     pass
-path = filedialog.askdirectory(title="Pick a project folder", mustexist=True)
+kwargs = {"title": "Pick a project folder", "mustexist": True}
+if initial:
+    kwargs["initialdir"] = initial
+path = filedialog.askdirectory(**kwargs)
 sys.stdout.write(path or "")
 """
 
@@ -72,16 +76,8 @@ def _pick_with_osascript(initial: Optional[str]) -> Optional[str]:
 
 
 def _pick_with_tk(initial: Optional[str]) -> Optional[str]:
-    script = _TK_SCRIPT
-    if initial:
-        script = (
-            script.replace(
-                'filedialog.askdirectory(title="Pick a project folder", mustexist=True)',
-                f'filedialog.askdirectory(title="Pick a project folder", mustexist=True, initialdir={initial!r})',
-            )
-        )
     proc = subprocess.run(
-        [sys.executable, "-c", script],
+        [sys.executable, "-c", _TK_SCRIPT, initial or ""],
         capture_output=True,
         text=True,
         timeout=120,

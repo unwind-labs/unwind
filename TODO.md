@@ -35,7 +35,7 @@ Status: `[ ]` pending · `[~]` in progress · `[x]` done
 
 - [x] **T17** Refuse non-loopback `--host` unless `UNWIND_AUTH_TOKEN` set; Bearer-token middleware when set. Treat missing `Origin` as untrusted for state-changing endpoints. (Review: S-H1+S-H2)
 - [x] **T18** `pick_folder_endpoint`: single in-flight lock (409 if busy), drop timeout to 120 s, per-process nonce from prior GET. (Review: S-H3)
-- [ ] **T19** `_pick_with_tk`: pass `initial` via argv/env, not f-string `{initial!r}`. (Review: S-H4)
+- [x] **T19** `_pick_with_tk`: pass `initial` via argv/env, not f-string `{initial!r}`. (Review: S-H4)
 - [ ] **T20** Harden `UNWIND_ALLOWED_ORIGINS` parsing: reject `null`, `*`, scheme-less entries; warn. (Review: M)
 - [ ] **T21** Cap `iter_lines_from` per-tick read to ~16 MiB. (Review: M)
 - [ ] **T22** SPA static fallback: assert `is_relative_to(static_root)` and reject symlinks pre-resolve. (Review: M)
