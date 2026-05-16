@@ -31,6 +31,16 @@ _slug_to_source: dict[str, Path] = {}
 # anything moves.
 _invoke_indexes: dict[str, tuple[tuple, dict[str, str]]] = {}
 
+# All per-slug auxiliary caches (everything except _indices, which has its own
+# synthetic-slug upgrade logic). Listed once so forget/upgrade stay in sync
+# with the per-slug accessors.
+_PER_SLUG_CACHES: tuple[dict, ...] = (
+    _callstack,
+    _fork_detectors,
+    _subagents,
+    _canvas_builders,
+)
+
 
 def _auto_register_default() -> None:
     """Pick up the env-provided default path if nothing's been registered yet."""
@@ -61,10 +71,8 @@ def forget_slug(slug: str) -> None:
     """
     with _lock:
         _indices.pop(slug, None)
-        _callstack.pop(slug, None)
-        _fork_detectors.pop(slug, None)
-        _subagents.pop(slug, None)
-        _canvas_builders.pop(slug, None)
+        for cache in _PER_SLUG_CACHES:
+            cache.pop(slug, None)
         _slug_to_source.pop(slug, None)
         _invoke_indexes.pop(slug, None)
 
@@ -114,66 +122,48 @@ def _upgrade_to_real_path(slug: str, real_path: Path) -> None:
     """
     with _lock:
         _indices.pop(slug, None)
-        _callstack.pop(slug, None)
-        _fork_detectors.pop(slug, None)
-        _subagents.pop(slug, None)
+        for cache in _PER_SLUG_CACHES:
+            cache.pop(slug, None)
         _slug_to_source[slug] = real_path
         paths = ProjectPaths.for_path(real_path)
         _indices[slug] = SessionIndex(paths)
 
 
-def callstack_for_slug(slug: str) -> CallstackIndex:
+def _per_slug(cache: dict, slug: str, factory):
+    """Lazy double-checked-locked get-or-create for a per-slug cache.
+
+    Holds ``_lock`` only across map access; ``factory(SessionIndex)`` runs
+    unlocked so it can call back into the registry (notably ``index_for_slug``
+    which may upgrade synthetic slugs). Concurrent callers race-build and
+    ``setdefault`` picks one winner.
+    """
     _auto_register_default()
     with _lock:
-        existing = _callstack.get(slug)
+        existing = cache.get(slug)
         if existing is not None:
             return existing
     index = index_for_slug(slug)
-    ci = CallstackIndex(index.paths.callstack_log_dir)
+    obj = factory(index)
     with _lock:
-        _callstack[slug] = ci
-    return ci
+        return cache.setdefault(slug, obj)
+
+
+def callstack_for_slug(slug: str) -> CallstackIndex:
+    return _per_slug(_callstack, slug, lambda idx: CallstackIndex(idx.paths.callstack_log_dir))
 
 
 def fork_detector_for_slug(slug: str) -> ForkDetector:
-    _auto_register_default()
-    with _lock:
-        existing = _fork_detectors.get(slug)
-        if existing is not None:
-            return existing
-    index = index_for_slug(slug)
-    fd = ForkDetector(index.paths.project_dir)
-    with _lock:
-        _fork_detectors[slug] = fd
-    return fd
+    return _per_slug(_fork_detectors, slug, lambda idx: ForkDetector(idx.paths.project_dir))
 
 
 def canvas_tree_builder_for_slug(slug: str) -> CanvasTreeBuilder:
     """Project-scoped canvas-tree builder. Caches per-session JSONL scans
     so subsequent canvas requests for the same project reuse them."""
-    _auto_register_default()
-    with _lock:
-        existing = _canvas_builders.get(slug)
-        if existing is not None:
-            return existing
-    index = index_for_slug(slug)
-    builder = CanvasTreeBuilder(index.paths.project_dir)
-    with _lock:
-        _canvas_builders[slug] = builder
-    return builder
+    return _per_slug(_canvas_builders, slug, lambda idx: CanvasTreeBuilder(idx.paths.project_dir))
 
 
 def subagent_index_for_slug(slug: str) -> SubagentIndex:
-    _auto_register_default()
-    with _lock:
-        existing = _subagents.get(slug)
-        if existing is not None:
-            return existing
-    index = index_for_slug(slug)
-    si = SubagentIndex(index.paths.project_dir)
-    with _lock:
-        _subagents[slug] = si
-    return si
+    return _per_slug(_subagents, slug, lambda idx: SubagentIndex(idx.paths.project_dir))
 
 
 def _project_jsonl_signature(project_dir: Path) -> tuple:
