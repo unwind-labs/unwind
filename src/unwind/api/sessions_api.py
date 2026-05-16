@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional
 
-from fastapi import APIRouter, Header, HTTPException, Query, Response
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response
 from pydantic import BaseModel
 
 import hashlib
@@ -25,8 +25,28 @@ from ..registry import (
 )
 from ..security import SessionIdPath, SlugPath
 from ..subagents import SUBAGENT_PREFIX
+from .request_state import RequestState, get_request_state
 
 router = APIRouter(tags=["sessions"])
+
+
+def _rs_index(rs: RequestState, slug: str):
+    return rs.memoize(("index", slug), lambda: index_for_slug(slug))
+
+
+def _rs_callstack(rs: RequestState, slug: str):
+    return rs.memoize(("callstack", slug), lambda: callstack_for_slug(slug))
+
+
+def _rs_resolver(rs: RequestState, slug: str):
+    return rs.memoize(("resolver", slug), lambda: spawn_resolver_for_slug(slug))
+
+
+def _rs_active_session(rs: RequestState, slug: str, index, project_path):
+    return rs.memoize(
+        ("active_session", slug),
+        lambda: _active_session_for_project(index, project_path),
+    )
 
 
 class SessionRow(BaseModel):
@@ -49,6 +69,7 @@ class SessionRow(BaseModel):
 def list_sessions(
     slug: SlugPath,
     include_forks: bool = Query(False),
+    rs: RequestState = Depends(get_request_state),
 ) -> list[SessionRow]:
     """List Claude sessions in the project.
 
@@ -57,10 +78,10 @@ def list_sessions(
     parent in the call-tree pane instead. Pass ``include_forks=true`` to see
     everything.
     """
-    index = index_for_slug(slug)
+    index = _rs_index(rs, slug)
     project_path = str(index.paths.source_path) if index.paths.has_project_dir else None
 
-    ci = callstack_for_slug(slug)
+    ci = _rs_callstack(rs, slug)
     fork_ids: set[str] = set()
     if not include_forks:
         if ci.has_logs:
@@ -72,7 +93,7 @@ def list_sessions(
 
     # Compute the project's active session ONCE per request so each
     # row's status check doesn't re-walk the session list.
-    active_session_id = _active_session_for_project(index, project_path)
+    active_session_id = _rs_active_session(rs, slug, index, project_path)
 
     rows: list[SessionRow] = []
     for s in index.list_sessions():
@@ -113,6 +134,7 @@ def list_sessions(
             project_path,
             slug=slug,
             active_session_id=active_session_id,
+            rs=rs,
         )
 
         rows.append(
@@ -136,20 +158,31 @@ def list_sessions(
     "/projects/{slug}/sessions/{session_id}",
     response_model=SessionRow,
 )
-def get_session(slug: SlugPath, session_id: SessionIdPath) -> SessionRow:
-    index = index_for_slug(slug)
+def get_session(
+    slug: SlugPath,
+    session_id: SessionIdPath,
+    rs: RequestState = Depends(get_request_state),
+) -> SessionRow:
+    index = _rs_index(rs, slug)
     summary = index.get_session(session_id)
     if summary is None:
         raise HTTPException(status_code=404, detail="session not found")
     project_path = (
         str(index.paths.source_path) if index.paths.has_project_dir else None
     )
-    ci = callstack_for_slug(slug)
+    ci = _rs_callstack(rs, slug)
     last_epoch = (
         summary.last_timestamp.timestamp() if summary.last_timestamp else None
     )
     status = _compute_session_status(
-        index, ci, summary.session_id, summary.cwd, last_epoch, project_path, slug=slug
+        index,
+        ci,
+        summary.session_id,
+        summary.cwd,
+        last_epoch,
+        project_path,
+        slug=slug,
+        rs=rs,
     )
     return SessionRow(
         session_id=summary.session_id,
@@ -202,6 +235,7 @@ def _compute_session_status(
     *,
     slug: str,
     active_session_id: Optional[str] = None,
+    rs: Optional[RequestState] = None,
 ) -> str:
     """Single-source-of-truth for session status. See ``list_sessions`` for
     the full semantics; reused by ``get_session`` so the two endpoints
@@ -209,7 +243,8 @@ def _compute_session_status(
 
     ``active_session_id`` (the project's most-recently-touched session,
     or ``None``) is computed once per request. When omitted we look it
-    up here — fine for one-off calls but inefficient for batch use.
+    up via ``rs`` (memoized request-scoped); falls back to a direct call
+    when ``rs`` is also missing.
     """
     del cwd  # currently unused; reserved for future per-session checks
     cs_status = ci.aggregate_status_for_session(session_id) if ci.has_logs else None
@@ -230,7 +265,10 @@ def _compute_session_status(
     # to ``active_session_id``.
     del last_epoch
     if active_session_id is None:
-        active_session_id = _active_session_for_project(index, project_path)
+        if rs is not None:
+            active_session_id = _rs_active_session(rs, slug, index, project_path)
+        else:
+            active_session_id = _active_session_for_project(index, project_path)
     if session_id != active_session_id:
         return "done"
     if cs_norm == "yielded":
@@ -239,7 +277,12 @@ def _compute_session_status(
     # instead of re-walking the JSONL: the at-user-prompt state machine
     # is identical, and sharing the cache means /sessions and /canvas
     # pay the scan once between them.
-    if canvas_tree_builder_for_slug(slug).get_scan(session_id).at_user_prompt:
+    builder = (
+        rs.memoize(("canvas_builder", slug), lambda: canvas_tree_builder_for_slug(slug))
+        if rs is not None
+        else canvas_tree_builder_for_slug(slug)
+    )
+    if builder.get_scan(session_id).at_user_prompt:
         return "yield"
     return "live"
 
@@ -278,6 +321,7 @@ def get_messages(
     session_id: SessionIdPath,
     include_meta: bool = Query(False),
     since_uuid: Optional[str] = Query(None),
+    rs: RequestState = Depends(get_request_state),
 ) -> MessagesResponse:
     """Return normalized messages for a session.
 
@@ -289,9 +333,9 @@ def get_messages(
     from the cached records and the client expects it to be authoritative
     on every response).
     """
-    ci = callstack_for_slug(slug)
-    si = subagent_index_for_slug(slug)
-    resolver = spawn_resolver_for_slug(slug)
+    ci = _rs_callstack(rs, slug)
+    si = rs.memoize(("subagents", slug), lambda: subagent_index_for_slug(slug))
+    resolver = _rs_resolver(rs, slug)
 
     # Subagent traces resolve through a separate index.
     if session_id.startswith(SUBAGENT_PREFIX):
@@ -313,7 +357,7 @@ def get_messages(
             file_offset=page.file_offset,
         )
 
-    index = index_for_slug(slug)
+    index = _rs_index(rs, slug)
     jsonl = index.jsonl_path_for(session_id)
     if jsonl is None:
         raise HTTPException(status_code=404, detail="session not found")
@@ -416,6 +460,7 @@ def get_canvas_tree(
     slug: SlugPath,
     session_id: SessionIdPath,
     if_none_match: Optional[str] = Header(default=None, alias="If-None-Match"),
+    rs: RequestState = Depends(get_request_state),
 ) -> Response:
     """Return the canvas window-tree for a root session.
 
@@ -423,7 +468,7 @@ def get_canvas_tree(
     in the CanvasTreeBuilder). Wraps in an ETag for HTTP-level
     caching, so polling clients get a 304 when nothing's changed.
     """
-    index = index_for_slug(slug)
+    index = _rs_index(rs, slug)
     if index.jsonl_path_for(session_id) is None and not any(
         s.session_id == session_id for s in index.list_sessions()
     ):
@@ -450,8 +495,10 @@ def get_canvas_tree(
     if if_none_match == etag:
         return Response(status_code=304, headers={"ETag": etag})
 
-    builder = canvas_tree_builder_for_slug(slug)
-    resolver = spawn_resolver_for_slug(slug)
+    builder = rs.memoize(
+        ("canvas_builder", slug), lambda: canvas_tree_builder_for_slug(slug)
+    )
+    resolver = _rs_resolver(rs, slug)
     summaries = {s.session_id: s for s in index.list_sessions()}
 
     # Compute the project's active session once per request; the
@@ -459,7 +506,7 @@ def get_canvas_tree(
     # may invoke ``is_live`` for many sessions (subagents, callstack
     # children) — none should flip live just because their JSONL was
     # touched recently when they aren't the active main session.
-    active_session_id = _active_session_for_project(index, project_path)
+    active_session_id = _rs_active_session(rs, slug, index, project_path)
 
     def is_live(sid: str) -> bool:
         return sid == active_session_id
@@ -502,12 +549,18 @@ class TreeResponse(BaseModel):
     "/projects/{slug}/sessions/{session_id}/tree",
     response_model=TreeResponse,
 )
-def get_tree(slug: SlugPath, session_id: SessionIdPath) -> TreeResponse:
+def get_tree(
+    slug: SlugPath,
+    session_id: SessionIdPath,
+    rs: RequestState = Depends(get_request_state),
+) -> TreeResponse:
     from ..callstack import TaskNode
 
-    ci = callstack_for_slug(slug)
+    ci = _rs_callstack(rs, slug)
     children = ci.build_subtree(session_id)
-    fd = fork_detector_for_slug(slug)
+    fd = rs.memoize(
+        ("fork_detector", slug), lambda: fork_detector_for_slug(slug)
+    )
 
     # Resolve in-flight tree rows that don't yet have session_ids by matching
     # the task name against fork sessions' first divergent user message.
