@@ -12,7 +12,7 @@ it as a collapsible card with its eventual ``tool_result`` paired in.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable, Literal, Optional
@@ -70,26 +70,11 @@ class Message:
     spawn_call_types: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
-        return {
-            "uuid": self.uuid,
-            "session_id": self.session_id,
-            "role": self.role,
-            "timestamp": self.timestamp.isoformat() if self.timestamp else None,
-            "text": self.text,
-            "tool_name": self.tool_name,
-            "tool_input": self.tool_input,
-            "tool_use_id": self.tool_use_id,
-            "tool_result_for": self.tool_result_for,
-            "tool_result": self.tool_result,
-            "is_error": self.is_error,
-            "model": self.model,
-            "raw_type": self.raw_type,
-            "spawn_kind": self.spawn_kind,
-            "spawn_session_ids": list(self.spawn_session_ids),
-            "spawn_tasks": list(self.spawn_tasks),
-            "spawn_done": list(self.spawn_done),
-            "spawn_call_types": list(self.spawn_call_types),
-        }
+        d = asdict(self)
+        d.pop("order_within_line", None)
+        ts = self.timestamp
+        d["timestamp"] = ts.isoformat() if ts else None
+        return d
 
 
 @dataclass

@@ -46,4 +46,4 @@ Status: `[ ]` pending · `[~]` in progress · `[x]` done
 - [x] **T24** Per-request state-pack on `Request.state` (resolved `SpawnResolver`, precomputed `_latest_view`, active session, project JSONL listing). (Review: cross-cutting)
 - [x] **T25** Central `Settings` object loaded once at startup; remove env-on-every-accessor pattern. (Review: A-H3+A-H4)
 - [x] **T26** Drain WS pending tasks on disconnect (`await asyncio.gather(*pending, return_exceptions=True)`). (Review: L)
-- [ ] **T27** `Message.to_dict` → `dataclasses.asdict` with datetime post-processing. (Review: M)
+- [x] **T27** `Message.to_dict` → `dataclasses.asdict` with datetime post-processing. (Review: M)
