@@ -19,7 +19,7 @@ Status: `[ ]` pending · `[~]` in progress · `[x]` done
 
 ## Phase 3 — Perf hot path
 
-- [ ] **T9** Cache `_latest_view` and `reports_by_parent` on `CallstackIndex` keyed by callstack-log signature; hoist precomputation in `list_sessions` so per-row helpers do dict lookups. (Review: C1)
+- [x] **T9** Cache `_latest_view` and `reports_by_parent` on `CallstackIndex` keyed by callstack-log signature; hoist precomputation in `list_sessions` so per-row helpers do dict lookups. (Review: C1)
 - [ ] **T10** Cache subagent `_build_one` per `(path, mtime, size)`; in `SpawnResolver.spawns_by_parent`, probe `<sid>/subagents/` via `stat` before opening JSONLs. (Review: C2)
 - [ ] **T11** Add TTL (~1 s) or signature-based skip to `ForkDetector._refresh`. (Review: P-H1)
 - [ ] **T12** `list_projects` should use lightweight `os.scandir` for `last_activity` / `session_count`; defer full indexing to project-open. (Review: P-H2)

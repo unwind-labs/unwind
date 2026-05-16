@@ -301,3 +301,45 @@ def test_aggregate_status_returns_terminal_for_main_when_chain_complete(tmp_path
     ci = CallstackIndex(log)
     assert ci.aggregate_status_for_session("MAIN") == "complete"
     assert ci.is_callstack_task("MAIN") is False
+
+
+def test_latest_view_is_memoized_until_files_change(tmp_path: Path, monkeypatch):
+    """A /sessions response calls aggregate_status + is_callstack_task per row.
+    Each goes through _latest_view, which used to do a full O(reports × tree)
+    rebuild on every call. After T9 it's memoized by _log_signature, so the
+    expensive recursion runs once per fingerprint, not per row.
+    """
+    log = tmp_path / "log"
+    _write_report(
+        log,
+        "20260101T000000-r",
+        {
+            "invoke_id": "20260101T000000-r",
+            "parent_session": "ROOT",
+            "status": "complete",
+            "tasks": [
+                {"task": "/a", "status": "complete", "depth": 1, "session_id": "A"}
+            ],
+        },
+    )
+    ci = CallstackIndex(log)
+
+    # Prime the cache.
+    ci._latest_view()
+    initial_id = id(ci._view_cached)
+    assert initial_id is not None
+
+    # Simulate many rows hitting the view; identity must not change.
+    for _ in range(50):
+        ci._latest_view()
+        ci.reports_by_parent()
+    assert id(ci._view_cached) == initial_id
+
+    # Touch the file: signature must invalidate and rebuild.
+    import os, time
+    report_path = log / "20260101T000000-r" / "report.yaml"
+    st = report_path.stat()
+    os.utime(report_path, (st.st_atime, st.st_mtime + 1))
+    # Force size to differ as well for belt-and-braces signature change.
+    ci._latest_view()
+    assert id(ci._view_cached) != initial_id

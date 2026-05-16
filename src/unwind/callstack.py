@@ -18,6 +18,7 @@ their last-known status; the UI displays them as in-progress.
 """
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime  # noqa: F401
 from pathlib import Path
@@ -89,6 +90,15 @@ class CallstackIndex:
     def __init__(self, log_dir: Path) -> None:
         self._log_dir = log_dir
         self._cache = PathCache(self._load_report)
+        # Memoize aggregate views (_latest_view / reports_by_parent) by a
+        # cheap signature over report.yaml stats. Without this, a single
+        # /sessions response triggers ~2 full rebuilds per row (~hundreds
+        # of full tree walks for a project with 200 sessions × 50 reports).
+        self._view_lock = threading.Lock()
+        self._view_sig: Optional[tuple] = None
+        self._view_cached: Optional[tuple[dict[str, TaskNode], dict[str, list[str]], dict[str, str]]] = None
+        self._rbp_sig: Optional[tuple] = None
+        self._rbp_cached: Optional[dict[str, list[InvokeReport]]] = None
 
     @property
     def log_dir(self) -> Path:
@@ -113,10 +123,41 @@ class CallstackIndex:
                 out.append(rep)
         return out
 
+    def _log_signature(self) -> tuple:
+        """Cheap fingerprint over all report.yaml files in the log dir.
+
+        Used to invalidate the memoized aggregate views. Cost: one stat per
+        report, vs the O(reports × tree-size) recursion in ``_latest_view``.
+        """
+        if not self.has_logs:
+            return ()
+        sig: list[tuple[str, float, int]] = []
+        try:
+            for invoke_dir in self._log_dir.iterdir():
+                if not invoke_dir.is_dir():
+                    continue
+                report_path = invoke_dir / "report.yaml"
+                try:
+                    st = report_path.stat()
+                except OSError:
+                    continue
+                sig.append((invoke_dir.name, st.st_mtime, st.st_size))
+        except OSError:
+            return ()
+        sig.sort()
+        return tuple(sig)
+
     def reports_by_parent(self) -> dict[str, list[InvokeReport]]:
+        sig = self._log_signature()
+        with self._view_lock:
+            if self._rbp_cached is not None and self._rbp_sig == sig:
+                return self._rbp_cached
         by_parent: dict[str, list[InvokeReport]] = {}
         for rep in self.all_reports():
             by_parent.setdefault(rep.parent_session, []).append(rep)
+        with self._view_lock:
+            self._rbp_cached = by_parent
+            self._rbp_sig = sig
         return by_parent
 
     def _latest_view(
@@ -147,7 +188,14 @@ class CallstackIndex:
             report-level status from the most recent report whose
             ``parent_session`` is this id (i.e. the status visible to a
             "root caller" that itself never appears as a task).
+
+        Memoized by ``_log_signature`` so a /sessions response with N rows
+        does ~1 rebuild instead of ~2N.
         """
+        sig = self._log_signature()
+        with self._view_lock:
+            if self._view_cached is not None and self._view_sig == sig:
+                return self._view_cached
         canonical: dict[str, TaskNode] = {}
         canonical_ts: dict[str, Optional[datetime]] = {}
         children_sids: dict[str, list[str]] = {}
@@ -194,7 +242,11 @@ class CallstackIndex:
             for t in rep.tasks:
                 absorb(t, ts)
 
-        return canonical, children_sids, root_status
+        result = (canonical, children_sids, root_status)
+        with self._view_lock:
+            self._view_cached = result
+            self._view_sig = sig
+        return result
 
     def is_callstack_task(self, session_id: str) -> bool:
         """Whether ``session_id`` appears as a TaskNode in any report.
