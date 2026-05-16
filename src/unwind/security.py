@@ -7,12 +7,15 @@ so policy lives in one place.
 from __future__ import annotations
 
 import hmac
+import logging
 import os
 import re
 from typing import Annotated
 from urllib.parse import urlsplit
 
 from fastapi import HTTPException, Path, Request
+
+logger = logging.getLogger(__name__)
 
 
 # Claude Code's slug rule: any char outside [A-Za-z0-9-] is replaced with '-'.
@@ -45,12 +48,43 @@ DEFAULT_DEV_ORIGINS: tuple[str, ...] = (
 )
 
 
+def _is_valid_origin_entry(entry: str) -> bool:
+    """Strict allow-list validator: must be ``scheme://host[:port]``.
+
+    Rejects ``null`` (sandboxed iframe / file:// pages), the wildcard ``*``
+    (would otherwise become a literal origin that never matches but signals
+    misconfiguration), and any value missing a scheme or hostname.
+    """
+    lowered = entry.lower()
+    if lowered in {"null", "*"}:
+        return False
+    parts = urlsplit(entry)
+    if parts.scheme not in {"http", "https"}:
+        return False
+    if not parts.hostname:
+        return False
+    return True
+
+
 def allowed_origins() -> list[str]:
     """Explicit cross-origin allow-list. Same-origin is always permitted."""
     extra = os.environ.get("UNWIND_ALLOWED_ORIGINS", "").strip()
     if not extra:
         return list(DEFAULT_DEV_ORIGINS)
-    return [o.strip() for o in extra.split(",") if o.strip()]
+    out: list[str] = []
+    for raw in extra.split(","):
+        entry = raw.strip()
+        if not entry:
+            continue
+        if not _is_valid_origin_entry(entry):
+            logger.warning(
+                "UNWIND_ALLOWED_ORIGINS: rejecting invalid entry %r "
+                "(must be http(s)://host[:port], not 'null' or '*')",
+                entry,
+            )
+            continue
+        out.append(entry)
+    return out
 
 
 def _normalise(origin: str) -> tuple[str, str, int] | None:
