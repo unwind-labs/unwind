@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import time
+from pathlib import Path
 
 from unwind import jsonl
 
@@ -44,3 +45,34 @@ def test_records_tuple_is_immutable(tmp_path):
     path.write_text(json.dumps({"uuid": "u1"}) + "\n")
     recs = jsonl.read_records(path)
     assert isinstance(recs, tuple)
+
+
+def test_path_cache_evicts_lru(tmp_path):
+    from unwind._cache import PathCache
+
+    calls: list[Path] = []
+
+    def loader(p):
+        calls.append(p)
+        return p.read_text()
+
+    cache = PathCache(loader, maxsize=2)
+    a = tmp_path / "a"
+    b = tmp_path / "b"
+    c = tmp_path / "c"
+    for p in (a, b, c):
+        p.write_text(p.name)
+
+    cache.get(a)  # store: [a]
+    cache.get(b)  # store: [a, b]
+    cache.get(a)  # touch a -> [b, a]
+    cache.get(c)  # evicts b (LRU) -> [a, c]
+    assert len(cache) == 2
+
+    # b is gone, a is still cached.
+    calls.clear()
+    cache.get(a)
+    cache.get(c)
+    assert calls == []  # both hits
+    cache.get(b)
+    assert calls == [b]  # b had to be reloaded
