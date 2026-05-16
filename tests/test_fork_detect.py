@@ -154,3 +154,39 @@ def test_cache_is_invalidated_on_growth(tmp_path: Path):
     )
     forks = fd.fork_session_ids()
     assert forks == {"fork"}
+
+
+def test_refresh_skipped_within_ttl_and_when_signature_unchanged(
+    tmp_path: Path, monkeypatch
+):
+    """Back-to-back public calls must not re-glob the project dir.
+
+    GET /sessions calls into the detector 3-4× per request; we want exactly
+    one filesystem pass per request, not one per call.
+    """
+    s = tmp_path / "s.jsonl"
+    _write(s, [{"uuid": "u1", "timestamp": "2026-04-24T09:00:00Z", "type": "user"}])
+    fd = ForkDetector(tmp_path)
+    fd.fork_session_ids()  # warm
+
+    glob_calls = {"n": 0}
+    original_glob = Path.glob
+
+    def counting_glob(self, pattern):  # noqa: ANN001
+        if self == tmp_path and pattern == "*.jsonl":
+            glob_calls["n"] += 1
+        return original_glob(self, pattern)
+
+    monkeypatch.setattr(Path, "glob", counting_glob)
+
+    # TTL fast-path: three back-to-back calls must do zero globs.
+    fd.fork_session_ids()
+    fd.is_fork("s")
+    fd.children_of("s")
+    assert glob_calls["n"] == 0, "TTL fast-path should suppress all globs"
+
+    # Force past the TTL but with no filesystem change: signature-skip path
+    # still does one glob (to compute the signature), but no probe rebuild.
+    fd._last_refresh_ts = 0.0
+    fd.fork_session_ids()
+    assert glob_calls["n"] == 1

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import re
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -30,6 +31,11 @@ from .jsonl import _text_blocks, file_birth_ts, iter_lines
 
 # How many leading uuids to sample from each JSONL.
 PROBE_N = 5
+
+# Skip _refresh entirely within this TTL of the last successful refresh.
+# A GET /sessions response calls into the detector 3-4× per request; this
+# collapses them to one filesystem pass.
+_REFRESH_TTL_SECONDS = 1.0
 
 # Number of leading records to scan for the callstack fork-prologue marker.
 # The marker, when present, sits in the very first ``queue-operation`` enqueue
@@ -78,6 +84,9 @@ class ForkDetector:
         # it in a separate map that survives ``_refresh``.
         self._divergence_text: dict[str, Optional[str]] = {}
         self._divergence_resolved: set[str] = set()
+        self._last_refresh_ts: float = 0.0
+        self._last_signature: tuple = ()
+        self._last_dir_mtime: float = -1.0
 
     def fork_session_ids(self) -> set[str]:
         """Return the set of session_ids classified as forks.
@@ -231,15 +240,47 @@ class ForkDetector:
                 self._divergence_resolved.add(sid)
 
     def _refresh(self) -> None:
-        if not self._project_dir.is_dir():
+        now = time.monotonic()
+        try:
+            dir_mtime = self._project_dir.stat().st_mtime
+        except OSError:
+            with self._lock:
+                self._last_refresh_ts = now
             return
-        new_probes: dict[str, _Probe] = {}
+        # Fast path: TTL window AND directory contents unchanged
+        # (new/removed JSONL files bump dir mtime; in-place growth does not,
+        # but a 1-second staleness window is acceptable for that case).
+        with self._lock:
+            if (
+                now - self._last_refresh_ts < _REFRESH_TTL_SECONDS
+                and dir_mtime == self._last_dir_mtime
+            ):
+                return
+        # One stat-pass to compute the signature; skip probe rebuild if unchanged.
+        sig_entries: list[tuple[str, float, int, Path]] = []
         for jsonl in self._project_dir.glob("*.jsonl"):
+            try:
+                st = jsonl.stat()
+            except OSError:
+                continue
+            sig_entries.append((jsonl.name, st.st_mtime, st.st_size, jsonl))
+        sig_entries.sort()
+        signature = tuple((n, m, s) for n, m, s, _ in sig_entries)
+        with self._lock:
+            if signature == self._last_signature:
+                self._last_refresh_ts = now
+                self._last_dir_mtime = dir_mtime
+                return
+        new_probes: dict[str, _Probe] = {}
+        for _, _, _, jsonl in sig_entries:
             probe = self._probe_cache.get(jsonl)
             if probe is not None:
                 new_probes[jsonl.stem] = probe
         with self._lock:
             self._probes = new_probes
+            self._last_signature = signature
+            self._last_refresh_ts = now
+            self._last_dir_mtime = dir_mtime
 
 
 def _build_probe(path: Path, mtime: float, size: int) -> _Probe:
