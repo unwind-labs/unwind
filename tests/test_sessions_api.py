@@ -330,6 +330,168 @@ def test_active_main_session_with_completed_forks_is_live(
     assert rows[fork_sid]["status"] == "done", rows[fork_sid]
 
 
+def test_canvas_running_fork_child_window_is_live(app_client):
+    """Regression: the canvas endpoint's ``is_live`` must recognize a
+    callstack-fork child whose aggregate status is still ``running`` —
+    otherwise the parent's CALL row (driven by the callstack aggregate)
+    shows ``in_progress`` while the child window collapses to ``done``,
+    producing the divergent status the user reported."""
+    import yaml
+
+    client, home, projects_mod, _ = app_client
+
+    real_cwd = home.parent / "work" / "running-fork-proj"
+    real_cwd.mkdir(parents=True)
+    slug = projects_mod.slug_for(real_cwd)
+
+    main_sid = "11111111-cccc-dddd-eeee-111111111111"
+    child_sid = "22222222-cccc-dddd-eeee-222222222222"
+
+    proj_dir = home / ".claude" / "projects" / slug
+    base = {
+        "timestamp": "2026-05-03T19:00:00.000Z",
+        "message": {"role": "user", "content": "hi"},
+        "cwd": str(real_cwd),
+    }
+    _write_session(
+        proj_dir,
+        main_sid,
+        [{**base, "uuid": "u-1", "type": "user", "sessionId": main_sid}],
+    )
+    _write_session(
+        proj_dir,
+        child_sid,
+        [{**base, "uuid": "u-2", "type": "user", "sessionId": child_sid}],
+    )
+
+    cs_log = real_cwd / ".claude" / "callstack" / "log" / "20260503T190000-x"
+    cs_log.mkdir(parents=True)
+    (cs_log / "report.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "invoke_id": "20260503T190000-x",
+                "parent_session": main_sid,
+                "status": "running",
+                "tasks": [
+                    {
+                        "task": "Execute Phase 3",
+                        "status": "running",
+                        "depth": 1,
+                        "session_id": child_sid,
+                    }
+                ],
+            }
+        )
+    )
+
+    resp = client.get(f"/api/projects/{slug}/sessions/{main_sid}/canvas")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+
+    child_windows = [w for w in body["all_windows"] if w["session_id"] == child_sid]
+    assert child_windows, f"no window for child {child_sid} in {body}"
+    # Final window of the still-running fork child must be live, not done.
+    assert child_windows[-1]["status"] == "live", child_windows[-1]
+
+
+def test_canvas_returned_fork_child_window_is_done_despite_stale_report(app_client):
+    """Regression: callstack ``report.yaml`` sometimes records a child
+    task as ``running`` even after the child emitted a
+    ``{"op":"return"}`` envelope (runtime fails to update the report).
+
+    The canvas's ``is_live`` must consult the child's JSONL for a
+    trailing RETURN envelope and downgrade to ``done`` — otherwise the
+    parent's CALL row appears stuck ``in_progress`` indefinitely.
+    """
+    import yaml
+
+    client, home, projects_mod, _ = app_client
+
+    real_cwd = home.parent / "work" / "returned-fork-proj"
+    real_cwd.mkdir(parents=True)
+    slug = projects_mod.slug_for(real_cwd)
+
+    main_sid = "33333333-cccc-dddd-eeee-333333333333"
+    child_sid = "44444444-cccc-dddd-eeee-444444444444"
+
+    proj_dir = home / ".claude" / "projects" / slug
+    _write_session(
+        proj_dir,
+        main_sid,
+        [
+            {
+                "uuid": "u-1",
+                "type": "user",
+                "sessionId": main_sid,
+                "timestamp": "2026-05-03T19:00:00.000Z",
+                "message": {"role": "user", "content": "hi"},
+                "cwd": str(real_cwd),
+            }
+        ],
+    )
+    # Child JSONL whose last assistant message contains a RETURN envelope.
+    _write_session(
+        proj_dir,
+        child_sid,
+        [
+            {
+                "uuid": "u-2",
+                "type": "user",
+                "sessionId": child_sid,
+                "timestamp": "2026-05-03T19:00:00.000Z",
+                "message": {"role": "user", "content": "go"},
+                "cwd": str(real_cwd),
+            },
+            {
+                "uuid": "a-1",
+                "type": "assistant",
+                "sessionId": child_sid,
+                "timestamp": "2026-05-03T19:00:05.000Z",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": '```json\n{"op": "return", "result": "ok"}\n```',
+                        }
+                    ],
+                },
+            },
+        ],
+    )
+
+    # report.yaml lies: it still says the child is running.
+    cs_log = real_cwd / ".claude" / "callstack" / "log" / "20260503T190000-y"
+    cs_log.mkdir(parents=True)
+    (cs_log / "report.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "invoke_id": "20260503T190000-y",
+                "parent_session": main_sid,
+                "status": "mixed",
+                "tasks": [
+                    {
+                        "task": "Execute Phase 3",
+                        "status": "running",
+                        "depth": 1,
+                        "session_id": child_sid,
+                    }
+                ],
+            }
+        )
+    )
+
+    resp = client.get(f"/api/projects/{slug}/sessions/{main_sid}/canvas")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+
+    child_windows = [w for w in body["all_windows"] if w["session_id"] == child_sid]
+    assert child_windows, f"no window for child {child_sid} in {body}"
+    # The RETURN envelope in the JSONL overrides the stale ``running``
+    # status in report.yaml.
+    assert child_windows[-1]["status"] == "done", child_windows[-1]
+
+
 def test_messages_since_uuid_returns_only_delta(app_client):
     """``GET /messages?since_uuid=<u>`` returns messages that landed after
     the record with that uuid. ``file_offset`` and ``last_uuid`` continue

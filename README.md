@@ -12,6 +12,8 @@ Run `unwind serve` in any project folder; a browser tab opens showing every Clau
 pip install unwind-labs
 ```
 
+Canvas PNG export uses ImageMagick to stitch large trees. If `magick` isn't on `PATH`, single-tile exports still work; only oversized trees (a single dimension above ~16k px) require it. Install with `brew install imagemagick` (macOS) or `apt-get install imagemagick` (Debian/Ubuntu).
+
 ## Web UI
 
 ```bash

@@ -97,6 +97,30 @@ export type MessagesResponse = {
   extra_spawns: SpawnCardData[];
 };
 
+/** Token usage counters mirroring Anthropic's ``message.usage`` shape:
+ *    cw = cache_creation_input_tokens
+ *    cr = cache_read_input_tokens
+ *    r  = input_tokens
+ *    w  = output_tokens
+ */
+export type TokenUsage = {
+  cw: number;
+  cr: number;
+  r: number;
+  w: number;
+};
+
+/** USD cost matching ``TokenUsage`` — same keys, but each value is the
+ *  dollar cost of those tokens at the recording assistant message's
+ *  model rate. Computed server-side so the frontend never embeds rate
+ *  tables. */
+export type TokenCost = {
+  cw: number;
+  cr: number;
+  r: number;
+  w: number;
+};
+
 /** One slice of a session's activity = one card on the canvas. */
 export type WindowNode = {
   window_id: string;
@@ -108,6 +132,17 @@ export type WindowNode = {
   kind: "root" | "call" | "subagent" | "resume";
   parent_window_id: string | null;
   window_index: number;
+  /** Tokens attributed to this window alone. */
+  self_usage: TokenUsage;
+  /** Tokens for this window plus every descendant. Equals ``self_usage``
+   *  on leaves; the footer renders a single row there. */
+  subtree_usage: TokenUsage;
+  /** USD cost attributed to this window alone (priced per-record at the
+   *  recording model's rate). */
+  self_cost: TokenCost;
+  /** USD cost for this window plus every descendant. The root card uses
+   *  this for the ``$`` footer row + grand total. */
+  subtree_cost: TokenCost;
   children: WindowNode[];
 };
 

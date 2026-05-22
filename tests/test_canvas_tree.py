@@ -36,17 +36,24 @@ def _user(sid: str, ts: str, text: str = "hi", uuid: str = "u-1") -> dict:
 
 
 def _assistant(
-    sid: str, ts: str, text: str = "ok", uuid: str = "a-1"
+    sid: str,
+    ts: str,
+    text: str = "ok",
+    uuid: str = "a-1",
+    usage: dict | None = None,
 ) -> dict:
+    msg: dict = {
+        "role": "assistant",
+        "content": [{"type": "text", "text": text}],
+    }
+    if usage is not None:
+        msg["usage"] = usage
     return {
         "uuid": uuid,
         "type": "assistant",
         "sessionId": sid,
         "timestamp": ts,
-        "message": {
-            "role": "assistant",
-            "content": [{"type": "text", "text": text}],
-        },
+        "message": msg,
     }
 
 
@@ -115,6 +122,55 @@ def test_scan_session_handles_missing_file(tmp_path: Path):
     assert scan.start_ts is None
     assert scan.end_ts is None
     assert scan.yields == []
+
+
+def test_scan_session_extracts_usage_events(tmp_path: Path):
+    """Each assistant message with a ``message.usage`` block becomes one
+    ``(ts, cw, cr, r, w)`` tuple. Messages without ``usage`` (or with
+    all-zero counters) are skipped so leaf nodes don't pick up phantom
+    rows."""
+    proj = tmp_path / "proj"
+    sid = "s1"
+    _write_session(
+        proj,
+        sid,
+        [
+            _user(sid, "2026-05-04T10:00:00Z"),
+            _assistant(
+                sid,
+                "2026-05-04T10:00:05Z",
+                text="t1",
+                uuid="a-1",
+                usage={
+                    "input_tokens": 10,
+                    "output_tokens": 20,
+                    "cache_creation_input_tokens": 100,
+                    "cache_read_input_tokens": 1000,
+                },
+            ),
+            # No usage block — should not appear in events.
+            _assistant(sid, "2026-05-04T10:00:06Z", text="t2", uuid="a-2"),
+            _assistant(
+                sid,
+                "2026-05-04T10:00:07Z",
+                text="t3",
+                uuid="a-3",
+                usage={
+                    "input_tokens": 5,
+                    "output_tokens": 7,
+                    "cache_creation_input_tokens": 0,
+                    "cache_read_input_tokens": 0,
+                },
+            ),
+        ],
+    )
+    scan = scan_session(proj / f"{sid}.jsonl")
+    assert len(scan.usage_events) == 2
+    # (ts, model, cw, cr, r, w) ordering
+    _ts1, _m1, cw1, cr1, r1, w1 = scan.usage_events[0]
+    assert (cw1, cr1, r1, w1) == (100, 1000, 10, 20)
+    _ts2, _m2, cw2, cr2, r2, w2 = scan.usage_events[1]
+    assert (cw2, cr2, r2, w2) == (0, 0, 5, 7)
 
 
 # --- collect_invocations ------------------------------------------------
@@ -234,6 +290,158 @@ def test_root_calls_child_once_yields_two_node_tree(tmp_path: Path):
     assert child.parent_window_id == root.window_id
     assert child.kind == "call"
     assert len(all_w) == 2
+
+
+def test_usage_self_and_subtree_aggregate_post_order(tmp_path: Path):
+    """End-to-end: parent and child each have usage events; the parent's
+    ``self_usage`` reflects only its own tokens and ``subtree_usage``
+    reflects parent + child. Leaf's subtree equals its self.
+    """
+    proj = tmp_path / "proj"
+    _write_session(
+        proj,
+        "MAIN",
+        [
+            _user("MAIN", "2026-05-04T10:00:00Z"),
+            _assistant(
+                "MAIN",
+                "2026-05-04T10:00:02Z",
+                text="m1",
+                uuid="m-a-1",
+                usage={
+                    "input_tokens": 1,
+                    "output_tokens": 2,
+                    "cache_creation_input_tokens": 3,
+                    "cache_read_input_tokens": 4,
+                },
+            ),
+        ],
+    )
+    _write_session(
+        proj,
+        "CHILD",
+        [
+            _user("CHILD", "2026-05-04T10:00:01Z"),
+            _assistant(
+                "CHILD",
+                "2026-05-04T10:00:03Z",
+                text="c1",
+                uuid="c-a-1",
+                usage={
+                    "input_tokens": 10,
+                    "output_tokens": 20,
+                    "cache_creation_input_tokens": 30,
+                    "cache_read_input_tokens": 40,
+                },
+            ),
+        ],
+    )
+    log = tmp_path / "log"
+    _write_report(
+        log,
+        "i0",
+        parent_sid="MAIN",
+        started_at="2026-05-04T10:00:01+00:00",
+        ended_at="2026-05-04T10:00:05+00:00",
+        tasks=[
+            {
+                "task": "/task-x",
+                "status": "complete",
+                "depth": 1,
+                "session_id": "CHILD",
+            }
+        ],
+    )
+    ci = CallstackIndex(log)
+    root, _all = build_canvas_tree(proj, "MAIN", ci)
+    child = root.children[0]
+    # Leaf: self == subtree.
+    assert child.self_usage == {"cw": 30, "cr": 40, "r": 10, "w": 20}
+    assert child.subtree_usage == child.self_usage
+    # Parent: self counts only its own tokens; subtree adds the child's.
+    assert root.self_usage == {"cw": 3, "cr": 4, "r": 1, "w": 2}
+    assert root.subtree_usage == {"cw": 33, "cr": 44, "r": 11, "w": 22}
+
+
+def test_usage_cost_aggregates_per_model_rates(tmp_path: Path):
+    """Cost is computed per-record using the assistant message's ``model``
+    field, then aggregated subtree-style like the token counters. A
+    sonnet turn and an opus turn in the same window add at their
+    respective rates (sonnet input $3/M, opus input $15/M).
+    """
+    proj = tmp_path / "proj"
+    sid = "ROOT"
+    # Two assistant turns, same input_tokens count, different models.
+    # Expected cost.r = 1,000,000 * $3/M (sonnet) + 1,000,000 * $15/M (opus)
+    #                 = $3 + $15 = $18
+    def _assist_with_model(uuid: str, ts: str, model: str) -> dict:
+        rec = _assistant(
+            sid,
+            ts,
+            uuid=uuid,
+            usage={
+                "input_tokens": 1_000_000,
+                "output_tokens": 0,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 0,
+            },
+        )
+        rec["message"]["model"] = model
+        return rec
+
+    _write_session(
+        proj,
+        sid,
+        [
+            _user(sid, "2026-05-04T10:00:00Z"),
+            _assist_with_model("a-1", "2026-05-04T10:00:01Z", "claude-sonnet-4-6"),
+            _assist_with_model("a-2", "2026-05-04T10:00:02Z", "claude-opus-4-7"),
+        ],
+    )
+    log = tmp_path / "log"
+    log.mkdir()
+    ci = CallstackIndex(log)
+    root, _ = build_canvas_tree(proj, sid, ci)
+    # Sonnet input @ $3/M for 1M tokens = $3.00
+    # Opus input @ $15/M for 1M tokens = $15.00
+    # Total input cost = $18.00. Other categories are zero.
+    assert abs(root.self_cost["r"] - 18.0) < 1e-9
+    assert root.self_cost["cw"] == 0
+    assert root.self_cost["cr"] == 0
+    assert root.self_cost["w"] == 0
+    # Leaf: subtree == self.
+    assert root.subtree_cost == root.self_cost
+
+
+def test_window_node_to_dict_includes_usage_fields(tmp_path: Path):
+    """Serializer exposes ``self_usage`` and ``subtree_usage`` so the
+    frontend can render the footer without an extra round-trip."""
+    proj = tmp_path / "proj"
+    sid = "ROOT"
+    _write_session(
+        proj,
+        sid,
+        [
+            _user(sid, "2026-05-04T10:00:00Z"),
+            _assistant(
+                sid,
+                "2026-05-04T10:00:01Z",
+                usage={
+                    "input_tokens": 7,
+                    "output_tokens": 11,
+                    "cache_creation_input_tokens": 0,
+                    "cache_read_input_tokens": 0,
+                },
+            ),
+        ],
+    )
+    log = tmp_path / "log"
+    log.mkdir()
+    ci = CallstackIndex(log)
+    root, _ = build_canvas_tree(proj, sid, ci)
+    d = root.to_dict()
+    assert d["self_usage"] == {"cw": 0, "cr": 0, "r": 7, "w": 11}
+    assert d["subtree_usage"] == {"cw": 0, "cr": 0, "r": 7, "w": 11}
 
 
 def test_three_invocations_produce_three_child_windows(tmp_path: Path):

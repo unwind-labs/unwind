@@ -355,12 +355,365 @@ def test_report_with_stale_parent_session_heals_to_invoking_jsonl(
     assert [c.session_id for c in root_w.children] == ["CHILD"]
 
 
-def test_report_with_valid_parent_session_is_not_rewritten(tmp_path: Path):
+def test_report_parent_session_overridden_by_tool_use_in_sibling(
+    tmp_path: Path,
+):
+    """Regression: callstack runtimes have been observed writing the
+    wrong ``parent_session`` even when that recorded session is a real
+    JSONL in the same project (an unrelated sibling). When a sibling
+    JSONL actually contains the callstack tool_use that produced this
+    invoke_id, that JSONL is the true parent — the tool_use → invoke_id
+    binding wins over ``report.parent_session``.
+
+    Setup: report records ``parent_session: WRONG-PARENT`` (a real but
+    unrelated JSONL with no callstack tool_use). A different session,
+    ``RIGHT-PARENT``, carries the callstack tool_use whose tool_result
+    surfaces ``invoke_id: i-wrong``. The spawn must be attributed to
+    RIGHT-PARENT, not WRONG-PARENT.
+    """
+    proj = tmp_path / "proj"
+    log = tmp_path / "log"
+
+    inv = log / "i-wrong"
+    inv.mkdir(parents=True)
+    (inv / "report.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "invoke_id": "i-wrong",
+                "parent_session": "WRONG-PARENT",
+                "started_at": "2026-05-04T10:00:00+00:00",
+                "ended_at": "2026-05-04T10:00:30+00:00",
+                "status": "complete",
+                "tasks": [
+                    {
+                        "task": "/inner",
+                        "status": "complete",
+                        "depth": 1,
+                        "session_id": "CHILD",
+                    }
+                ],
+            }
+        )
+    )
+
+    # WRONG-PARENT exists but never made a callstack call.
+    proj.mkdir(parents=True, exist_ok=True)
+    (proj / "WRONG-PARENT.jsonl").write_text(
+        json.dumps({
+            "uuid": "u0",
+            "type": "user",
+            "sessionId": "WRONG-PARENT",
+            "timestamp": "2026-05-04T09:00:00.000Z",
+            "message": {"role": "user", "content": "unrelated work"},
+        }) + "\n"
+    )
+
+    # RIGHT-PARENT: holds the actual callstack tool_use whose
+    # tool_result carries invoke_id i-wrong.
+    (proj / "RIGHT-PARENT.jsonl").write_text(
+        "\n".join(
+            json.dumps(r)
+            for r in [
+                {
+                    "type": "assistant",
+                    "uuid": "a1",
+                    "sessionId": "RIGHT-PARENT",
+                    "timestamp": "2026-05-04T10:00:01.000Z",
+                    "message": {
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "id": "tu-1",
+                                "name": "mcp__plugin_callstack_call__call",
+                                "input": {"task": "/inner"},
+                            }
+                        ],
+                    },
+                },
+                {
+                    "type": "user",
+                    "uuid": "u1",
+                    "sessionId": "RIGHT-PARENT",
+                    "timestamp": "2026-05-04T10:00:02.000Z",
+                    "message": {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": "tu-1",
+                                "content": '{"invoke_id": "i-wrong"}',
+                            }
+                        ],
+                    },
+                },
+            ]
+        )
+        + "\n"
+    )
+    (proj / "CHILD.jsonl").write_text(
+        json.dumps({
+            "uuid": "u",
+            "type": "user",
+            "sessionId": "CHILD",
+            "timestamp": "2026-05-04T10:00:02.000Z",
+            "message": {"role": "user", "content": "/inner"},
+        }) + "\n"
+    )
+
+    res = _make_resolver(proj, log)
+
+    assert res.for_parent("WRONG-PARENT") == []
+    right_spawns = res.for_parent("RIGHT-PARENT")
+    assert len(right_spawns) == 1
+    assert right_spawns[0].child_session_id == "CHILD"
+    assert right_spawns[0].invoke_id == "i-wrong"
+
+    root_w, _ = build_canvas_tree(proj, "RIGHT-PARENT", spawn_resolver=res)
+    assert [c.session_id for c in root_w.children] == ["CHILD"]
+
+
+def test_invoke_id_override_picks_non_descendant_candidate(
+    tmp_path: Path,
+):
+    """Regression: when the global invoke index has multiple candidate
+    sessions for one invoke_id (one is the real parent, another is a
+    forked child that re-emitted the same invoke_id), the override must
+    pick the candidate that isn't a descendant in the report.
+
+    Setup mirrors the carapace bug: report records ``parent_session:
+    WRONG`` (a real but irrelevant JSONL). Two other sessions surface
+    the invoke_id in their tool_results: REAL-PARENT (the actual
+    parent) and CHILD (the forked descendant that echoed the OUTER
+    invoke_id due to the callstack plugin bug). The spawn must end up
+    REAL-PARENT → CHILD, not CHILD → CHILD.
+    """
+    proj = tmp_path / "proj"
+    log = tmp_path / "log"
+
+    inv = log / "i-outer"
+    inv.mkdir(parents=True)
+    (inv / "report.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "invoke_id": "i-outer",
+                "parent_session": "WRONG",
+                "started_at": "2026-05-04T10:00:00+00:00",
+                "ended_at": "2026-05-04T10:00:30+00:00",
+                "status": "complete",
+                "tasks": [
+                    {
+                        "task": "/inner",
+                        "status": "complete",
+                        "depth": 1,
+                        "session_id": "CHILD",
+                    }
+                ],
+            }
+        )
+    )
+
+    proj.mkdir(parents=True, exist_ok=True)
+    # WRONG: empty JSONL (no callstack tool_use). Exists, so the legacy
+    # missing-JSONL heal path doesn't fire.
+    (proj / "WRONG.jsonl").write_text(
+        json.dumps({
+            "uuid": "u0",
+            "type": "user",
+            "sessionId": "WRONG",
+            "timestamp": "2026-05-04T09:00:00.000Z",
+            "message": {"role": "user", "content": "unrelated"},
+        }) + "\n"
+    )
+
+    def callstack_pair(sid: str, tu_id: str) -> list[dict]:
+        return [
+            {
+                "type": "assistant",
+                "uuid": f"a-{sid}",
+                "sessionId": sid,
+                "timestamp": "2026-05-04T10:00:01.000Z",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": tu_id,
+                            "name": "mcp__plugin_callstack_call__call",
+                            "input": {"task": "/inner"},
+                        }
+                    ],
+                },
+            },
+            {
+                "type": "user",
+                "uuid": f"u-{sid}",
+                "sessionId": sid,
+                "timestamp": "2026-05-04T10:00:02.000Z",
+                "message": {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": tu_id,
+                            "content": '{"invoke_id": "i-outer"}',
+                        }
+                    ],
+                },
+            },
+        ]
+
+    # REAL-PARENT: holds the original tool_use that produced i-outer.
+    _write_jsonl(proj / "REAL-PARENT.jsonl", callstack_pair("REAL-PARENT", "tu-real"))
+    # CHILD: also has a tool_use whose tool_result echoes the OUTER
+    # invoke_id (the callstack plugin bug). Must NOT be picked.
+    _write_jsonl(proj / "CHILD.jsonl", callstack_pair("CHILD", "tu-bogus"))
+
+    res = _make_resolver(proj, log)
+
+    # No spawns under WRONG or CHILD; the real parent owns it.
+    assert res.for_parent("WRONG") == []
+    real_spawns = res.for_parent("REAL-PARENT")
+    assert len(real_spawns) == 1
+    assert real_spawns[0].child_session_id == "CHILD"
+
+    # No session is its own direct child anywhere.
+    for parent, sps in res.spawns_by_parent().items():
+        for s in sps:
+            assert s.child_session_id != parent
+
+    root_w, _ = build_canvas_tree(proj, "REAL-PARENT", spawn_resolver=res)
+    assert [c.session_id for c in root_w.children] == ["CHILD"]
+
+
+def test_invoke_id_override_skipped_when_target_is_task_in_report(
+    tmp_path: Path,
+):
+    """Regression: the callstack plugin has been observed echoing the
+    OUTER invoke_id in tool_results for inner ``/call``s made by a
+    forked child. So ``compute_invoke_index_for_project`` can map the
+    OUTER invoke_id to the CHILD's JSONL (the one running the inner
+    calls), not the real parent.
+
+    Without a guard, the spawn would be re-keyed CHILD→CHILD (since
+    CHILD appears as a task in the report), creating a self-loop that
+    sends canvas tree ``to_dict`` into infinite recursion.
+
+    Setup mirrors the carapace case: report records parent=PARENT and
+    task=CHILD. CHILD's JSONL contains a callstack tool_use whose
+    tool_result surfaces the OUTER invoke_id (the plugin bug). The
+    spawn must stay PARENT→CHILD; we must not redirect to CHILD→CHILD.
+    """
+    proj = tmp_path / "proj"
+    log = tmp_path / "log"
+
+    inv = log / "i-outer"
+    inv.mkdir(parents=True)
+    (inv / "report.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "invoke_id": "i-outer",
+                "parent_session": "PARENT",
+                "started_at": "2026-05-04T10:00:00+00:00",
+                "ended_at": "2026-05-04T10:00:30+00:00",
+                "status": "complete",
+                "tasks": [
+                    {
+                        "task": "/inner",
+                        "status": "complete",
+                        "depth": 1,
+                        "session_id": "CHILD",
+                    }
+                ],
+            }
+        )
+    )
+
+    proj.mkdir(parents=True, exist_ok=True)
+    # PARENT: empty JSONL — exists so the legacy "missing JSONL" heal
+    # path doesn't fire either. The override must still be suppressed
+    # by the task-tree guard.
+    (proj / "PARENT.jsonl").write_text(
+        json.dumps({
+            "uuid": "u0",
+            "type": "user",
+            "sessionId": "PARENT",
+            "timestamp": "2026-05-04T09:00:00.000Z",
+            "message": {"role": "user", "content": "go"},
+        }) + "\n"
+    )
+    # CHILD: simulates the plugin bug — CHILD made its own inner /call
+    # and the tool_result echoes the OUTER invoke_id i-outer.
+    (proj / "CHILD.jsonl").write_text(
+        "\n".join(
+            json.dumps(r)
+            for r in [
+                {
+                    "type": "assistant",
+                    "uuid": "a1",
+                    "sessionId": "CHILD",
+                    "timestamp": "2026-05-04T10:00:05.000Z",
+                    "message": {
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "id": "tu-inner",
+                                "name": "mcp__plugin_callstack_call__call",
+                                "input": {"task": "/innermost"},
+                            }
+                        ],
+                    },
+                },
+                {
+                    "type": "user",
+                    "uuid": "u1",
+                    "sessionId": "CHILD",
+                    "timestamp": "2026-05-04T10:00:06.000Z",
+                    "message": {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": "tu-inner",
+                                "content": '{"invoke_id": "i-outer"}',
+                            }
+                        ],
+                    },
+                },
+            ]
+        )
+        + "\n"
+    )
+
+    res = _make_resolver(proj, log)
+
+    # Spawn must stay PARENT→CHILD (the recorded parent), not flip to
+    # the self-loop CHILD→CHILD that the global invoke index suggests.
+    parent_spawns = res.for_parent("PARENT")
+    assert len(parent_spawns) == 1
+    assert parent_spawns[0].child_session_id == "CHILD"
+
+    # Hard guarantee: no session is its own direct child.
+    for parent, sps in res.spawns_by_parent().items():
+        for s in sps:
+            assert s.child_session_id != parent, (
+                f"self-loop spawn {parent} → {s.child_session_id}"
+            )
+
+    # Canvas tree must build without recursion errors.
+    root_w, _ = build_canvas_tree(proj, "PARENT", spawn_resolver=res)
+    assert [c.session_id for c in root_w.children] == ["CHILD"]
+
+
+def test_report_with_valid_parent_session_and_no_tool_use_anchor_kept(
+    tmp_path: Path,
+):
     """Companion: when ``parent_session`` corresponds to a real JSONL
-    in the project, the healing pass must NOT touch it — even if the
-    invoke_id also appears via tool_use somewhere unexpected. Avoids
-    silently re-keying correctly-recorded reports based on stray
-    string matches in unrelated sessions."""
+    and no tool_use anchor for this invoke_id exists anywhere in the
+    project (e.g. Skill-style callsite that doesn't emit an MCP
+    tool_use), the recorded ``parent_session`` stands — there's
+    nothing to override it with."""
     proj = tmp_path / "proj"
     log = tmp_path / "log"
 
@@ -848,3 +1201,207 @@ def test_annotate_spawns_via_resolver_anchors_callstack_tool_use(tmp_path: Path)
     assert tu.spawn_kind == "call"
     assert tu.spawn_session_ids == ["CHILD-A"]
     assert tu.spawn_tasks == ["/task-a"]
+
+
+def test_healing_skips_fork_descendant_born_after_invoke(tmp_path: Path):
+    """Regression: a ``--fork-session`` descendant of the real parent
+    inherits its parent's full JSONL transcript, including the
+    ``invoke_id`` of any callstack /call the parent made BEFORE the
+    fork was born. The invoke index then lists the descendant as a
+    candidate alongside the real parent — and the heal step could
+    pick the descendant if it sorts first in discovery order. The
+    result is cross-thread contamination on the canvas: an unrelated
+    in-flight fork session appears to own a /call that completed long
+    before it existed.
+
+    Fix: filter candidates by JSONL birth_ts; only those alive when
+    the invoke started can be the real emitter.
+    """
+    import os
+    import time as _time
+
+    log = tmp_path / "log"
+    proj = tmp_path / "proj"
+    proj.mkdir()
+
+    # Use absolute UNIX timestamps so the test isn't sensitive to wall
+    # clock drift.
+    real_parent_birth = _time.time() - 7200  # 2 h ago
+    invoke_started = _time.time() - 3600     # 1 h ago
+    fork_descendant_birth = _time.time() - 60  # 1 min ago
+
+    from datetime import datetime, timezone
+    invoke_iso = datetime.fromtimestamp(invoke_started, tz=timezone.utc).isoformat()
+    ended_iso = datetime.fromtimestamp(invoke_started + 30, tz=timezone.utc).isoformat()
+
+    inv = log / "i-shared"
+    inv.mkdir(parents=True)
+    (inv / "report.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "invoke_id": "i-shared",
+                # Recorded parent is bogus (callstack runtime drift):
+                # no JSONL exists for it.
+                "parent_session": "GHOST",
+                "started_at": invoke_iso,
+                "ended_at": ended_iso,
+                "status": "complete",
+                "tasks": [
+                    {
+                        "task": "/inner",
+                        "status": "complete",
+                        "depth": 1,
+                        "session_id": "CHILD",
+                    }
+                ],
+            }
+        )
+    )
+
+    def _make_session_with_invoke(sid: str, birth_ts: float) -> None:
+        path = proj / f"{sid}.jsonl"
+        path.write_text(
+            "\n".join(
+                json.dumps(r)
+                for r in [
+                    {
+                        "type": "assistant",
+                        "uuid": f"{sid}-a",
+                        "sessionId": sid,
+                        "timestamp": invoke_iso,
+                        "message": {
+                            "role": "assistant",
+                            "content": [
+                                {
+                                    "type": "tool_use",
+                                    "id": f"tu-{sid}",
+                                    "name": "mcp__plugin_callstack_call__call",
+                                    "input": {"task": "/inner"},
+                                }
+                            ],
+                        },
+                    },
+                    {
+                        "type": "user",
+                        "uuid": f"{sid}-u",
+                        "sessionId": sid,
+                        "timestamp": invoke_iso,
+                        "message": {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "tool_result",
+                                    "tool_use_id": f"tu-{sid}",
+                                    "content": '{"invoke_id": "i-shared"}',
+                                }
+                            ],
+                        },
+                    },
+                ]
+            )
+            + "\n"
+        )
+        os.utime(path, (birth_ts, birth_ts))
+
+    # Real parent: alive before the invoke fired.
+    _make_session_with_invoke("REAL", real_parent_birth)
+    # Fork descendant: born long after the invoke fired; only carries
+    # the invoke_id because --fork-session copied the parent transcript.
+    _make_session_with_invoke("DESCENDANT", fork_descendant_birth)
+
+    (proj / "CHILD.jsonl").write_text(
+        json.dumps(
+            {
+                "uuid": "u",
+                "type": "user",
+                "sessionId": "CHILD",
+                "timestamp": invoke_iso,
+                "message": {"role": "user", "content": "/inner"},
+            }
+        )
+        + "\n"
+    )
+
+    res = _make_resolver(proj, log)
+
+    # The spawn must be attributed to REAL, not DESCENDANT, regardless
+    # of which sorts first in the invoke index.
+    real_spawns = res.for_parent("REAL")
+    desc_spawns = res.for_parent("DESCENDANT")
+    assert len(real_spawns) == 1
+    assert real_spawns[0].child_session_id == "CHILD"
+    assert desc_spawns == []
+    # Ghost recorded parent gets no spawn either.
+    assert res.for_parent("GHOST") == []
+
+
+def test_scan_session_has_returned_flag(tmp_path: Path):
+    """``SessionScan.has_returned`` is True iff the last callstack
+    envelope in the JSONL is a ``{"op":"return"}``. Used to override a
+    stale ``running`` task status in ``report.yaml`` (Bug 1)."""
+    from unwind.canvas_tree import scan_session
+
+    proj = tmp_path / "proj"
+    proj.mkdir()
+
+    def _assistant_text_rec(text: str, ts: str = "2026-05-04T10:00:00.000Z") -> dict:
+        return {
+            "type": "assistant",
+            "uuid": "a",
+            "sessionId": "S",
+            "timestamp": ts,
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": text}],
+            },
+        }
+
+    # Case A: last envelope is a return.
+    path_a = proj / "A.jsonl"
+    _write_jsonl(
+        path_a,
+        [_assistant_text_rec('```json\n{"op": "return", "result": "ok"}\n```')],
+    )
+    assert scan_session(path_a).has_returned is True
+
+    # Case B: return followed by a fresh user reply — no longer returned.
+    path_b = proj / "B.jsonl"
+    _write_jsonl(
+        path_b,
+        [
+            _assistant_text_rec(
+                '```json\n{"op": "return", "result": "ok"}\n```',
+                "2026-05-04T10:00:00.000Z",
+            ),
+            {
+                "type": "user",
+                "uuid": "u2",
+                "sessionId": "S",
+                "timestamp": "2026-05-04T10:00:05.000Z",
+                "message": {"role": "user", "content": "go again"},
+            },
+        ],
+    )
+    assert scan_session(path_b).has_returned is False
+
+    # Case C: never returned.
+    path_c = proj / "C.jsonl"
+    _write_jsonl(path_c, [_assistant_text_rec("nothing here")])
+    assert scan_session(path_c).has_returned is False
+
+    # Case D: return then yield — yield wins (last envelope).
+    path_d = proj / "D.jsonl"
+    _write_jsonl(
+        path_d,
+        [
+            _assistant_text_rec(
+                '```json\n{"op": "return", "result": "ok"}\n```',
+                "2026-05-04T10:00:00.000Z",
+            ),
+            _assistant_text_rec(
+                '```json\n{"op": "yield", "question": "?"}\n```',
+                "2026-05-04T10:00:05.000Z",
+            ),
+        ],
+    )
+    assert scan_session(path_d).has_returned is False

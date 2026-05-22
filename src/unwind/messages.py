@@ -91,9 +91,26 @@ def base_uuid(message_uuid: str) -> str:
     return message_uuid
 
 
+from .spawns import (  # noqa: E402
+    CALLSTACK_TOOL_NAMES,
+    SUBAGENT_TOOL_NAMES,
+    Spawn,
+    SpawnResolver,
+)
 
 
-from .spawns import Spawn, SpawnResolver  # noqa: E402
+def _spawn_kind_for_tool(name: Optional[str]) -> Optional[str]:
+    """Classify a tool_use by its tool name. Returns ``"call"`` for
+    callstack /call MCP tools, ``"subagent"`` for Agent/Task, ``None``
+    otherwise. Pure name lookup — no resolution needed, so it's safe
+    to populate at parse time."""
+    if not name:
+        return None
+    if name in CALLSTACK_TOOL_NAMES:
+        return "call"
+    if name in SUBAGENT_TOOL_NAMES:
+        return "subagent"
+    return None
 
 
 def annotate_spawns(
@@ -396,15 +413,22 @@ def _normalize_assistant(
                     )
                 )
             elif btype == "tool_use":
+                tname = block.get("name")
                 out.append(
                     Message(
                         uuid=f"{uuid}:{order}", session_id=session_id,
                         role="tool_use", timestamp=ts,
-                        tool_name=block.get("name"),
+                        tool_name=tname,
                         tool_input=block.get("input"),
                         tool_use_id=block.get("id"),
                         model=model, raw_type="tool_use",
                         order_within_line=order,
+                        # Eager classification by tool name so the UI can
+                        # render the spawn row immediately. ``annotate_spawns``
+                        # later fills in ``spawn_session_ids`` etc. once the
+                        # resolver has matched the tool_use to a report; the
+                        # ``kind`` itself never depends on resolution.
+                        spawn_kind=_spawn_kind_for_tool(tname),
                     )
                 )
             order += 1

@@ -164,6 +164,15 @@ class ForkDetector:
         with self._lock:
             return self._divergence_text.get(session_id)
 
+    def birth_ts(self, session_id: str) -> Optional[float]:
+        """Return the JSONL birth timestamp for ``session_id``, or ``None``
+        if we have no probe for it. Backed by the per-project probe cache
+        (one ``os.stat`` per session across the project's lifetime)."""
+        self._refresh()
+        with self._lock:
+            probe = self._probes.get(session_id)
+            return probe.birth_ts if probe is not None else None
+
     def find_session_by_divergence_text(
         self, root_session_id: str, task: str
     ) -> Optional[str]:

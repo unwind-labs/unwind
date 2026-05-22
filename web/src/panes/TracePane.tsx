@@ -27,7 +27,6 @@ import { Badge } from "@/components/ui/badge";
 import { cn, shortId } from "@/lib/utils";
 import { isTypingTarget } from "@/lib/keyboard";
 
-
 /** Strip dangerous link schemes from markdown content.
  *
  *  Trace messages can contain arbitrary user-provided text, including

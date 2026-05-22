@@ -42,6 +42,16 @@ def _rs_resolver(rs: RequestState, slug: str):
     return rs.memoize(("resolver", slug), lambda: spawn_resolver_for_slug(slug))
 
 
+def _rs_builder(rs: Optional[RequestState], slug: str):
+    """Request-scoped CanvasTreeBuilder. ``rs is None`` falls through to
+    an uncached lookup so non-request callers (tests, scripts) still work."""
+    if rs is None:
+        return canvas_tree_builder_for_slug(slug)
+    return rs.memoize(
+        ("canvas_builder", slug), lambda: canvas_tree_builder_for_slug(slug)
+    )
+
+
 def _rs_active_session(rs: RequestState, slug: str, index, project_path):
     return rs.memoize(
         ("active_session", slug),
@@ -225,6 +235,24 @@ def _active_session_for_project(
     return most_recent.session_id
 
 
+def _fork_task_still_running(ci, builder, sid: str) -> bool:
+    """True iff ``sid`` is a callstack fork-task whose callstack status
+    is ``running``/``in_progress`` AND whose JSONL doesn't yet end in a
+    RETURN envelope.
+
+    The JSONL check guards against stale ``running`` entries in
+    ``report.yaml``: the callstack runtime sometimes fails to update the
+    report after the child returns, leaving the task perpetually marked
+    as running. The child's JSONL tail is the corrective signal.
+    """
+    if not ci.has_logs or not ci.is_callstack_task(sid):
+        return False
+    cs = ci.aggregate_status_for_session(sid)
+    if not cs or cs.lower() not in ("running", "in_progress"):
+        return False
+    return not builder.get_scan(sid).has_returned
+
+
 def _compute_session_status(
     index,
     ci,
@@ -254,9 +282,8 @@ def _compute_session_status(
     if is_fork:
         if cs_norm == "yielded":
             return "yield"
-        if cs_norm in ("running", "in_progress"):
-            return "live"
-        return "done"
+        builder = _rs_builder(rs, slug)
+        return "live" if _fork_task_still_running(ci, builder, session_id) else "done"
 
     # Non-fork "main" session: alive only if it's THE active session
     # for this project. ``last_epoch`` is the timestamp from the last
@@ -277,11 +304,7 @@ def _compute_session_status(
     # instead of re-walking the JSONL: the at-user-prompt state machine
     # is identical, and sharing the cache means /sessions and /canvas
     # pay the scan once between them.
-    builder = (
-        rs.memoize(("canvas_builder", slug), lambda: canvas_tree_builder_for_slug(slug))
-        if rs is not None
-        else canvas_tree_builder_for_slug(slug)
-    )
+    builder = _rs_builder(rs, slug)
     if builder.get_scan(session_id).at_user_prompt:
         return "yield"
     return "live"
@@ -495,10 +518,9 @@ def get_canvas_tree(
     if if_none_match == etag:
         return Response(status_code=304, headers={"ETag": etag})
 
-    builder = rs.memoize(
-        ("canvas_builder", slug), lambda: canvas_tree_builder_for_slug(slug)
-    )
+    builder = _rs_builder(rs, slug)
     resolver = _rs_resolver(rs, slug)
+    ci = _rs_callstack(rs, slug)
     summaries = {s.session_id: s for s in index.list_sessions()}
 
     # Compute the project's active session once per request; the
@@ -509,7 +531,13 @@ def get_canvas_tree(
     active_session_id = _rs_active_session(rs, slug, index, project_path)
 
     def is_live(sid: str) -> bool:
-        return sid == active_session_id
+        # The project's active main session is always live. Fork-tasks
+        # are never the active session (the parent is), so they need
+        # their own "still running" check — shared with
+        # ``_compute_session_status`` so the two surfaces agree.
+        return sid == active_session_id or _fork_task_still_running(
+            ci, builder, sid
+        )
 
     def title_for(sid: str) -> Optional[str]:
         s = summaries.get(sid)

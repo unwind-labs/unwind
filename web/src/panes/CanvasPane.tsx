@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ReactFlow, {
   Background,
   BackgroundVariant,
+  ControlButton,
   Controls,
   type Edge,
   type Node,
@@ -10,7 +11,8 @@ import ReactFlow, {
   useReactFlow,
 } from "reactflow";
 import "reactflow/dist/style.css";
-import { X } from "lucide-react";
+import { Download, X } from "lucide-react";
+import { exportCanvasPng } from "@/panes/canvas-export";
 import { useUi } from "@/store/ui";
 import { isTypingTarget } from "@/lib/keyboard";
 import { navigate } from "@/lib/url-sync";
@@ -293,6 +295,11 @@ function CanvasInner({
 
   const reactFlow = useReactFlow();
 
+  const handleExportPng = useCallback(
+    () => exportCanvasPng(reactFlow, rootSessionId),
+    [reactFlow, rootSessionId],
+  );
+
   // Pan + zoom helper, extracted so both the keydown handler and the
   // auto-focus effect (below) can reuse it.
   const FOCUS_ZOOM = 1;
@@ -484,7 +491,11 @@ function CanvasInner({
         }}
       >
         <Background variant={BackgroundVariant.Dots} gap={18} size={1} />
-        <Controls showInteractive={false} />
+        <Controls showInteractive={false}>
+          <ControlButton onClick={handleExportPng} title="Export canvas as PNG">
+            <Download />
+          </ControlButton>
+        </Controls>
         <AutoFit
           rootSessionId={rootSessionId}
           nodeCount={nodes.length}
@@ -739,6 +750,10 @@ function treeToReactFlow(args: {
           window_id: c.window_id,
           session_id: c.session_id,
         })),
+        selfUsage: w.self_usage,
+        subtreeUsage: w.subtree_usage,
+        subtreeCost: w.subtree_cost,
+        hasCanvasDescendants: (childrenByParent[w.window_id]?.length ?? 0) > 0,
       };
       return {
         id: w.window_id,

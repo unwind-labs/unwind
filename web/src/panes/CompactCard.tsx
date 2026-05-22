@@ -14,8 +14,10 @@ import {
 import { useMessages } from "@/api/client";
 import { cn, shortId } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
+import type { TokenCost, TokenUsage } from "@/api/types";
 import { filterExtrasByWindow, filterMessagesByWindow } from "./instances";
 import { deriveRows, type Row } from "./derive-rows";
+import { UsageFooter } from "./UsageFooter";
 
 export { deriveRows } from "./derive-rows";
 
@@ -25,12 +27,20 @@ const ACTIVITY_HEIGHT = 28;
 const SPAWN_HEIGHT = 36;
 const HEADER_HEIGHT = 40;
 const PADDING_Y = 8;
+const FOOTER_HEIGHT_LEAF = 26;
+const FOOTER_HEIGHT_BRANCH = 46;
 
-export function estimateCardHeight(rows: Row[]): number {
+export function estimateCardHeight(
+  rows: Row[],
+  opts?: { hasChildren?: boolean; hasUsage?: boolean },
+): number {
   let h = HEADER_HEIGHT + PADDING_Y * 2;
   for (const r of rows) {
     h += r.kind === "spawn" ? SPAWN_HEIGHT : ACTIVITY_HEIGHT;
     h += 4; // gap
+  }
+  if (opts?.hasUsage) {
+    h += opts.hasChildren ? FOOTER_HEIGHT_BRANCH : FOOTER_HEIGHT_LEAF;
   }
   return Math.max(h, HEADER_HEIGHT + PADDING_Y * 2);
 }
@@ -87,6 +97,22 @@ export type CompactCardData = {
    *  child isn't on the canvas yet — the row click then falls through
    *  to the default card click (open detail). */
   onFocusChild?: (windowId: string) => void;
+  /** Tokens spent inside this window alone. Drives the footer row. */
+  selfUsage: TokenUsage;
+  /** Cumulative tokens for this window + descendants. Renders as the
+   *  second footer row on intermediate nodes; collapsed for leaves
+   *  (which have no children, so it equals ``selfUsage``). */
+  subtreeUsage: TokenUsage;
+  /** Cumulative USD cost for this window + descendants. Only rendered
+   *  on the root card (as a third footer row with per-category $ values
+   *  and a grand total). Always present so future cards can opt in
+   *  without a new field. */
+  subtreeCost: TokenCost;
+  /** True iff this card has descendant cards on the canvas. Drives the
+   *  2-row vs 1-row footer layout. Computed at canvas-tree build time
+   *  rather than from ``canvasChildren`` so it stays stable even while
+   *  child sessions are still resolving. */
+  hasCanvasDescendants: boolean;
 };
 
 export function CompactCardNode({ data }: { data: CompactCardData }) {
@@ -374,6 +400,13 @@ export function CompactCardNode({ data }: { data: CompactCardData }) {
           )}
           {selfStatus === "yield" && <TerminatorRow kind="yield" />}
         </ul>
+        <UsageFooter
+          self={data.selfUsage}
+          subtree={data.subtreeUsage}
+          subtreeCost={data.subtreeCost}
+          showSubtree={data.hasCanvasDescendants}
+          showCost={data.isRoot}
+        />
       </div>
     </div>
   );

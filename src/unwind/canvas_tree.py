@@ -24,19 +24,56 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, NamedTuple, Optional
 
 from ._cache import PathCache
 from .jsonl import (
     EPOCH,
+    RETURN_RE as _RETURN_RE,
     YIELD_RE as _YIELD_RE,
     extract_assistant_text as _extract_assistant_text,
     iter_lines,
     parse_ts as _parse_ts,
 )
+from .pricing import cost_usd as _cost_usd
 
 
 # --- Data classes -------------------------------------------------------
+
+
+_TOKEN_KEYS = ("cw", "cr", "r", "w")
+
+
+def _zero_tokens() -> dict[str, int]:
+    """Empty integer-token counters keyed by ``cw/cr/r/w``."""
+    return {k: 0 for k in _TOKEN_KEYS}
+
+
+def _zero_costs() -> dict[str, float]:
+    """Empty float-USD counters keyed by ``cw/cr/r/w``."""
+    return {k: 0.0 for k in _TOKEN_KEYS}
+
+
+def _add_into(dst: dict[str, Any], src: dict[str, Any]) -> None:
+    """``dst[k] += src[k]`` for every ``cw/cr/r/w`` key. Used to fold
+    one window's counters into a subtree aggregate."""
+    for k in _TOKEN_KEYS:
+        dst[k] += src[k]
+
+
+class UsageEvent(NamedTuple):
+    """One assistant turn's ``message.usage`` counters + the model that
+    produced them. Fields mirror Anthropic's wire format:
+    ``cw=cache_creation_input_tokens``, ``cr=cache_read_input_tokens``,
+    ``r=input_tokens``, ``w=output_tokens``.
+    """
+
+    ts: Optional[datetime]
+    model: Optional[str]
+    cw: int
+    cr: int
+    r: int
+    w: int
 
 
 @dataclass
@@ -57,6 +94,19 @@ class SessionScan:
     # don't catch (and that ``away_summary`` recaps incorrectly
     # implied).
     at_user_prompt: bool = False
+    # True iff the LAST callstack envelope seen in an assistant message
+    # was a ``{"op":"return"}``. Used to override a stale callstack
+    # ``report.yaml`` status of ``running`` for a child whose JSONL
+    # shows it already returned (the runtime sometimes fails to update
+    # the report). Earlier returns followed by a later yield/run flip
+    # this back to False — the LAST envelope is the terminal state.
+    has_returned: bool = False
+    # Per-assistant-message token usage events. ``model`` is the
+    # assistant message's ``message.model`` string, kept per-event so
+    # cost can be priced at the rate of whichever model that specific
+    # turn ran against (and so the attribution pass doesn't need a
+    # separate cost array shadowing this one).
+    usage_events: list["UsageEvent"] = field(default_factory=list)
 
 
 @dataclass
@@ -89,6 +139,14 @@ class WindowNode:
     # Index of this window within its session (0-based, chronological).
     # Useful for the frontend to label "1st", "2nd" instances cleanly.
     window_index: int = 0
+    # Token + USD counters keyed by ``cw/cr/r/w`` (see UsageEvent).
+    # ``self_*`` is this window's own ``message.usage`` events; ``subtree_*``
+    # adds every descendant. The root card renders a third $ footer row
+    # from ``subtree_cost``; leaves skip the subtree row (it equals self).
+    self_usage: dict[str, int] = field(default_factory=_zero_tokens)
+    subtree_usage: dict[str, int] = field(default_factory=_zero_tokens)
+    self_cost: dict[str, float] = field(default_factory=_zero_costs)
+    subtree_cost: dict[str, float] = field(default_factory=_zero_costs)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -103,6 +161,10 @@ class WindowNode:
             "kind": self.kind,
             "parent_window_id": self.parent_window_id,
             "window_index": self.window_index,
+            "self_usage": self.self_usage,
+            "subtree_usage": self.subtree_usage,
+            "self_cost": self.self_cost,
+            "subtree_cost": self.subtree_cost,
             "children": [c.to_dict() for c in self.children],
         }
 
@@ -124,7 +186,14 @@ def scan_session(path: Path) -> SessionScan:
         mtime=st.st_mtime,
         size=st.st_size,
     )
+    # Two derived flags driven by the same stream:
+    #   at_user_prompt: last meaningful event = yield envelope OR stop_hook
+    #   has_returned:   last assistant envelope = return
+    # Both reset together on any "real" event (assistant turn without an
+    # envelope, real user reply). Tool_result user records and unrelated
+    # system subtypes don't count as events — they leave state alone.
     at_user_prompt = False
+    has_returned = False
     for rec in iter_lines(path):
         ts = _parse_ts(rec.get("timestamp"))
         if ts is not None:
@@ -133,30 +202,40 @@ def scan_session(path: Path) -> SessionScan:
             scan.end_ts = ts
         rtype = rec.get("type")
         if rtype == "assistant":
+            msg = rec.get("message")
+            if isinstance(msg, dict):
+                u = msg.get("usage")
+                if isinstance(u, dict):
+                    cw = int(u.get("cache_creation_input_tokens") or 0)
+                    cr = int(u.get("cache_read_input_tokens") or 0)
+                    r_in = int(u.get("input_tokens") or 0)
+                    w_out = int(u.get("output_tokens") or 0)
+                    if cw or cr or r_in or w_out:
+                        m = msg.get("model")
+                        model = m if isinstance(m, str) else None
+                        scan.usage_events.append(
+                            UsageEvent(ts, model, cw, cr, r_in, w_out)
+                        )
             text = _extract_assistant_text(rec)
             if text and _YIELD_RE.search(text):
-                # Yield envelope: Claude paused for input. Mirrors the
-                # stop_hook_summary case below — both mean the same
-                # thing for ``at_user_prompt``.
                 if ts is not None:
                     scan.yields.append(ts)
-                at_user_prompt = True
+                at_user_prompt, has_returned = True, False
+            elif text and _RETURN_RE.search(text):
+                at_user_prompt, has_returned = False, True
             else:
-                at_user_prompt = False
-        elif rtype == "user":
-            # Tool results are recorded as ``type: user`` with content
-            # blocks of type ``tool_result``; those don't reset the
-            # waiting state (Claude is processing the tool response).
-            # Only an actual user reply (text content) does.
-            if not _is_tool_result_record(rec):
-                at_user_prompt = False
-        elif rtype == "system":
-            sub = rec.get("subtype")
-            if sub == "stop_hook_summary":
-                # Claude wrapped up its turn. Until a user record
-                # arrives, the session is waiting for input.
-                at_user_prompt = True
+                at_user_prompt, has_returned = False, False
+        elif rtype == "user" and not _is_tool_result_record(rec):
+            # Tool results leave state alone (mid-turn tool processing);
+            # real user replies reset both flags.
+            at_user_prompt, has_returned = False, False
+        elif rtype == "system" and rec.get("subtype") == "stop_hook_summary":
+            # End-of-turn marker. Sets at_user_prompt but doesn't touch
+            # has_returned — a stop hook after a return envelope mustn't
+            # un-flag the return.
+            at_user_prompt = True
     scan.at_user_prompt = at_user_prompt
+    scan.has_returned = has_returned
     return scan
 
 
@@ -348,6 +427,46 @@ def _compute_windows(
     return out
 
 
+def _attribute_self_usage(
+    windows: list[WindowNode],
+    usage_events: list[UsageEvent],
+) -> None:
+    """Sum each per-record event into the window whose
+    ``[window_start, window_end)`` contains ``ts``, and price it at the
+    rate of the recording model.
+
+    Events with no timestamp attribute to the first window (same rule
+    ``_find_window_for_ts`` uses for ``ts is None``); events past the
+    last window's end attribute to the last window so late bookkeeping
+    still gets counted somewhere.
+    """
+    if not windows or not usage_events:
+        return
+    for ev in usage_events:
+        w = _find_window_for_ts(windows, ev.ts)
+        if w is None:
+            continue
+        _add_into(w.self_usage, ev._asdict())
+        _add_into(w.self_cost, _cost_usd(ev.model, ev.cw, ev.cr, ev.r, ev.w))
+
+
+def _aggregate_subtree_usage(node: WindowNode) -> tuple[dict[str, int], dict[str, float]]:
+    """Post-order walk: each parent's ``subtree_*`` = its own ``self_*``
+    plus every descendant's. Children are visited before the parent so
+    leaves are settled first and the totals bubble up toward the root.
+    Returns ``(subtree_usage, subtree_cost)``.
+    """
+    usage = dict(node.self_usage)
+    cost = dict(node.self_cost)
+    for child in node.children:
+        c_usage, c_cost = _aggregate_subtree_usage(child)
+        _add_into(usage, c_usage)
+        _add_into(cost, c_cost)
+    node.subtree_usage = usage
+    node.subtree_cost = cost
+    return usage, cost
+
+
 def _find_window_for_ts(
     windows: list[WindowNode], ts: Optional[datetime]
 ) -> Optional[WindowNode]:
@@ -447,13 +566,15 @@ def build_canvas_tree(
         invs = invocations_by_target.get(sid, [])
         is_root = sid == root_session_id
         title = title_for(sid) or _short_session_label(sid)
-        windows_by_session[sid] = _compute_windows(
+        ws = _compute_windows(
             scan,
             invs,
             is_root=is_root,
             is_live=is_live_session(sid),
             title=title,
         )
+        _attribute_self_usage(ws, scan.usage_events)
+        windows_by_session[sid] = ws
 
     # Wire parent → child edges by matching the K-th invocation of a
     # target to the K-th window of that target.
@@ -541,8 +662,13 @@ def build_canvas_tree(
             window_index=0,
         )
         all_windows.append(root)
+        _aggregate_subtree_usage(root)
         return root, all_windows
-    return root_windows[0], all_windows
+    root = root_windows[0]
+    # Post-order subtree token totals — must run AFTER children are wired
+    # in above so the recursion sees the full descendant set.
+    _aggregate_subtree_usage(root)
+    return root, all_windows
 
 
 def _short_session_label(sid: str) -> str:

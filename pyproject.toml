@@ -21,6 +21,7 @@ classifiers = [
 ]
 dependencies = [
     "fastapi>=0.115",
+    "python-multipart>=0.0.20",
     "uvicorn[standard]>=0.30",
     "watchdog>=4.0",
     "pydantic>=2.7",

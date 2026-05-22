@@ -31,10 +31,10 @@ _fork_detectors: dict[str, ForkDetector] = {}
 _subagents: dict[str, SubagentIndex] = {}
 _canvas_builders: dict[str, CanvasTreeBuilder] = {}
 _slug_to_source: dict[str, Path] = {}
-# (signature, invoke_id → parent_session_id) per slug. The signature is the
-# (mtime, size) summary of every JSONL in the project dir; rebuilds when
-# anything moves.
-_invoke_indexes: dict[str, tuple[tuple, dict[str, str]]] = {}
+# (signature, invoke_id → [candidate_session_id, ...]) per slug. The
+# signature is the (mtime, size) summary of every JSONL in the project
+# dir; rebuilds when anything moves.
+_invoke_indexes: dict[str, tuple[tuple, dict[str, list[str]]]] = {}
 
 # All per-slug auxiliary caches (everything except _indices, which has its own
 # synthetic-slug upgrade logic). Listed once so forget/upgrade stay in sync
@@ -227,12 +227,15 @@ def project_state_signature(slug: str) -> tuple:
     )
 
 
-def invoke_index_for_slug(slug: str, project_dir: Path) -> dict[str, str]:
-    """Return the slug-level ``invoke_id → parent_session_id`` map.
+def invoke_index_for_slug(slug: str, project_dir: Path) -> dict[str, list[str]]:
+    """Return the slug-level ``invoke_id → [candidate_session_id, ...]`` map.
 
     Computed by scanning every project JSONL for callstack tool_use →
-    tool_result envelopes. Cached at the registry; rebuilds when any
-    JSONL's (mtime, size) changes.
+    tool_result envelopes. Multiple sessions can carry the same
+    invoke_id (callstack plugin echoes the OUTER invoke_id in inner
+    ``/call`` tool_results from forked children); consumers pick the
+    right candidate with extra context. Cached at the registry;
+    rebuilds when any JSONL's (mtime, size) changes.
     """
     from .spawns import compute_invoke_index_for_project
 

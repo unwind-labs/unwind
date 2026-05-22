@@ -54,7 +54,7 @@ def test_invoke_index_cached_across_calls(tmp_path, monkeypatch):
     calls: list[Path] = []
     real = spawns.compute_invoke_index_for_project
 
-    def spy(p: Path) -> dict[str, str]:
+    def spy(p: Path) -> dict[str, list[str]]:
         calls.append(p)
         return real(p)
 
@@ -68,7 +68,7 @@ def test_invoke_index_cached_across_calls(tmp_path, monkeypatch):
     first = registry.invoke_index_for_slug(slug, proj_dir)
     second = registry.invoke_index_for_slug(slug, proj_dir)
 
-    assert first == second == {"INV-A": "11111111-1111-1111-1111-111111111111"}
+    assert first == second == {"INV-A": ["11111111-1111-1111-1111-111111111111"]}
     assert len(calls) == 1, "second call must hit the cache"
 
 
@@ -80,15 +80,15 @@ def test_invoke_index_invalidates_when_jsonl_changes(tmp_path, monkeypatch):
     registry.forget_slug(slug)
 
     first = registry.invoke_index_for_slug(slug, proj_dir)
-    assert first == {"INV-A": "22222222-2222-2222-2222-222222222222"}
+    assert first == {"INV-A": ["22222222-2222-2222-2222-222222222222"]}
 
     # Add a second session with a new invoke_id.
     _write_session_with_callstack(proj_dir, "33333333-3333-3333-3333-333333333333", "INV-B")
     # bump mtime / size so signature differs (writes already do this).
     second = registry.invoke_index_for_slug(slug, proj_dir)
     assert second == {
-        "INV-A": "22222222-2222-2222-2222-222222222222",
-        "INV-B": "33333333-3333-3333-3333-333333333333",
+        "INV-A": ["22222222-2222-2222-2222-222222222222"],
+        "INV-B": ["33333333-3333-3333-3333-333333333333"],
     }
 
 
@@ -103,7 +103,7 @@ def test_resolver_uses_injected_index_no_rescan(tmp_path, monkeypatch):
     calls: list[Path] = []
     real = spawns.compute_invoke_index_for_project
 
-    def spy(p: Path) -> dict[str, str]:
+    def spy(p: Path) -> dict[str, list[str]]:
         calls.append(p)
         return real(p)
 

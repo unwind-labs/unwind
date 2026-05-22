@@ -64,15 +64,23 @@ _AGENT_ID_RE = re.compile(r"agentId:\s*([0-9a-f]{8,})")
 _INVOKE_ID_RE = re.compile(
     r'\\?"invoke_id\\?"\s*:\s*\\?"([0-9A-Za-z._-]+)\\?"'
 )
-def compute_invoke_index_for_project(project_dir: Path) -> dict[str, str]:
+def compute_invoke_index_for_project(
+    project_dir: Path,
+) -> dict[str, list[str]]:
     """Scan every JSONL in ``project_dir`` for callstack tool_use/tool_result
-    envelopes and return an ``invoke_id → parent_session_id`` map.
+    envelopes and return an ``invoke_id → [candidate_session_id, ...]`` map.
 
-    First-wins on collision (invoke_ids are timestamp+random; collision is
-    essentially impossible). Safe to call repeatedly — the registry caches
-    the result by directory state.
+    Multiple sessions can surface the same invoke_id in their JSONLs: the
+    callstack plugin has been observed echoing the OUTER invoke_id in
+    tool_results for inner ``/call``s made by a forked child. So a single
+    invoke_id can appear with valid tool_use+tool_result pairs in both the
+    real parent's JSONL and one or more child JSONLs. Returning every
+    candidate (deduped, in discovery order) lets the consumer pick the
+    right one with extra context — typically by filtering out sessions
+    that themselves appear as a task in the matching report. Safe to call
+    repeatedly — the registry caches the result by directory state.
     """
-    out: dict[str, str] = {}
+    out: dict[str, list[str]] = {}
     if not project_dir.is_dir():
         return out
     for entry in project_jsonl_listing(project_dir):
@@ -109,8 +117,9 @@ def compute_invoke_index_for_project(project_dir: Path) -> dict[str, str]:
                     m = _INVOKE_ID_RE.search(result_text)
                     if m:
                         invoke_id = m.group(1)
-                        if invoke_id not in out:
-                            out[invoke_id] = parent_sid
+                        candidates = out.setdefault(invoke_id, [])
+                        if parent_sid not in candidates:
+                            candidates.append(parent_sid)
     return out
 
 
@@ -155,16 +164,17 @@ class SpawnResolver:
         subagents: SubagentIndex,
         *,
         project_dir: Path,
-        invoke_index: Optional[dict[str, str]] = None,
+        invoke_index: Optional[dict[str, list[str]]] = None,
     ) -> None:
         self._cs = callstack
         self._fd = forks
         self._sa = subagents
         self._project_dir = project_dir
         self._cached: Optional[dict[str, list[Spawn]]] = None
-        # Pre-computed invoke_id → parent_session_id. When provided (by
-        # registry.spawn_resolver_for_slug), we skip the per-request full-
-        # project JSONL scan in _invoke_id_to_parent_session.
+        # Pre-computed invoke_id → [candidate_session_id, ...]. When
+        # provided (by registry.spawn_resolver_for_slug), we skip the
+        # per-request full-project JSONL scan in
+        # _invoke_id_to_parent_session.
         if invoke_index is not None:
             self._invoke_index_cache = invoke_index
 
@@ -195,26 +205,35 @@ class SpawnResolver:
 
         # 1. Callstack reports. Walk every report's task tree once.
         #
-        # A ``report.yaml`` records ``parent_session`` at the time the
-        # callstack runtime wrote it; we've seen runtimes record stale
-        # session ids from unrelated projects when callstack state from a
-        # prior run leaked across cwd boundaries. The tool_use → invoke_id
-        # binding in the actual parent JSONL is authoritative: if a
-        # session has a callstack tool_use whose tool_result carries
-        # invoke_id X, THAT session invoked X — regardless of what
-        # ``report.parent_session`` claims. Only override when the
-        # recorded parent has no JSONL in this project (the common
-        # symptom of a stale/wrong parent_session); leave correctly
-        # recorded reports alone.
+        # ``report.yaml`` records ``parent_session`` at write time; the
+        # callstack runtime has been observed recording stale ids (state
+        # leak across cwd boundaries; unrelated sibling sessions in the
+        # same project). The tool_use → invoke_id binding in JSONLs is
+        # the corrective signal — the JSONL whose tool_use produced
+        # invoke X is the real emitter of X.
+        #
+        # The invoke index returns MULTIPLE candidates per invoke_id
+        # because ``--fork-session`` copies the parent's transcript
+        # (including its callstack tool_uses) into the child's JSONL.
+        # We trust the recorded ``parent_session`` whenever it's a
+        # corroborated candidate; otherwise we delegate to
+        # ``_pick_parent_candidate`` to heal.
         invoke_to_real_parent = self._invoke_id_to_parent_session()
         callstack_pairs: set[tuple[str, str]] = set()
         for rep in self._cs.all_reports():
             parent_sid = rep.parent_session
-            if (
-                not (self._project_dir / f"{parent_sid}.jsonl").is_file()
-                and rep.invoke_id in invoke_to_real_parent
-            ):
-                parent_sid = invoke_to_real_parent[rep.invoke_id]
+            candidates = invoke_to_real_parent.get(rep.invoke_id, [])
+            if candidates:
+                task_sids = _task_session_ids(rep.tasks)
+                corroborated = (
+                    parent_sid in candidates and parent_sid not in task_sids
+                )
+                if not corroborated:
+                    healed = self._pick_parent_candidate(
+                        candidates, task_sids, rep.started_at
+                    )
+                    if healed is not None:
+                        parent_sid = healed
             for task in rep.tasks:
                 self._absorb_callstack(
                     out, callstack_pairs, parent_sid, task, rep
@@ -492,13 +511,83 @@ class SpawnResolver:
         for child in task.children:
             self._absorb_callstack(out, seen_pairs, next_parent, child, rep)
 
-    def _invoke_id_to_parent_session(self) -> dict[str, str]:
-        """Map ``invoke_id`` → the session id whose tool_use produced it.
+    def _pick_parent_candidate(
+        self,
+        candidates: list[str],
+        task_sids: set[str],
+        rep_started_at: Optional[datetime],
+    ) -> Optional[str]:
+        """Pick the most plausible emitter of ``rep`` from invoke-index candidates.
 
-        Heals reports whose ``parent_session`` doesn't match any real
-        JSONL — the tool_use's containing JSONL is the ground truth.
-        Result is cached on the resolver instance, or (preferred)
-        injected by the registry so all requests share one scan.
+        Rejects candidates that appear as a task in the report (self-loop:
+        callstack echoes the outer invoke_id in inner /call tool_results
+        from forked children) and candidates born after ``rep_started_at``
+        (``--fork-session`` descendants that only carry the invoke_id via
+        transcript copy). Among survivors, prefer the latest birth ≤
+        ``rep_started_at`` (the deepest ancestor alive at invoke time).
+        Falls back to discovery order when timestamps are unavailable.
+        """
+        non_task = [c for c in candidates if c not in task_sids]
+        if not non_task:
+            return None
+        if rep_started_at is None:
+            return non_task[0]
+        rep_ts = rep_started_at.timestamp()
+        before: list[tuple[float, str]] = []
+        after: list[str] = []
+        unstamped: list[str] = []
+        for cand in non_task:
+            birth = self._candidate_birth_ts(cand)
+            if birth is None:
+                unstamped.append(cand)
+            elif birth <= rep_ts:
+                before.append((birth, cand))
+            else:
+                after.append(cand)
+        if before:
+            before.sort(key=lambda kv: kv[0], reverse=True)
+            return before[0][1]
+        # No candidate predates the invoke (clock skew, or test fixtures
+        # using past report timestamps with newly-created JSONLs). Fall
+        # back to discovery order — better to return SOMETHING than to
+        # leave a known-stale ``rep.parent_session`` in place.
+        return unstamped[0] if unstamped else after[0]
+
+    def _candidate_birth_ts(self, sid: str) -> Optional[float]:
+        """Return the birth timestamp of ``sid``'s JSONL, or ``None``.
+
+        Reuses the ForkDetector's cached probes when available (one
+        ``os.stat`` per session across the project's lifetime); falls
+        back to a direct stat when the probe is missing.
+        """
+        ts = self._fd.birth_ts(sid)
+        if ts is not None:
+            return ts
+        path = self._project_dir / f"{sid}.jsonl"
+        try:
+            st = path.stat()
+        except OSError:
+            return None
+        try:
+            from .jsonl import file_birth_ts
+            return file_birth_ts(path, fallback=st.st_mtime)
+        except Exception:
+            return st.st_mtime
+
+    def _invoke_id_to_parent_session(self) -> dict[str, list[str]]:
+        """Map ``invoke_id`` → list of session ids whose tool_use+result
+        carries that invoke_id, in discovery order.
+
+        Authoritative source for ``parent_session`` when a tool_use
+        anchor exists: the containing JSONL is ground truth, overriding
+        any ``parent_session`` value the runtime recorded in
+        ``report.yaml``. Multiple candidates are returned because the
+        callstack plugin has been observed echoing the OUTER invoke_id
+        in inner ``/call`` tool_results made by a forked child; the
+        consumer picks one with extra context (e.g. by filtering out
+        sessions that appear as tasks in the matching report). Result
+        is cached on the resolver instance, or (preferred) injected by
+        the registry so all requests share one scan.
         """
         cached = getattr(self, "_invoke_index_cache", None)
         if cached is not None:
@@ -545,16 +634,31 @@ class SpawnResolver:
 
     def _fork_birth(self, fork_sid: str) -> Optional[datetime]:
         """Birth timestamp of the fork's JSONL."""
-        probe = self._fd._probes.get(fork_sid)  # type: ignore[attr-defined]
-        if probe is None:
+        ts = self._fd.birth_ts(fork_sid)
+        if ts is None:
             return None
         try:
-            return datetime.fromtimestamp(probe.birth_ts, tz=timezone.utc)
+            return datetime.fromtimestamp(ts, tz=timezone.utc)
         except (OSError, ValueError):
             return None
 
 
 # --- helpers (lifted from messages.py) -----------------------------------
+
+
+def _task_session_ids(tasks: list[TaskNode]) -> set[str]:
+    """Every session_id appearing in a report's task tree (recursive)."""
+    out: set[str] = set()
+
+    def visit(t: TaskNode) -> None:
+        if t.session_id:
+            out.add(t.session_id)
+        for c in t.children:
+            visit(c)
+
+    for t in tasks:
+        visit(t)
+    return out
 
 
 def _copy_spawn(s: Spawn) -> Spawn:
