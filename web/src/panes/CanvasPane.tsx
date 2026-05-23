@@ -715,7 +715,10 @@ function treeToReactFlow(args: {
         data: { offset: centerOffset },
         className:
           (w.kind === "subagent" ? "uw-edge-subagent" : "uw-edge-call") +
-          (w.status === "live" || w.status === "yield"
+          // Pulse the edge if the child or anything below it is still
+          // working — otherwise a live grandchild leaves the inbound
+          // edge frozen even though the path is clearly active.
+          (w.subtree_status === "live" || w.subtree_status === "yield"
             ? " uw-edge-pending"
             : ""),
       });
@@ -741,6 +744,12 @@ function treeToReactFlow(args: {
         onFocusChild,
         onMeasure,
         status: w.status === "yield" ? "yield" : w.status === "live" ? "live" : "done",
+        subtreeStatus:
+          w.subtree_status === "yield"
+            ? "yield"
+            : w.subtree_status === "live"
+              ? "live"
+              : "done",
         nodeId: w.window_id,
         windowStart: w.window_start,
         windowEnd: w.window_end,

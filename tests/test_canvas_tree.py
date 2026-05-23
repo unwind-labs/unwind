@@ -681,6 +681,65 @@ def test_yield_in_live_root_sets_root_status_to_yield(tmp_path: Path):
     assert root.status == "yield"
 
 
+def test_subtree_status_propagates_live_descendant_to_done_root(tmp_path: Path):
+    """A finished (``done``) root whose descendant is still ``live`` must
+    expose ``subtree_status="live"`` so the canvas can pulse the
+    ancestor's rail. ``status`` stays ``done`` — that's the self signal
+    used by the in-card terminator row."""
+    proj = tmp_path / "proj"
+    _write_session(proj, "MAIN", [_user("MAIN", "2026-05-04T10:00:00Z")])
+    _write_session(proj, "CHILD", [_user("CHILD", "2026-05-04T10:00:01Z")])
+    log = tmp_path / "log"
+    _write_report(
+        log,
+        "i0",
+        parent_sid="MAIN",
+        started_at="2026-05-04T10:00:01+00:00",
+        ended_at="2026-05-04T10:00:05+00:00",
+        tasks=[{
+            "task": "/task-x",
+            "status": "running",  # child still in-flight
+            "depth": 1,
+            "session_id": "CHILD",
+        }],
+    )
+    ci = CallstackIndex(log)
+    root, _ = build_canvas_tree(
+        proj, "MAIN", ci, is_live_session=lambda sid: sid == "CHILD"
+    )
+    assert root.status == "done"
+    assert root.subtree_status == "live"
+    assert root.children[0].status == "live"
+    assert root.children[0].subtree_status == "live"
+
+
+def test_subtree_status_yield_beats_done_but_loses_to_live(tmp_path: Path):
+    """Priority is ``live`` > ``yield`` > ``done``. With one yielded
+    child and one live grandchild, the root must surface ``live``."""
+    proj = tmp_path / "proj"
+    _write_session(proj, "MAIN", [_user("MAIN", "2026-05-04T10:00:00Z")])
+    _write_session(proj, "Y", [_user("Y", "2026-05-04T10:00:01Z")])
+    _write_session(proj, "L", [_user("L", "2026-05-04T10:00:02Z")])
+    log = tmp_path / "log"
+    _write_report(
+        log,
+        "i0",
+        parent_sid="MAIN",
+        started_at="2026-05-04T10:00:01+00:00",
+        ended_at="2026-05-04T10:00:05+00:00",
+        tasks=[
+            {"task": "/y", "status": "yielded", "depth": 1, "session_id": "Y"},
+            {"task": "/l", "status": "running", "depth": 1, "session_id": "L"},
+        ],
+    )
+    ci = CallstackIndex(log)
+    root, _ = build_canvas_tree(
+        proj, "MAIN", ci, is_live_session=lambda sid: sid in {"Y", "L"}
+    )
+    assert root.status == "done"
+    assert root.subtree_status == "live"
+
+
 def test_stale_root_with_yield_envelope_is_done_not_yield(tmp_path: Path):
     """Same yield-envelope content, but the session is stale (process
     not running, no recent activity). Status downgrades to ``done``

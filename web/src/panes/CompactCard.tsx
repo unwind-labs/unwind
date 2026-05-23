@@ -66,6 +66,12 @@ export type CompactCardData = {
    *  node id so two cards for the same session don't trample. */
   onMeasure: (cardNodeId: string, height: number) => void;
   status: "live" | "yield" | "done";
+  /** Max status across this window AND every descendant (``live`` >
+   *  ``yield`` > ``done``). Drives the rail indicator + yield wash so
+   *  an ancestor visibly reflects work still happening below. The
+   *  in-card terminator row (COMPLETE / YIELD) keeps using ``status``
+   *  because it's a strictly self-only signal. */
+  subtreeStatus: "live" | "yield" | "done";
   /** True when the keyboard cursor is on this card (arrow-key navigation
    *  with the right pane focused). Distinct from `selected`, which means
    *  the detail overlay is currently open for this session. */
@@ -185,6 +191,11 @@ export function CompactCardNode({ data }: { data: CompactCardData }) {
   // ``done`` for any non-latest window, which masked yields on
   // historically-paused-then-resumed slices.
   const selfStatus: "live" | "yield" | "done" = data.status;
+  // Visual rail/wash reflects the subtree: a root whose children are
+  // still working should pulse live even though its own turn ended.
+  // ``selfStatus`` remains the source of truth for the in-card
+  // terminator row.
+  const railStatus: "live" | "yield" | "done" = data.subtreeStatus;
 
   // Report measured height up so dagre can re-layout.
   useEffect(() => {
@@ -273,7 +284,7 @@ export function CompactCardNode({ data }: { data: CompactCardData }) {
         // amber wash is applied via the .uw-card-yield CSS rule (see
         // index.css) because the dark gradient surface uses the
         // ``background`` shorthand and would stomp Tailwind bg-* classes.
-        selfStatus === "yield" && "uw-card-yield",
+        railStatus === "yield" && "uw-card-yield",
       )}
       style={{
         width: COMPACT_CARD_WIDTH,
@@ -316,12 +327,12 @@ export function CompactCardNode({ data }: { data: CompactCardData }) {
         )}
         style={{ width: RAIL_WIDTH }}
       >
-        <RailStatus status={selfStatus} />
+        <RailStatus status={railStatus} />
         <span
           className="text-[8.5px] font-bold uppercase tracking-[0.32em] text-foreground/70"
           style={{ writingMode: "vertical-rl", transform: "rotate(180deg)" }}
         >
-          {selfStatus === "yield"
+          {railStatus === "yield"
             ? "waiting"
             : kind === "resume"
               ? "continued"

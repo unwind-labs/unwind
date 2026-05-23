@@ -132,9 +132,15 @@ class WindowNode:
     label: str
     window_start: Optional[datetime]
     window_end: Optional[datetime]
-    status: str  # ``done`` | ``live`` | ``yield``
-    kind: str    # ``root`` | ``call`` | ``subagent`` | ``resume``
-    parent_window_id: Optional[str]
+    status: str  # ``done`` | ``live`` | ``yield`` — this window's own state
+    # Max status across this window AND every descendant, with priority
+    # ``live`` > ``yield`` > ``done``. Lets ancestors visually reflect
+    # "work is still happening somewhere below" even when their own
+    # turn has long since ended. Filled in post-order by
+    # ``_aggregate_subtree_status``.
+    subtree_status: str = "done"
+    kind: str = ""    # ``root`` | ``call`` | ``subagent`` | ``resume``
+    parent_window_id: Optional[str] = None
     children: list["WindowNode"] = field(default_factory=list)
     # Index of this window within its session (0-based, chronological).
     # Useful for the frontend to label "1st", "2nd" instances cleanly.
@@ -158,6 +164,7 @@ class WindowNode:
             else None,
             "window_end": self.window_end.isoformat() if self.window_end else None,
             "status": self.status,
+            "subtree_status": self.subtree_status,
             "kind": self.kind,
             "parent_window_id": self.parent_window_id,
             "window_index": self.window_index,
@@ -450,6 +457,27 @@ def _attribute_self_usage(
         _add_into(w.self_cost, _cost_usd(ev.model, ev.cw, ev.cr, ev.r, ev.w))
 
 
+_STATUS_PRIORITY = {"done": 0, "yield": 1, "live": 2}
+
+
+def _aggregate_subtree_status(node: WindowNode) -> str:
+    """Post-order walk: each node's ``subtree_status`` = the highest-priority
+    status across the node itself and every descendant. Priority is
+    ``live`` > ``yield`` > ``done`` — a single live descendant pulls an
+    otherwise-finished ancestor's rail back into "live" so the UI signals
+    that work is still happening somewhere below.
+    """
+    best = node.status
+    best_p = _STATUS_PRIORITY.get(best, 0)
+    for child in node.children:
+        child_status = _aggregate_subtree_status(child)
+        child_p = _STATUS_PRIORITY.get(child_status, 0)
+        if child_p > best_p:
+            best, best_p = child_status, child_p
+    node.subtree_status = best
+    return best
+
+
 def _aggregate_subtree_usage(node: WindowNode) -> tuple[dict[str, int], dict[str, float]]:
     """Post-order walk: each parent's ``subtree_*`` = its own ``self_*``
     plus every descendant's. Children are visited before the parent so
@@ -663,11 +691,13 @@ def build_canvas_tree(
         )
         all_windows.append(root)
         _aggregate_subtree_usage(root)
+        _aggregate_subtree_status(root)
         return root, all_windows
     root = root_windows[0]
     # Post-order subtree token totals — must run AFTER children are wired
     # in above so the recursion sees the full descendant set.
     _aggregate_subtree_usage(root)
+    _aggregate_subtree_status(root)
     return root, all_windows
 
 
