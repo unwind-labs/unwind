@@ -86,6 +86,8 @@ class SubagentIndex:
         if not synthetic_id.startswith(SUBAGENT_PREFIX):
             return None
         agent_id = synthetic_id[len(SUBAGENT_PREFIX):]
+        if not self._project_dir.is_dir():
+            return None
         # Search every session's subagents/ for a matching file.
         for sess_dir in self._project_dir.iterdir():
             if not sess_dir.is_dir():

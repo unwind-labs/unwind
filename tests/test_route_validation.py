@@ -46,6 +46,19 @@ def test_session_id_uuid_accepted(tmp_path, monkeypatch):
         assert r.status_code != 422
 
 
+def test_subagent_session_id_accepted(tmp_path, monkeypatch):
+    """``agent-<hex>`` ids address an in-session subagent trace — the messages
+    handler branches on this prefix, so the validator must let it through."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    app = create_app()
+    with TestClient(app) as c:
+        r = c.get(
+            "/api/projects/valid-slug/sessions/"
+            "agent-a886e50ec65f118f9/messages"
+        )
+        assert r.status_code != 422
+
+
 def test_valid_slug_accepted(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
     app = create_app()

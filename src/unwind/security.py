@@ -19,9 +19,12 @@ from .settings import get_settings
 # Claude Code's slug rule: any char outside [A-Za-z0-9-] is replaced with '-'.
 # We anchor to reject path traversal segments like "..".
 SLUG_PATTERN = r"^[A-Za-z0-9-]+$"
-# Standard UUID v1–v5 shape. Session JSONL filenames are UUIDs.
+# Standard UUID v1–v5 shape for session JSONL filenames, OR the synthetic
+# ``agent-<hex>`` id used to address an in-session subagent trace (see
+# unwind.subagents.SUBAGENT_PREFIX).
 SESSION_ID_PATTERN = (
-    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+    r"^(?:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+    r"|agent-[0-9a-fA-F]+)$"
 )
 
 _SLUG_RE = re.compile(SLUG_PATTERN)
