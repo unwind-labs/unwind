@@ -375,7 +375,7 @@ def collect_invocations(
                     label=s.label or s.child_session_id[:8],
                     status=s.status,
                     kind=s.kind,
-                    invoke_id=s.invoke_id or "",
+                    invoke_id=getattr(s, "invoke_id", "") or "",
                 )
             )
 

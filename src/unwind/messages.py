@@ -95,6 +95,7 @@ def base_uuid(message_uuid: str) -> str:
 from .spawns import (  # noqa: E402
     CALLSTACK_TOOL_NAMES,
     SUBAGENT_TOOL_NAMES,
+    CallSpawn,
     Spawn,
     SpawnResolver,
 )
@@ -164,7 +165,11 @@ def annotate_spawns(
         m.spawn_kind = bound[0].kind
         m.spawn_session_ids = [s.child_session_id for s in bound]
         m.spawn_tasks = [s.label for s in bound]
-        m.spawn_call_types = [s.call_type for s in bound]
+        # call_type is only meaningful for CallSpawn; subagent rows
+        # default to "fork" (UI ignores call_type for subagent kind).
+        m.spawn_call_types = [
+            s.call_type if isinstance(s, CallSpawn) else "fork" for s in bound
+        ]
         # Prefer the LATEST known status across all reports for callstack
         # spawns — covers the "original call yielded, later resume
         # completed" case where the spawn's snapshot status is stale.
@@ -211,7 +216,7 @@ def _done_for_spawn(s: Spawn, slug_callstack) -> Optional[bool]:
     """
     canonical = _from_raw_status(s.status)
     if (
-        s.kind == "call"
+        isinstance(s, CallSpawn)
         and s.child_session_id
         and slug_callstack is not None
     ):

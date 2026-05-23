@@ -28,7 +28,7 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Literal, Optional, TypeAlias, Union
 
 from .callstack import CallstackIndex, TaskNode
 from .fork_detect import ForkDetector
@@ -37,7 +37,7 @@ from .jsonl import (
     read_records,
     stringify_tool_result as _stringify_result,
 )
-from .subagents import SUBAGENT_PREFIX, SubagentIndex
+from .subagents import SubagentIndex
 
 
 # Tool names whose tool_use spawns child sessions/agents we drill into.
@@ -118,9 +118,9 @@ def compute_invoke_index_for_project(
     return out
 
 
-@dataclass
-class Spawn:
-    """One ``parent_session → child_session`` invocation, from any source.
+@dataclass(kw_only=True)
+class _SpawnBase:
+    """Fields shared by every spawn variant.
 
     A Spawn is always known once the child's session id is known. The
     ``parent_tool_use_id`` is filled in lazily when anchoring against a
@@ -129,24 +129,44 @@ class Spawn:
     """
 
     parent_session_id: str
-    child_session_id: str            # ``agent-<id>`` for subagents
-    kind: str                        # ``"call"`` | ``"subagent"``
+    child_session_id: str
     label: str
     status: str                      # ``running`` | ``yielded`` | ``complete`` | ``failed``
     started_at: Optional[datetime] = None
     ended_at: Optional[datetime] = None
-    invoke_id: Optional[str] = None
     parent_tool_use_id: Optional[str] = None
     # Source tag for debugging / precedence — not surfaced to consumers.
     source: str = "callstack"        # ``callstack`` | ``fork`` | ``subagent``
-    # How the child session was launched, when ``kind == "call"``. Drives
-    # the icon Unwind renders for each spawn row:
-    #   "fork"                — git-fork icon (inherits parent context)
-    #   "fresh"               — leaf icon (isolated session, same project)
-    #   "fresh_cross_project" — different leaf (isolated, different project)
-    # Always ``"fork"`` for ``kind == "subagent"`` (subagents use the
-    # Sparkles icon; ``call_type`` is ignored).
+
+
+@dataclass(kw_only=True)
+class CallSpawn(_SpawnBase):
+    """A ``/call`` invocation: parent invoked a child claude session via
+    the callstack runtime (or the fork detector caught one in-flight).
+
+    ``call_type`` drives the icon Unwind renders for each spawn row:
+      "fork"                — git-fork icon (inherits parent context)
+      "fresh"               — leaf icon (isolated session, same project)
+      "fresh_cross_project" — different leaf (isolated, different project)
+    """
+
+    kind: Literal["call"] = "call"
+    invoke_id: Optional[str] = None
     call_type: str = "fork"
+
+
+@dataclass(kw_only=True)
+class SubagentSpawn(_SpawnBase):
+    """An Agent/Task subagent invocation. ``child_session_id`` is the
+    ``agent-<hex>`` synthetic id used by the messages endpoint.
+    """
+
+    kind: Literal["subagent"] = "subagent"
+    agent_id: str = ""  # bare hex id (without ``agent-`` prefix)
+
+
+# Discriminated union — narrow with ``isinstance`` OR ``s.kind``.
+Spawn: TypeAlias = Union[CallSpawn, SubagentSpawn]
 
 
 class SpawnResolver:
@@ -262,10 +282,9 @@ class SpawnResolver:
             started_at = self._fork_birth(fork_sid)
             status, ended_at = self._infer_fork_status(fork_sid)
             out.setdefault(root, []).append(
-                Spawn(
+                CallSpawn(
                     parent_session_id=root,
                     child_session_id=fork_sid,
-                    kind="call",
                     label=label,
                     status=status,
                     started_at=started_at,
@@ -298,15 +317,14 @@ class SpawnResolver:
         for parent_sid in candidate_parents:
             for sa in self._sa.list_for_session(parent_sid):
                 out.setdefault(parent_sid, []).append(
-                    Spawn(
+                    SubagentSpawn(
                         parent_session_id=parent_sid,
                         child_session_id=sa.synthetic_session_id,
-                        kind="subagent",
+                        agent_id=sa.agent_id,
                         label=sa.description or sa.agent_type or sa.agent_id[:8],
                         status="complete",
                         started_at=sa.created_at,
                         ended_at=None,
-                        invoke_id=None,
                         source="subagent",
                     )
                 )
@@ -378,14 +396,13 @@ class SpawnResolver:
         subagent_by_agent: dict[str, Spawn] = {}
         subagent_by_desc: dict[str, list[Spawn]] = {}
         for s in spawns:
-            if s.kind == "call":
+            if isinstance(s, CallSpawn):
                 if s.invoke_id:
                     callstack_by_invoke.setdefault(s.invoke_id, []).append(s)
                 callstack_by_label.setdefault(s.label or "", []).append(s)
                 unbound_callstack.append(s)
-            elif s.kind == "subagent":
-                aid = s.child_session_id.removeprefix(SUBAGENT_PREFIX)
-                subagent_by_agent[aid] = s
+            else:
+                subagent_by_agent[s.agent_id] = s
                 subagent_by_desc.setdefault(s.label or "", []).append(s)
 
         # Build tool_use → tool_result map and walk tool_uses in order.
@@ -494,10 +511,9 @@ class SpawnResolver:
         rep: Any,
     ) -> None:
         if task.session_id and parent_sid:
-            spawn = Spawn(
+            spawn = CallSpawn(
                 parent_session_id=parent_sid,
                 child_session_id=task.session_id,
-                kind="call",
                 label=task.task or task.session_id[:8],
                 status=(task.status or "complete").lower(),
                 started_at=rep.started_at,
@@ -663,18 +679,29 @@ def _task_session_ids(tasks: list[TaskNode]) -> set[str]:
 
 
 def _copy_spawn(s: Spawn) -> Spawn:
-    return Spawn(
+    if isinstance(s, CallSpawn):
+        return CallSpawn(
+            parent_session_id=s.parent_session_id,
+            child_session_id=s.child_session_id,
+            label=s.label,
+            status=s.status,
+            started_at=s.started_at,
+            ended_at=s.ended_at,
+            invoke_id=s.invoke_id,
+            parent_tool_use_id=s.parent_tool_use_id,
+            source=s.source,
+            call_type=s.call_type,
+        )
+    return SubagentSpawn(
         parent_session_id=s.parent_session_id,
         child_session_id=s.child_session_id,
-        kind=s.kind,
+        agent_id=s.agent_id,
         label=s.label,
         status=s.status,
         started_at=s.started_at,
         ended_at=s.ended_at,
-        invoke_id=s.invoke_id,
         parent_tool_use_id=s.parent_tool_use_id,
         source=s.source,
-        call_type=s.call_type,
     )
 
 
@@ -723,6 +750,8 @@ def _requested_tasks(tool_input: Any) -> list[str]:
 __all__ = [
     "CALLSTACK_TOOL_NAMES",
     "SUBAGENT_TOOL_NAMES",
+    "CallSpawn",
     "Spawn",
     "SpawnResolver",
+    "SubagentSpawn",
 ]

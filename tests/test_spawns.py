@@ -1621,3 +1621,39 @@ def test_divergence_text_fallback_uses_first_user_texts(tmp_path: Path):
     fd = ForkDetector(proj, session_scanner=builder.get_scan)
 
     assert fd.divergence_text_for("CHILD") == "do the divergent thing"
+
+
+def test_call_and_subagent_spawn_types_are_distinct():
+    """The Spawn union narrows correctly: CallSpawn carries invoke_id +
+    call_type, SubagentSpawn carries agent_id. ``isinstance`` is the
+    canonical discriminator."""
+    from unwind.spawns import CallSpawn, SubagentSpawn
+
+    c = CallSpawn(
+        parent_session_id="P",
+        child_session_id="C",
+        label="/task",
+        status="complete",
+        invoke_id="i0",
+        call_type="fresh",
+    )
+    s = SubagentSpawn(
+        parent_session_id="P",
+        child_session_id="agent-abc",
+        agent_id="abc",
+        label="agent label",
+        status="complete",
+    )
+
+    assert c.kind == "call"
+    assert c.invoke_id == "i0"
+    assert c.call_type == "fresh"
+    assert isinstance(c, CallSpawn)
+
+    assert s.kind == "subagent"
+    assert s.agent_id == "abc"
+    assert isinstance(s, SubagentSpawn)
+    # The type system no longer allows accidental "invoke_id on subagent"
+    # access — the field is simply not present.
+    assert not hasattr(s, "invoke_id")
+    assert not hasattr(s, "call_type")
