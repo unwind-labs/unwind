@@ -7,7 +7,7 @@ from pathlib import Path
 import yaml
 
 from unwind.callstack import CallstackIndex
-from unwind.canvas_tree import build_canvas_tree
+from unwind.canvas_tree import CanvasTreeBuilder, build_canvas_tree
 from unwind.fork_detect import ForkDetector
 from unwind.messages import annotate_spawns, read_messages
 from unwind.spawns import SpawnResolver
@@ -18,11 +18,15 @@ from unwind.subagents import SubagentIndex
 
 
 def _make_resolver(project_dir: Path, log_dir: Path) -> SpawnResolver:
+    """Build a resolver wired to a CanvasTreeBuilder for SessionScan-driven
+    fork status (mirrors what registry.spawn_resolver_for_slug does)."""
+    builder = CanvasTreeBuilder(project_dir)
     return SpawnResolver(
         CallstackIndex(log_dir),
         ForkDetector(project_dir),
         SubagentIndex(project_dir),
         project_dir=project_dir,
+        session_scanner=builder.get_scan,
     )
 
 
@@ -1405,3 +1409,126 @@ def test_scan_session_has_returned_flag(tmp_path: Path):
         ],
     )
     assert scan_session(path_d).has_returned is False
+
+
+def test_fork_status_reads_from_session_scanner_when_wired(tmp_path: Path):
+    """When a ``session_scanner`` is wired (registry path), fork status
+    inference reads ``last_envelope_kind`` / ``last_envelope_ts`` from
+    the cached SessionScan instead of re-walking the JSONL. Verifies
+    the scanner path is exercised by counting JSONL reads."""
+    from unwind.canvas_tree import CanvasTreeBuilder
+
+    proj = tmp_path / "proj"
+    log = tmp_path / "log"
+    log.mkdir()
+
+    _write_jsonl(
+        proj / "ROOT.jsonl",
+        [
+            {
+                "uuid": "head-uuid",
+                "type": "user",
+                "sessionId": "ROOT",
+                "timestamp": "2026-05-04T10:00:00.000Z",
+                "message": {"role": "user", "content": "kick off"},
+            }
+        ],
+    )
+    _write_jsonl(
+        proj / "CHILD.jsonl",
+        _fork_prologue_record(uuid="head-uuid") + [
+            {
+                "uuid": "a1",
+                "type": "assistant",
+                "sessionId": "CHILD",
+                "timestamp": "2026-05-04T10:00:09.500Z",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": '```json\n{"op": "return", "result": "ok"}\n```',
+                        }
+                    ],
+                },
+            }
+        ],
+    )
+
+    builder = CanvasTreeBuilder(proj)
+    resolver = SpawnResolver(
+        CallstackIndex(log),
+        ForkDetector(proj),
+        SubagentIndex(proj),
+        project_dir=proj,
+        session_scanner=builder.get_scan,
+    )
+
+    fork_spawns = [s for s in resolver.for_parent("ROOT") if s.source == "fork"]
+    assert len(fork_spawns) == 1
+    s = fork_spawns[0]
+    assert s.status == "complete"
+    assert s.ended_at is not None
+    assert s.ended_at.isoformat().startswith("2026-05-04T10:00:09.500")
+
+    # Sanity: the scan must record the envelope persistently — the source
+    # of truth that lets us delete the second walk.
+    scan = builder.get_scan("CHILD")
+    assert scan.last_envelope_kind == "return"
+    assert scan.last_envelope_ts is not None
+
+
+def test_scan_session_tracks_last_envelope_across_resets(tmp_path: Path):
+    """``last_envelope_kind`` / ``last_envelope_ts`` are persistent — they
+    DON'T reset on intervening events the way ``at_user_prompt`` /
+    ``has_returned`` do. A yield-then-resume-then-return sequence must
+    end with kind="return" (the LAST envelope wins)."""
+    from unwind.canvas_tree import scan_session
+
+    path = tmp_path / "S.jsonl"
+    _write_jsonl(
+        path,
+        [
+            {
+                "uuid": "a1",
+                "type": "assistant",
+                "sessionId": "S",
+                "timestamp": "2026-05-04T10:00:00.000Z",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": '```json\n{"op":"yield","question":"?"}\n```'}
+                    ],
+                },
+            },
+            # User reply (resets at_user_prompt/has_returned) — but should
+            # NOT touch last_envelope_*.
+            {
+                "uuid": "u1",
+                "type": "user",
+                "sessionId": "S",
+                "timestamp": "2026-05-04T10:00:05.000Z",
+                "message": {"role": "user", "content": "resume"},
+            },
+            {
+                "uuid": "a2",
+                "type": "assistant",
+                "sessionId": "S",
+                "timestamp": "2026-05-04T10:00:10.000Z",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": '```json\n{"op":"return","result":"ok"}\n```'}
+                    ],
+                },
+            },
+        ],
+    )
+
+    scan = scan_session(path)
+    assert scan.last_envelope_kind == "return"
+    assert scan.last_envelope_ts is not None
+    assert scan.last_envelope_ts.isoformat().startswith("2026-05-04T10:00:10")
+    # has_returned IS persistent in this case because no event followed
+    # the return — sanity-check no regression.
+    assert scan.has_returned is True

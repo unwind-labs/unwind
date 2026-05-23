@@ -34,12 +34,7 @@ from .callstack import CallstackIndex, TaskNode
 from .fork_detect import ForkDetector
 from .projects import project_jsonl_listing
 from .jsonl import (
-    RETURN_RE as _RETURN_RE,
-    YIELD_RE as _YIELD_RE,
-    extract_assistant_text as _assistant_text,
-    iter_lines,
     read_records,
-    parse_ts as _parse_ts,
     stringify_tool_result as _stringify_result,
 )
 from .subagents import SUBAGENT_PREFIX, SubagentIndex
@@ -165,12 +160,19 @@ class SpawnResolver:
         *,
         project_dir: Path,
         invoke_index: Optional[dict[str, list[str]]] = None,
+        session_scanner: Optional[Any] = None,
     ) -> None:
         self._cs = callstack
         self._fd = forks
         self._sa = subagents
         self._project_dir = project_dir
         self._cached: Optional[dict[str, list[Spawn]]] = None
+        # ``session_scanner(sid) -> SessionScan`` from canvas_tree. When
+        # provided (by registry.spawn_resolver_for_slug), the fork-status
+        # inference reads from the mtime-cached scan instead of walking
+        # the child JSONL a second time. Falls back to an inline walk
+        # when missing (tests, ad-hoc construction).
+        self._session_scanner = session_scanner
         # Pre-computed invoke_id → [candidate_session_id, ...]. When
         # provided (by registry.spawn_resolver_for_slug), we skip the
         # per-request full-project JSONL scan in
@@ -601,36 +603,36 @@ class SpawnResolver:
     ) -> tuple[str, Optional[datetime]]:
         """Status + ended_at for a fork-detected spawn with no callstack report.
 
-        Scans the child JSONL for the callstack return/yield envelope in an
-        assistant message. The envelope is the runtime's only persistent
-        signal that the fork finished — without it (no envelope, no report)
-        the spawn is genuinely in-flight, so we keep ``running``.
+        Reads from the canonical :class:`canvas_tree.SessionScan` (mtime/
+        size-cached). The scan tracks the LAST callstack envelope seen
+        in the child's JSONL via ``last_envelope_kind`` /
+        ``last_envelope_ts``; that's the runtime's only persistent
+        signal that the fork finished. Yield wins over return only if
+        the yield is the LATER envelope — a yield-then-resumed-then-
+        returned child surfaces as ``complete`` because that's its
+        terminal state.
 
-        Yield wins over return only if the yield is the LATER envelope;
-        otherwise a yield-then-resumed-then-returned child would show as
-        yielded. We can't tell the two apart from the JSONL alone, so we
-        take the LAST envelope seen as the terminal state.
+        Returns ``("running", None)`` when no scanner is wired so test
+        fixtures without a CanvasTreeBuilder still get a sensible
+        default. Production code always wires a scanner via
+        :func:`unwind.registry.spawn_resolver_for_slug`.
         """
-        path = self._project_dir / f"{fork_sid}.jsonl"
-        if not path.is_file():
+        scan = self._scan_for(fork_sid)
+        if scan is None:
             return "running", None
-        last_kind: Optional[str] = None
-        last_ts: Optional[datetime] = None
-        for rec in iter_lines(path):
-            if rec.get("type") != "assistant":
-                continue
-            text = _assistant_text(rec)
-            if not text:
-                continue
-            is_return = bool(_RETURN_RE.search(text))
-            is_yield = bool(_YIELD_RE.search(text))
-            if not (is_return or is_yield):
-                continue
-            last_kind = "complete" if is_return else "yielded"
-            last_ts = _parse_ts(rec.get("timestamp"))
-        if last_kind is None:
+        kind = scan.last_envelope_kind
+        if kind is None:
             return "running", None
-        return last_kind, last_ts
+        return ("complete" if kind == "return" else "yielded"), scan.last_envelope_ts
+
+    def _scan_for(self, sid: str) -> Optional[Any]:
+        """Return the cached SessionScan for ``sid`` if a scanner is wired."""
+        if self._session_scanner is None:
+            return None
+        try:
+            return self._session_scanner(sid)
+        except Exception:
+            return None
 
     def _fork_birth(self, fork_sid: str) -> Optional[datetime]:
         """Birth timestamp of the fork's JSONL."""

@@ -260,12 +260,16 @@ def spawn_resolver_for_slug(slug: str) -> SpawnResolver:
     """
     index = index_for_slug(slug)
     project_dir = index.paths.project_dir
+    builder = canvas_tree_builder_for_slug(slug)
     return SpawnResolver(
         callstack_for_slug(slug),
         fork_detector_for_slug(slug),
         subagent_index_for_slug(slug),
         project_dir=project_dir,
         invoke_index=invoke_index_for_slug(slug, project_dir),
+        # Share the canvas-tree builder's mtime-cached scans so fork
+        # status inference doesn't re-walk each child JSONL.
+        session_scanner=builder.get_scan,
     )
 
 

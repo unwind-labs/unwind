@@ -102,6 +102,15 @@ class SessionScan:
     # the report). Earlier returns followed by a later yield/run flip
     # this back to False — the LAST envelope is the terminal state.
     has_returned: bool = False
+    # Persistent terminal-envelope tracking (NEVER reset on intervening
+    # events). ``last_envelope_kind`` is the kind of the LAST callstack
+    # envelope ever seen ("return" | "yield" | None), and
+    # ``last_envelope_ts`` is its timestamp. Used by ``SpawnResolver`` to
+    # infer fork-spawn status without re-walking the JSONL — a yield
+    # followed by a resume followed by a return surfaces as ``complete``
+    # at the latest envelope, because that's the terminal state.
+    last_envelope_kind: Optional[str] = None
+    last_envelope_ts: Optional[datetime] = None
     # Per-assistant-message token usage events. ``model`` is the
     # assistant message's ``message.model`` string, kept per-event so
     # cost can be priced at the rate of whichever model that specific
@@ -229,8 +238,12 @@ def scan_session(path: Path) -> SessionScan:
                 if ts is not None:
                     scan.yields.append(ts)
                 at_user_prompt, has_returned = True, False
+                scan.last_envelope_kind = "yield"
+                scan.last_envelope_ts = ts
             elif text and _RETURN_RE.search(text):
                 at_user_prompt, has_returned = False, True
+                scan.last_envelope_kind = "return"
+                scan.last_envelope_ts = ts
             else:
                 at_user_prompt, has_returned = False, False
         elif rtype == "user" and not _is_tool_result_record(rec):
