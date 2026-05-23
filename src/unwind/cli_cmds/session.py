@@ -10,10 +10,13 @@ from ..jsonl import EPOCH
 from ..api.sessions_api import SessionRow, TreeResponse
 from ..callstack import TaskNode
 from ..processes import session_status
+from ..canvas_tree import build_canvas_tree
 from ..registry import (
     callstack_for_slug,
+    canvas_tree_builder_for_slug,
     fork_detector_for_slug,
     index_for_slug,
+    spawn_resolver_for_slug,
     subagent_index_for_slug,
 )
 from ..subagents import SUBAGENT_PREFIX
@@ -258,3 +261,52 @@ def session_tree(
         _render.render_task_tree(
             session_id, response_dict["children"], depth_limit=depth
         )
+
+
+@app.command("usage")
+def session_usage(
+    session_id: str = typer.Argument(...),
+    project: Optional[str] = typer.Option(None, "--project"),
+    harness: str = typer.Option("claude", "--harness"),
+    json_out: bool = typer.Option(False, "--json"),
+) -> None:
+    """Show token-usage + USD-cost breakdown for a session's window tree.
+
+    Mirrors the per-card footer on the canvas: per-window self counters
+    plus the root's subtree totals across cache-write / cache-read /
+    input / output. Output is sorted to match the canvas's left-to-right
+    column order (root first, then descendants by start time).
+    """
+    paths = _common.resolve_project(project, harness)
+    index = index_for_slug(paths.slug)
+    if (
+        not session_id.startswith(SUBAGENT_PREFIX)
+        and index.get_session(session_id) is None
+    ):
+        raise _common.not_found(f"session {session_id!r} not found in {paths.slug}")
+
+    builder = canvas_tree_builder_for_slug(paths.slug)
+    resolver = spawn_resolver_for_slug(paths.slug)
+    summaries = {s.session_id: s for s in index.list_sessions()}
+
+    def title_for(sid: str) -> Optional[str]:
+        s = summaries.get(sid)
+        if s is None:
+            return None
+        return s.custom_title or s.title or None
+
+    root, all_windows = build_canvas_tree(
+        index.paths.project_dir,
+        session_id,
+        spawn_resolver=resolver,
+        builder=builder,
+        title_for=title_for,
+    )
+
+    if json_out:
+        _common.echo_json({
+            "root": root.to_dict(),
+            "all_windows": [w.to_dict() for w in all_windows],
+        })
+    else:
+        _render.render_usage_breakdown(root, all_windows)

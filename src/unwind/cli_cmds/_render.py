@@ -115,6 +115,84 @@ def _render_children(
         _render_children(kids, next_prefix, depth + 1, depth_limit)
 
 
+def render_usage_breakdown(root: Any, _all_windows: list[Any]) -> None:
+    """Render token-usage and USD-cost per window of a session tree.
+
+    Mirrors the layout of the canvas card's footer (categories as rows,
+    scopes as columns): for each window we print one block with category
+    rows (Cache Write / Cache Read / Read / Write) and scope columns
+    (Self tokens / Subtree tokens / USD cost). The root's grand-total
+    line appears at the bottom, matching the canvas. """
+    # Order: BFS from root by start time — same column order as the canvas.
+    ordered: list[Any] = []
+    seen: set[str] = set()
+    def visit(node: Any) -> None:
+        if node.window_id in seen:
+            return
+        seen.add(node.window_id)
+        ordered.append(node)
+        for c in sorted(node.children, key=lambda x: x.window_start or datetime.min):
+            visit(c)
+    visit(root)
+
+    categories = [
+        ("cw", "Cache Write"),
+        ("cr", "Cache Read"),
+        ("r", "Read"),
+        ("w", "Write"),
+    ]
+
+    for w in ordered:
+        label = w.label or w.session_id[:12]
+        kind = w.kind
+        status = w.status
+        header = (
+            f"[bold cyan]{label}[/]  "
+            f"[dim]{w.window_id}[/]  "
+            f"[magenta]{kind}[/]  [yellow]{status}[/]"
+        )
+        _console.print(header)
+        t = Table(show_header=True, header_style="dim", box=None, pad_edge=False)
+        t.add_column("", style="dim")
+        t.add_column("Self", justify="right")
+        t.add_column("Subtree", justify="right")
+        t.add_column("USD (subtree)", justify="right", style="green")
+        for key, lbl in categories:
+            t.add_row(
+                lbl,
+                _fmt_tokens(w.self_usage.get(key, 0)),
+                _fmt_tokens(w.subtree_usage.get(key, 0)),
+                _fmt_usd(w.subtree_cost.get(key, 0.0)),
+            )
+        _console.print(t)
+        _console.print("")
+
+    cost_total = sum(root.subtree_cost.values())
+    tok_total = sum(root.subtree_usage.values())
+    _console.print(
+        f"[bold]totals[/]: {_fmt_tokens(tok_total)} tokens · "
+        f"[green]{_fmt_usd(cost_total)}[/] across {len(ordered)} window(s)"
+    )
+
+
+def _fmt_tokens(n: int) -> str:
+    if not n:
+        return "0"
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.1f}".rstrip("0").rstrip(".") + "M"
+    if n >= 1_000:
+        return f"{n / 1_000:.1f}".rstrip("0").rstrip(".") + "K"
+    return str(n)
+
+
+def _fmt_usd(n: float) -> str:
+    if not n:
+        return "$0.00"
+    if n < 0.01:
+        return "<$0.01"
+    return f"${n:,.2f}"
+
+
 def render_messages_text(
     messages: Iterable[Message],
     *,
