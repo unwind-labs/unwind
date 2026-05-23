@@ -261,12 +261,20 @@ class ProjectWatcher:
             self._handle_callstack()
 
     def _handle_jsonl(self, path: Path) -> None:
+        """Dispatch a JSONL change into the right per-event handler.
+
+        State machine (per session):
+          * unknown → ``_handle_new_session``: cold path, full parse,
+            session_created event.
+          * known + shrank → ``_handle_shrink``: rotation/rewrite,
+            invalidate the cache and re-read from offset 0.
+          * known + grew → ``_handle_grew``: byte-offset tail read,
+            messages_appended + coalesced session_updated events.
+
+        ``unchanged`` (mtime fired but size identical) silently no-ops.
+        """
         session_id = path.stem
         index = index_for_slug(self._slug)
-
-        is_new = session_id not in self._known_sessions
-        if is_new:
-            self._known_sessions.add(session_id)
 
         try:
             st = path.stat()
@@ -274,73 +282,136 @@ class ProjectWatcher:
             return
         size = st.st_size
         mtime = st.st_mtime
-        prev = self._offsets.get(session_id, 0)
+        prev_offset = self._offsets.get(session_id, 0)
 
-        # If file shrank (rotation / rewrite), reset offset and force a
-        # full re-parse so summary fields don't drift.
-        shrank = size < prev
-        if shrank:
-            prev = 0
-            index.invalidate(session_id)
+        is_new = session_id not in self._known_sessions
+        if is_new:
+            self._known_sessions.add(session_id)
+            self._handle_new_session(index, path, session_id, size, mtime)
+            return
 
-        # iter_lines_from caps each read at MAX_TICK_READ_BYTES to bound
-        # memory; loop here so a single huge append still drains within one
-        # flush rather than stalling until the next FS event.
-        records_list: list[dict] = []
-        new_offset = prev
+        if size < prev_offset:
+            self._handle_shrink(index, session_id)
+            prev_offset = 0
+        if size > prev_offset:
+            self._handle_grew(
+                index, path, session_id, prev_offset, size, mtime
+            )
+
+    def _handle_new_session(
+        self,
+        index,
+        path: Path,
+        session_id: str,
+        size: int,
+        mtime: float,
+    ) -> None:
+        """Cold start: a JSONL appeared for an unknown session.
+
+        Reads everything from offset 0, parses via the full index path
+        (cache miss is unavoidable here), and emits ``session_created``
+        + ``messages_appended`` + the coalesced ``session_updated``.
+        """
+        records, new_offset = self._tail_from(path, 0, size)
+        self._offsets[session_id] = new_offset
+        self._last_size[session_id] = size
+
+        summary = index.get_session(session_id)
+        self._bus.publish_threadsafe(
+            Event(
+                type="session_created",
+                slug=self._slug,
+                session_id=session_id,
+                payload={"summary": _summary_dict(summary)},
+            )
+        )
+        self._emit_tail(session_id, records, new_offset)
+        # Recompute summary post-tail for a consistent timestamp.
+        if records:
+            updated = index.apply_increment(
+                session_id, records, size, mtime
+            ) or index.get_session(session_id)
+            if updated is not None:
+                self._su_coalescer.request(
+                    session_id, {"summary": _summary_dict(updated)}
+                )
+
+    def _handle_shrink(self, index, session_id: str) -> None:
+        """File rotated/rewrote — invalidate the cache. Next handler call
+        will re-read from offset 0 because we drop the recorded offset."""
+        index.invalidate(session_id)
+        self._offsets[session_id] = 0
+        self._last_size[session_id] = 0
+
+    def _handle_grew(
+        self,
+        index,
+        path: Path,
+        session_id: str,
+        prev_offset: int,
+        size: int,
+        mtime: float,
+    ) -> None:
+        """Warm path: a known JSONL grew. Byte-offset tail read, emit
+        ``messages_appended`` + coalesced ``session_updated``."""
+        records, new_offset = self._tail_from(path, prev_offset, size)
+        self._offsets[session_id] = new_offset
+        self._last_size[session_id] = size
+
+        if not records:
+            return
+        self._emit_tail(session_id, records, new_offset)
+        summary = index.apply_increment(
+            session_id, records, size, mtime
+        ) or index.get_session(session_id)
+        if summary is not None:
+            self._su_coalescer.request(
+                session_id, {"summary": _summary_dict(summary)}
+            )
+
+    def _tail_from(
+        self, path: Path, start_offset: int, size: int
+    ) -> tuple[list[dict], int]:
+        """Read every JSONL record from ``start_offset`` to EOF, in
+        bounded-memory chunks. Returns (records, new_offset).
+
+        ``iter_lines_from`` caps each read at MAX_TICK_READ_BYTES to
+        bound memory; loop here so a single huge append still drains
+        within one flush rather than stalling until the next FS event.
+        """
+        records: list[dict] = []
+        new_offset = start_offset
         while True:
             chunk_records, next_offset = iter_lines_from(path, new_offset)
             if next_offset == new_offset:
                 break
-            records_list.extend(chunk_records)
+            records.extend(chunk_records)
             new_offset = next_offset
             if new_offset >= size:
                 break
-        self._offsets[session_id] = new_offset
-        self._last_size[session_id] = size
+        return records, new_offset
 
-        if is_new:
-            # Cold start path: cache miss → full parse via get_session.
-            summary = index.get_session(session_id)
-            self._bus.publish_threadsafe(
-                Event(
-                    type="session_created",
-                    slug=self._slug,
-                    session_id=session_id,
-                    payload={
-                        "summary": _summary_dict(summary),
-                    },
-                )
+    def _emit_tail(
+        self, session_id: str, records: list[dict], new_offset: int
+    ) -> None:
+        """Normalize ``records`` and publish a ``messages_appended`` event.
+        No-op when ``records`` is empty or yields zero normalized messages."""
+        if not records:
+            return
+        msgs = normalize_records(records, include_meta=False)
+        if not msgs:
+            return
+        self._bus.publish_threadsafe(
+            Event(
+                type="messages_appended",
+                slug=self._slug,
+                session_id=session_id,
+                payload={
+                    "messages": [m.to_dict() for m in msgs],
+                    "file_offset": new_offset,
+                },
             )
-
-        # Tail: normalize and push as messages_appended.
-        if records_list:
-            msgs = normalize_records(records_list, include_meta=False)
-            if msgs:
-                self._bus.publish_threadsafe(
-                    Event(
-                        type="messages_appended",
-                        slug=self._slug,
-                        session_id=session_id,
-                        payload={
-                            "messages": [m.to_dict() for m in msgs],
-                            "file_offset": new_offset,
-                        },
-                    )
-                )
-            # Always emit an updated summary when the JSONL grew.
-            summary = index.apply_increment(
-                session_id, records_list, size, mtime
-            )
-            if summary is None:
-                # No cached entry (e.g. shrink-triggered invalidate, or the
-                # session existed at startup but no one has listed yet) —
-                # fall back to a full parse.
-                summary = index.get_session(session_id)
-            if summary is not None:
-                self._su_coalescer.request(
-                    session_id, {"summary": _summary_dict(summary)}
-                )
+        )
 
     def _handle_callstack(self) -> None:
         ci = callstack_for_slug(self._slug)
