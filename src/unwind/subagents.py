@@ -14,6 +14,7 @@ internal turns.
 from __future__ import annotations
 
 import json
+import os
 import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -55,6 +56,44 @@ class SubagentIndex:
         # Cheap fast-path for the common "nothing changed" case so repeated
         # list_for_session calls in one request don't re-glob.
         self._cache: dict[str, tuple[float, list[SubagentInvocation]]] = {}
+        # Project-wide "which sids have a subagents/ dir" cache, keyed by
+        # the project dir's mtime. Recomputed when a session is added or
+        # removed (the only events that bump the dir mtime).
+        self._parent_sids_cache: Optional[tuple[float, frozenset[str]]] = None
+
+    def parent_sids(self) -> set[str]:
+        """Return every parent session_id that has a ``subagents/`` directory.
+
+        One ``os.scandir`` of the project dir, mtime-cached. Used by the
+        spawn resolver to enumerate subagent-spawn parents without
+        re-implementing the walk inside an unrelated module.
+        """
+        if not self._project_dir.is_dir():
+            return set()
+        try:
+            dir_mtime = self._project_dir.stat().st_mtime
+        except OSError:
+            return set()
+
+        with self._lock:
+            cached = self._parent_sids_cache
+            if cached is not None and cached[0] == dir_mtime:
+                return set(cached[1])
+
+        out: set[str] = set()
+        try:
+            with os.scandir(self._project_dir) as it:
+                for entry in it:
+                    if not entry.is_dir(follow_symlinks=False):
+                        continue
+                    if os.path.isdir(os.path.join(entry.path, "subagents")):
+                        out.add(entry.name)
+        except OSError:
+            return set()
+
+        with self._lock:
+            self._parent_sids_cache = (dir_mtime, frozenset(out))
+        return out
 
     def list_for_session(self, session_id: str) -> list[SubagentInvocation]:
         sub_dir = self._project_dir / session_id / "subagents"

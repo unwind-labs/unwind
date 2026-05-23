@@ -1657,3 +1657,24 @@ def test_call_and_subagent_spawn_types_are_distinct():
     # access — the field is simply not present.
     assert not hasattr(s, "invoke_id")
     assert not hasattr(s, "call_type")
+
+
+def test_subagent_index_parent_sids_returns_only_dirs_with_subagents(tmp_path: Path):
+    """SubagentIndex.parent_sids walks the project dir once and returns
+    every session_id whose ``subagents/`` subdir exists — replacing the
+    inline os.scandir SpawnResolver used to do."""
+    from unwind.subagents import SubagentIndex
+
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    # Session A has subagents, B has empty dir without subagents/, C is a file.
+    (proj / "A" / "subagents").mkdir(parents=True)
+    (proj / "B").mkdir()
+    (proj / "C.jsonl").write_text("{}")
+
+    idx = SubagentIndex(proj)
+    assert idx.parent_sids() == {"A"}
+
+    # Mtime-cached: re-call doesn't re-stat (no easy way to assert from
+    # outside, but the second call must return the same set).
+    assert idx.parent_sids() == {"A"}

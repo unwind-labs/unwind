@@ -23,12 +23,11 @@ pick it up automatically.
 """
 from __future__ import annotations
 
-import os
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Literal, Optional, TypeAlias, Union
+from typing import Any, Iterator, Literal, Optional, TypeAlias, Union
 
 from .callstack import CallstackIndex, TaskNode
 from .fork_detect import ForkDetector
@@ -205,17 +204,18 @@ class SpawnResolver:
     def spawns_by_parent(self) -> dict[str, list[Spawn]]:
         """All known parent → child spawns, indexed by parent_sid.
 
-        Sources merged in precedence order:
+        Three iterator sources merged in precedence order:
 
-        1. Every callstack ``report.yaml`` task tree contributes one Spawn
-           per invocation (not deduped — three resumes of the same child
-           produce three Spawns).
-        2. The fork detector contributes a Spawn for each callstack-marked
-           child whose ``(family_root, child)`` pair isn't already covered
-           by step 1. These represent in-flight forks before
-           ``report.yaml`` lands.
-        3. The subagent index contributes one Spawn per
-           ``<session>/subagents/agent-<id>`` invocation.
+        1. ``_iter_callstack_spawns`` — one Spawn per task in every
+           ``report.yaml``; uses the invoke-index to heal stale
+           ``parent_session`` recordings (callstack runtime sometimes
+           echoes outer invoke_ids in inner forks).
+        2. ``_iter_fork_spawns`` — one Spawn per callstack-marked fork
+           whose ``(parent, child)`` pair the callstack reports didn't
+           already cover (in-flight forks before ``report.yaml`` lands).
+        3. ``_iter_subagent_spawns`` — one Spawn per
+           ``<session>/subagents/agent-<id>`` invocation; the parent
+           list comes from ``SubagentIndex.parent_sids``.
 
         Result is cached for the resolver's lifetime; instantiate a fresh
         resolver for each request to pick up filesystem changes.
@@ -224,24 +224,57 @@ class SpawnResolver:
             return self._cached
 
         out: dict[str, list[Spawn]] = {}
-
-        # 1. Callstack reports. Walk every report's task tree once.
-        #
-        # ``report.yaml`` records ``parent_session`` at write time; the
-        # callstack runtime has been observed recording stale ids (state
-        # leak across cwd boundaries; unrelated sibling sessions in the
-        # same project). The tool_use → invoke_id binding in JSONLs is
-        # the corrective signal — the JSONL whose tool_use produced
-        # invoke X is the real emitter of X.
-        #
-        # The invoke index returns MULTIPLE candidates per invoke_id
-        # because ``--fork-session`` copies the parent's transcript
-        # (including its callstack tool_uses) into the child's JSONL.
-        # We trust the recorded ``parent_session`` whenever it's a
-        # corroborated candidate; otherwise we delegate to
-        # ``_pick_parent_candidate`` to heal.
-        invoke_to_real_parent = self._invoke_id_to_parent_session()
         callstack_pairs: set[tuple[str, str]] = set()
+
+        for spawn in self._iter_callstack_spawns(callstack_pairs):
+            out.setdefault(spawn.parent_session_id, []).append(spawn)
+
+        callstack_children: set[str] = {child for _, child in callstack_pairs}
+        for spawn in self._iter_fork_spawns(skip=callstack_children):
+            out.setdefault(spawn.parent_session_id, []).append(spawn)
+
+        for spawn in self._iter_subagent_spawns():
+            out.setdefault(spawn.parent_session_id, []).append(spawn)
+
+        # Sort each parent's list chronologically. Stable for deterministic
+        # canvas window assignment (K-th invocation → K-th window).
+        for spawns in out.values():
+            spawns.sort(
+                key=lambda s: (
+                    s.started_at.timestamp() if s.started_at else 0.0,
+                    s.child_session_id,
+                )
+            )
+
+        self._cached = out
+        return out
+
+    # --- per-source iterators -------------------------------------------
+
+    def _iter_callstack_spawns(
+        self, callstack_pairs: set[tuple[str, str]]
+    ) -> Iterator[CallSpawn]:
+        """Yield one CallSpawn per task across every callstack ``report.yaml``.
+
+        ``report.yaml`` records ``parent_session`` at write time; the
+        callstack runtime has been observed recording stale ids (state
+        leak across cwd boundaries; unrelated sibling sessions in the
+        same project). The tool_use → invoke_id binding in JSONLs is
+        the corrective signal — the JSONL whose tool_use produced
+        invoke X is the real emitter of X.
+
+        The invoke index returns MULTIPLE candidates per invoke_id
+        because ``--fork-session`` copies the parent's transcript
+        (including its callstack tool_uses) into the child's JSONL.
+        We trust the recorded ``parent_session`` whenever it's a
+        corroborated candidate; otherwise we delegate to
+        ``_pick_parent_candidate`` to heal.
+
+        Side-effect: populates ``callstack_pairs`` with every emitted
+        ``(parent_sid, child_sid)`` pair so the fork iterator can skip
+        children that already have callstack coverage.
+        """
+        invoke_to_real_parent = self._invoke_id_to_parent_session()
         for rep in self._cs.all_reports():
             parent_sid = rep.parent_session
             candidates = invoke_to_real_parent.get(rep.invoke_id, [])
@@ -257,90 +290,59 @@ class SpawnResolver:
                     if healed is not None:
                         parent_sid = healed
             for task in rep.tasks:
-                self._absorb_callstack(
-                    out, callstack_pairs, parent_sid, task, rep
+                yield from self._tasks_to_spawns(
+                    callstack_pairs, parent_sid, task, rep
                 )
 
-        # 2. Fork detector — only for sessions not already covered above.
-        # A fork is "covered" if it appears as a child in ANY callstack
-        # report, under any parent — not just the family root. Otherwise
-        # the detector adds phantom root→grandchild spawns for every
-        # nested descendant (they all share the same ``family_root``),
-        # which double-counts them on the root and creates spurious
-        # resume windows on the canvas.
-        callstack_children: set[str] = {child for _, child in callstack_pairs}
-        fork_sids = self._fd.fork_session_ids()
-        for fork_sid in fork_sids:
+    def _iter_fork_spawns(self, *, skip: set[str]) -> Iterator[CallSpawn]:
+        """Yield one CallSpawn per callstack-marked fork not already in ``skip``.
+
+        A fork is "covered" if it appears as a child in ANY callstack
+        report, under any parent — not just the family root. Otherwise
+        the detector would add phantom root→grandchild spawns for every
+        nested descendant (they all share the same ``family_root``),
+        which double-counts them on the root and creates spurious
+        resume windows on the canvas.
+        """
+        for fork_sid in self._fd.fork_session_ids():
+            if fork_sid in skip:
+                continue
             root = self._fd.family_root(fork_sid)
             if root is None:
                 continue
-            if fork_sid in callstack_children:
-                continue
-            # Divergence text is now lazy and read straight from the
-            # mtime-cached SessionScan via the fork detector.
             label = self._fd.divergence_text_for(fork_sid) or fork_sid[:8]
             started_at = self._fork_birth(fork_sid)
             status, ended_at = self._infer_fork_status(fork_sid)
-            out.setdefault(root, []).append(
-                CallSpawn(
-                    parent_session_id=root,
-                    child_session_id=fork_sid,
-                    label=label,
-                    status=status,
-                    started_at=started_at,
-                    ended_at=ended_at,
-                    invoke_id=None,
-                    source="fork",
-                )
+            yield CallSpawn(
+                parent_session_id=root,
+                child_session_id=fork_sid,
+                label=label,
+                status=status,
+                started_at=started_at,
+                ended_at=ended_at,
+                invoke_id=None,
+                source="fork",
             )
 
-        # 3. Subagents. We only care about session ids whose
-        # ``<sid>/subagents/`` directory exists on disk — those are the
-        # only sessions that *can* have a subagent trace. One os.scandir
-        # walk of project_dir is far cheaper than globbing every ``*.jsonl``
-        # just to harvest session ids; most sessions don't have subagents.
-        candidate_parents: set[str] = set(out.keys())
-        if self._project_dir.is_dir():
-            try:
-                with os.scandir(self._project_dir) as it:
-                    for entry in it:
-                        if not entry.is_dir(follow_symlinks=False):
-                            continue
-                        sub_dir = os.path.join(entry.path, "subagents")
-                        try:
-                            if os.path.isdir(sub_dir):
-                                candidate_parents.add(entry.name)
-                        except OSError:
-                            pass
-            except OSError:
-                pass
-        for parent_sid in candidate_parents:
+    def _iter_subagent_spawns(self) -> Iterator[SubagentSpawn]:
+        """Yield one SubagentSpawn per Agent/Task invocation in the project.
+
+        Reads the parent list from ``SubagentIndex.parent_sids`` — the
+        index owns the os.scandir walk for "which sids have a subagents/
+        dir". One mtime-cached pass per project per resolver lifetime.
+        """
+        for parent_sid in self._sa.parent_sids():
             for sa in self._sa.list_for_session(parent_sid):
-                out.setdefault(parent_sid, []).append(
-                    SubagentSpawn(
-                        parent_session_id=parent_sid,
-                        child_session_id=sa.synthetic_session_id,
-                        agent_id=sa.agent_id,
-                        label=sa.description or sa.agent_type or sa.agent_id[:8],
-                        status="complete",
-                        started_at=sa.created_at,
-                        ended_at=None,
-                        source="subagent",
-                    )
+                yield SubagentSpawn(
+                    parent_session_id=parent_sid,
+                    child_session_id=sa.synthetic_session_id,
+                    agent_id=sa.agent_id,
+                    label=sa.description or sa.agent_type or sa.agent_id[:8],
+                    status="complete",
+                    started_at=sa.created_at,
+                    ended_at=None,
+                    source="subagent",
                 )
-
-        # Sort each parent's list chronologically. Stable for deterministic
-        # canvas window assignment (K-th invocation → K-th window).
-        for spawns in out.values():
-            spawns.sort(
-                key=lambda s: (
-                    s.started_at.timestamp() if s.started_at else 0.0,
-                    s.child_session_id,
-                )
-            )
-
-        self._cached = out
-        return out
 
     def for_parent(self, parent_sid: str) -> list[Spawn]:
         return list(self.spawns_by_parent().get(parent_sid, []))
@@ -502,16 +504,20 @@ class SpawnResolver:
 
     # --- internals ------------------------------------------------------
 
-    def _absorb_callstack(
+    def _tasks_to_spawns(
         self,
-        out: dict[str, list[Spawn]],
         seen_pairs: set[tuple[str, str]],
         parent_sid: str,
         task: TaskNode,
         rep: Any,
-    ) -> None:
+    ) -> Iterator[CallSpawn]:
+        """Yield one CallSpawn per task in the tree, in pre-order.
+
+        ``seen_pairs`` is populated as a side effect so the fork
+        iterator can skip pairs already covered here.
+        """
         if task.session_id and parent_sid:
-            spawn = CallSpawn(
+            yield CallSpawn(
                 parent_session_id=parent_sid,
                 child_session_id=task.session_id,
                 label=task.task or task.session_id[:8],
@@ -522,11 +528,12 @@ class SpawnResolver:
                 source="callstack",
                 call_type=task.call_type,
             )
-            out.setdefault(parent_sid, []).append(spawn)
             seen_pairs.add((parent_sid, task.session_id))
         next_parent = task.session_id or parent_sid
         for child in task.children:
-            self._absorb_callstack(out, seen_pairs, next_parent, child, rep)
+            yield from self._tasks_to_spawns(
+                seen_pairs, next_parent, child, rep
+            )
 
     def _pick_parent_candidate(
         self,
