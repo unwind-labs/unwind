@@ -27,15 +27,39 @@ from .cli_cmds import session as session_cmd
 from .cli_cmds import task as task_cmd
 from .projects import ProjectPaths, claude_projects_root
 from .settings import get_settings
+from . import __version__
 
 console = Console()
 
+
+def _version_callback(value: bool) -> None:
+    if value:
+        console.print(__version__)
+        raise typer.Exit()
+
+
 app = typer.Typer(
     name="unwind",
-    help="Inspect Claude Code sessions, callstack call trees, and subagents.",
+    help=f"unwind {__version__} — inspect Claude Code sessions, callstack call trees, and subagents.",
     no_args_is_help=True,
     add_completion=False,
 )
+
+
+@app.callback()
+def _root(
+    version: Optional[bool] = typer.Option(
+        None,
+        "--version",
+        "-V",
+        help="Show version and exit.",
+        callback=_version_callback,
+        is_eager=True,
+    ),
+) -> None:
+    pass
+
+
 app.add_typer(project_cmd.app, name="project", help="Inspect known projects.")
 app.add_typer(session_cmd.app, name="session", help="Inspect sessions in a project.")
 app.add_typer(messages_cmd.app, name="messages", help="Read session messages.")
