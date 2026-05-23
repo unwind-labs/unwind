@@ -26,15 +26,27 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, NamedTuple, Optional
 
+import re
+
 from ._cache import PathCache
 from .jsonl import (
     EPOCH,
     RETURN_RE as _RETURN_RE,
     YIELD_RE as _YIELD_RE,
+    _text_blocks,
     extract_assistant_text as _extract_assistant_text,
     iter_lines,
     parse_ts as _parse_ts,
 )
+
+
+_STARTING_TASK_RE = re.compile(
+    r"##\s*Starting\s+Task[^\n]*\n+\s*(\S[^\n]*)", re.IGNORECASE
+)
+# How many of the JSONL's leading user messages SessionScan keeps for
+# divergence-text fallback. Enough to find a non-inherited prompt
+# without bloating the per-scan memory footprint.
+_USER_PREFIX_CAP = 10
 from .pricing import cost_usd as _cost_usd
 from .status import Status, from_raw as _from_raw_status, merge as _merge_status
 
@@ -111,6 +123,18 @@ class SessionScan:
     # at the latest envelope, because that's the terminal state.
     last_envelope_kind: Optional[str] = None
     last_envelope_ts: Optional[datetime] = None
+    # For fork-detected sessions: the assigned task label captured from
+    # the FIRST ``queue-operation`` record whose content matches
+    # ``## Starting Task ... /task-X``. This is the callstack runtime's
+    # primary divergence signal — when present, ForkDetector returns it
+    # verbatim as the spawn label.
+    queue_op_starting_task: Optional[str] = None
+    # Fallback divergence source: the first few ``user``-record (uuid,
+    # text) pairs in the JSONL. ForkDetector filters these against the
+    # family root's uuid set to find the first message that ISN'T
+    # inherited from the parent (i.e. the divergent prompt). Capped so
+    # that long sessions don't bloat the cache.
+    first_user_texts: list[tuple[str, str]] = field(default_factory=list)
     # Per-assistant-message token usage events. ``model`` is the
     # assistant message's ``message.model`` string, kept per-event so
     # cost can be priced at the rate of whichever model that specific
@@ -250,6 +274,21 @@ def scan_session(path: Path) -> SessionScan:
             # Tool results leave state alone (mid-turn tool processing);
             # real user replies reset both flags.
             at_user_prompt, has_returned = False, False
+            u = rec.get("uuid")
+            if (
+                isinstance(u, str)
+                and len(scan.first_user_texts) < _USER_PREFIX_CAP
+            ):
+                scan.first_user_texts.append(
+                    (u, _text_blocks(rec.get("message"), " ") or "")
+                )
+        elif rtype == "queue-operation":
+            if scan.queue_op_starting_task is None:
+                content = rec.get("content")
+                if isinstance(content, str):
+                    m = _STARTING_TASK_RE.search(content)
+                    if m:
+                        scan.queue_op_starting_task = m.group(1).strip()
         elif rtype == "system" and rec.get("subtype") == "stop_hook_summary":
             # End-of-turn marker. Sets at_user_prompt but doesn't touch
             # has_returned — a stop hook after a return envelope mustn't

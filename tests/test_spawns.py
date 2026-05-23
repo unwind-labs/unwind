@@ -19,11 +19,12 @@ from unwind.subagents import SubagentIndex
 
 def _make_resolver(project_dir: Path, log_dir: Path) -> SpawnResolver:
     """Build a resolver wired to a CanvasTreeBuilder for SessionScan-driven
-    fork status (mirrors what registry.spawn_resolver_for_slug does)."""
+    fork status AND divergence text (mirrors what
+    registry.spawn_resolver_for_slug does in production)."""
     builder = CanvasTreeBuilder(project_dir)
     return SpawnResolver(
         CallstackIndex(log_dir),
-        ForkDetector(project_dir),
+        ForkDetector(project_dir, session_scanner=builder.get_scan),
         SubagentIndex(project_dir),
         project_dir=project_dir,
         session_scanner=builder.get_scan,
@@ -1532,3 +1533,91 @@ def test_scan_session_tracks_last_envelope_across_resets(tmp_path: Path):
     # has_returned IS persistent in this case because no event followed
     # the return — sanity-check no regression.
     assert scan.has_returned is True
+
+
+def test_divergence_text_from_session_scan(tmp_path: Path):
+    """ForkDetector.divergence_text_for reads from the SessionScan's
+    ``queue_op_starting_task`` field — no second JSONL walk.
+
+    The scan is mtime-cached, so repeated lookups are free."""
+    from unwind.canvas_tree import CanvasTreeBuilder
+    from unwind.fork_detect import ForkDetector
+
+    proj = tmp_path / "proj"
+    _write_jsonl(
+        proj / "ROOT.jsonl",
+        [
+            {
+                "uuid": "head-uuid",
+                "type": "user",
+                "sessionId": "ROOT",
+                "timestamp": "2026-05-04T10:00:00.000Z",
+                "message": {"role": "user", "content": "kick off"},
+            }
+        ],
+    )
+    _write_jsonl(proj / "CHILD.jsonl", _fork_prologue_record(uuid="head-uuid"))
+
+    builder = CanvasTreeBuilder(proj)
+    fd = ForkDetector(proj, session_scanner=builder.get_scan)
+
+    assert fd.divergence_text_for("CHILD") == "/task-x"
+
+    # Sanity: the scan itself captures the value (i.e. we deleted the
+    # parallel walk in fork_detect.py).
+    scan = builder.get_scan("CHILD")
+    assert scan.queue_op_starting_task == "/task-x"
+
+
+def test_divergence_text_fallback_uses_first_user_texts(tmp_path: Path):
+    """When no ``queue-operation`` record carries a starting-task marker
+    (manual ``claude --fork-session`` — not callstack-spawned), divergence
+    falls back to the first user message whose uuid ISN'T inherited from
+    the family root."""
+    from unwind.canvas_tree import CanvasTreeBuilder
+    from unwind.fork_detect import ForkDetector
+
+    proj = tmp_path / "proj"
+    # Root with one user record.
+    _write_jsonl(
+        proj / "ROOT.jsonl",
+        [
+            {
+                "uuid": "shared-uuid",
+                "type": "user",
+                "sessionId": "ROOT",
+                "timestamp": "2026-05-04T10:00:00.000Z",
+                "message": {"role": "user", "content": "inherited prompt"},
+            }
+        ],
+    )
+    # Fork: prologue (no Starting-Task marker) + inherited user + divergent user.
+    _write_jsonl(
+        proj / "CHILD.jsonl",
+        [
+            {
+                "type": "queue-operation",
+                "operation": "enqueue",
+                "content": "You are running in a forked session...",
+            },
+            {
+                "uuid": "shared-uuid",
+                "type": "user",
+                "sessionId": "CHILD",
+                "timestamp": "2026-05-04T10:00:00.000Z",
+                "message": {"role": "user", "content": "inherited prompt"},
+            },
+            {
+                "uuid": "divergent-uuid",
+                "type": "user",
+                "sessionId": "CHILD",
+                "timestamp": "2026-05-04T10:00:01.000Z",
+                "message": {"role": "user", "content": "do the divergent thing"},
+            },
+        ],
+    )
+
+    builder = CanvasTreeBuilder(proj)
+    fd = ForkDetector(proj, session_scanner=builder.get_scan)
+
+    assert fd.divergence_text_for("CHILD") == "do the divergent thing"

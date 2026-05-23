@@ -256,9 +256,8 @@ class SpawnResolver:
                 continue
             if fork_sid in callstack_children:
                 continue
-            # Trigger divergence-text computation lazily for every fork
-            # under this root (cheap if cached).
-            self._fd._enrich_divergence_for_root(root)  # type: ignore[attr-defined]
+            # Divergence text is now lazy and read straight from the
+            # mtime-cached SessionScan via the fork detector.
             label = self._fd.divergence_text_for(fork_sid) or fork_sid[:8]
             started_at = self._fork_birth(fork_sid)
             status, ended_at = self._infer_fork_status(fork_sid)

@@ -18,15 +18,14 @@ This is run on demand and cached by JSONL (mtime, size).
 """
 from __future__ import annotations
 
-import re
 import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from ._cache import PathCache
-from .jsonl import _text_blocks, file_birth_ts, iter_lines
+from .jsonl import file_birth_ts, iter_lines
 from .projects import project_jsonl_listing
 
 
@@ -75,16 +74,25 @@ def _build_probe_from_path(path: Path) -> Optional[_Probe]:
 class ForkDetector:
     """Per-project heuristic fork classifier."""
 
-    def __init__(self, project_dir: Path) -> None:
+    def __init__(
+        self,
+        project_dir: Path,
+        *,
+        session_scanner: Optional[Any] = None,
+    ) -> None:
         self._project_dir = project_dir
         self._lock = threading.Lock()
         self._probe_cache = PathCache(_build_probe_from_path)
         self._probes: dict[str, _Probe] = {}
-        # divergence_text is computed once per fork session and never changes
-        # (it's the assigned task name from the queue-operation record). Keep
-        # it in a separate map that survives ``_refresh``.
-        self._divergence_text: dict[str, Optional[str]] = {}
-        self._divergence_resolved: set[str] = set()
+        # ``session_scanner(sid) -> SessionScan`` from canvas_tree. Wired
+        # via registry.fork_detector_for_slug so divergence-text lookup
+        # reads from the canonical mtime-cached scan instead of doing a
+        # separate per-fork walk. Optional so tests can omit it.
+        self._scanner = session_scanner
+        # Cache of the family root's uuid set (root_sid -> set[uuid]).
+        # Used by divergence_text_for's fallback path; collect_uuids is
+        # not free, so memoize per refresh signature.
+        self._root_uuids_cache: dict[tuple[str, tuple], set[str]] = {}
         self._last_refresh_ts: float = 0.0
         self._last_signature: tuple = ()
         self._last_dir_mtime: float = -1.0
@@ -160,9 +168,39 @@ class ForkDetector:
             return marked
 
     def divergence_text_for(self, session_id: str) -> Optional[str]:
-        """Return the cached divergence text for a fork, if known."""
-        with self._lock:
-            return self._divergence_text.get(session_id)
+        """Return the label identifying this fork's assigned task.
+
+        Reads from the canonical :class:`canvas_tree.SessionScan` (mtime/
+        size-cached). Two priority sources:
+
+        1. ``queue_op_starting_task`` — captured by ``scan_session``
+           from the fork's first ``queue-operation`` record. The
+           callstack runtime writes this when it spawns the fork, so
+           it's the most reliable signal even when uuids are inherited.
+        2. ``first_user_texts`` filtered against the family root's uuid
+           set — fallback for forks that didn't go through callstack's
+           runtime (manual ``claude --fork-session``). Returns the text
+           of the first user message whose uuid ISN'T inherited.
+
+        Returns ``None`` when no scanner is wired (tests) or when the
+        fork has no recognizable divergence signal.
+        """
+        if self._scanner is None:
+            return None
+        scan = self._scanner(session_id)
+        if scan is None:
+            return None
+        if scan.queue_op_starting_task:
+            return scan.queue_op_starting_task
+        # Fallback: first user message whose uuid is NOT inherited from
+        # the family root. Filter the cached user-prefix list.
+        root_uuids = self._family_root_uuids(session_id)
+        if root_uuids is None:
+            return None
+        for uuid, text in scan.first_user_texts:
+            if uuid not in root_uuids:
+                return text or None
+        return None
 
     def birth_ts(self, session_id: str) -> Optional[float]:
         """Return the JSONL birth timestamp for ``session_id``, or ``None``
@@ -182,16 +220,14 @@ class ForkDetector:
         Used to resolve in-flight tree rows whose ``session_id`` hasn't yet
         been written to ``report.yaml`` by the callstack plugin.
         """
-        self._enrich_divergence_for_root(root_session_id)
         candidates = self.children_of(root_session_id)
         target = (task or "").strip()
         if not target:
             return None
-        with self._lock:
-            for sid in candidates:
-                text = self._divergence_text.get(sid)
-                if text and text.strip() == target:
-                    return sid
+        for sid in candidates:
+            text = self.divergence_text_for(sid)
+            if text and text.strip() == target:
+                return sid
         return None
 
     # --- internals -------------------------------------------------------
@@ -205,49 +241,36 @@ class ForkDetector:
             out.setdefault(head, []).append(sid)
         return out
 
-    def _enrich_divergence_for_root(self, root_session_id: str) -> None:
-        """Compute ``divergence_text`` for every fork sharing this root.
+    def _family_root_uuids(self, fork_sid: str) -> Optional[set[str]]:
+        """Return the family root's uuid set, memoized by refresh signature.
 
-        The divergence text is the first user message in the fork whose uuid
-        is NOT in the root's uuid set — that's the prompt that started the
-        fork's own work.
+        Used by ``divergence_text_for``'s fallback path. The cache key
+        includes ``_last_signature`` so any change to the project's
+        JSONLs invalidates the entry. Returns ``None`` if the root
+        can't be resolved or its JSONL is missing.
         """
         from .jsonl import collect_uuids
 
+        root = self.family_root(fork_sid)
+        if root is None:
+            return None
         with self._lock:
-            target = self._probes.get(root_session_id)
-            if target is None or target.head is None:
-                return
-            head = target.head
-            members = [
-                sid
-                for sid, p in self._probes.items()
-                if p.head == head and sid != root_session_id
-            ]
-            if not members:
-                return
-            pending = [s for s in members if s not in self._divergence_resolved]
-            if not pending:
-                return
-
-        # Heavy I/O outside the lock.
-        root_path = self._project_dir / f"{root_session_id}.jsonl"
+            sig = self._last_signature
+            key = (root, sig)
+            cached = self._root_uuids_cache.get(key)
+            if cached is not None:
+                return cached
+        root_path = self._project_dir / f"{root}.jsonl"
         if not root_path.is_file():
-            return
-        root_uuids = collect_uuids(root_path)
-
-        results: dict[str, Optional[str]] = {}
-        for sid in pending:
-            fork_path = self._project_dir / f"{sid}.jsonl"
-            if not fork_path.is_file():
-                results[sid] = None
-                continue
-            results[sid] = _first_divergent_user_text(fork_path, root_uuids)
-
+            return None
+        uuids = collect_uuids(root_path)
         with self._lock:
-            for sid, text in results.items():
-                self._divergence_text[sid] = text
-                self._divergence_resolved.add(sid)
+            # Drop stale entries from previous signatures to bound memory.
+            for stale_key in list(self._root_uuids_cache.keys()):
+                if stale_key[1] != sig:
+                    self._root_uuids_cache.pop(stale_key, None)
+            self._root_uuids_cache[key] = uuids
+        return uuids
 
     def _refresh(self) -> None:
         now = time.monotonic()
@@ -315,47 +338,3 @@ def _build_probe(path: Path, mtime: float, size: int) -> _Probe:
     )
 
 
-_STARTING_TASK_RE = re.compile(
-    r"##\s*Starting\s+Task[^\n]*\n+\s*(\S[^\n]*)", re.IGNORECASE
-)
-
-
-def _first_divergent_user_text(path: Path, ancestor_uuids: set[str]) -> Optional[str]:
-    """Return a label identifying this fork's assigned task.
-
-    Strategy in priority order:
-
-    1. ``queue-operation`` records: callstack writes one of these as the
-       fork's first action. Its ``content`` ends with
-       ``## Starting Task [...] \\n\\n /task-X`` — that's our most reliable
-       signal even when uuids are inherited (queue-operation records lack a
-       ``uuid`` field, so they aren't filtered by the ancestor set).
-    2. First ``user`` message whose uuid is NOT in the ancestor's uuid set —
-       fallback for forks that didn't go through callstack's runtime.
-    """
-    queue_text: Optional[str] = None
-    fallback_user_text: Optional[str] = None
-
-    for rec in iter_lines(path):
-        rtype = rec.get("type")
-
-        if rtype == "queue-operation" and queue_text is None:
-            content = rec.get("content")
-            if isinstance(content, str):
-                m = _STARTING_TASK_RE.search(content)
-                if m:
-                    queue_text = m.group(1).strip()
-                    # First queue-op is enough — early return.
-                    return queue_text
-            continue
-
-        if rtype != "user":
-            continue
-        if fallback_user_text is not None:
-            continue
-        u = rec.get("uuid")
-        if not isinstance(u, str) or u in ancestor_uuids:
-            continue
-        fallback_user_text = _text_blocks(rec.get("message"), " ")
-
-    return queue_text or fallback_user_text

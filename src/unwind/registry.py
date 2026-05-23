@@ -158,7 +158,17 @@ def callstack_for_slug(slug: str) -> CallstackIndex:
 
 
 def fork_detector_for_slug(slug: str) -> ForkDetector:
-    return _per_slug(_fork_detectors, slug, lambda idx: ForkDetector(idx.paths.project_dir))
+    def make(idx) -> ForkDetector:
+        # Inject the canvas builder's mtime-cached scanner so
+        # divergence_text_for reads from the canonical SessionScan
+        # instead of re-walking each fork JSONL.
+        builder = canvas_tree_builder_for_slug(slug)
+        return ForkDetector(
+            idx.paths.project_dir,
+            session_scanner=builder.get_scan,
+        )
+
+    return _per_slug(_fork_detectors, slug, make)
 
 
 def canvas_tree_builder_for_slug(slug: str) -> CanvasTreeBuilder:
