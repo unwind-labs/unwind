@@ -299,7 +299,12 @@ def test_aggregate_status_returns_terminal_for_main_when_chain_complete(tmp_path
         },
     )
     ci = CallstackIndex(log)
-    assert ci.aggregate_status_for_session("MAIN") == "complete"
+    # Canonical "done" — the boundary translator in unwind.status maps the
+    # callstack ``complete``/``failed``/``error`` family to canonical
+    # ``done``/``failed``. Callers (sessions_api, cli_cmds.session) must
+    # therefore override with live-process detection for "main" sessions
+    # whose terminal-callstack-status would otherwise mark them done.
+    assert ci.aggregate_status_for_session("MAIN") == "done"
     assert ci.is_callstack_task("MAIN") is False
 
 

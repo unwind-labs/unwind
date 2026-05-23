@@ -29,6 +29,8 @@ from .jsonl import EPOCH, parse_ts as _parse_ts
 
 import yaml
 
+from .status import Status, from_raw as _from_raw_status, merge as _merge_status
+
 
 @dataclass
 class TaskNode:
@@ -269,31 +271,30 @@ class CallstackIndex:
         canonical, _, _ = self._latest_view()
         return session_id in canonical
 
-    def aggregate_status_for_session(self, session_id: str) -> Optional[str]:
-        """Return a single status for ``session_id`` that propagates the
-        status of its most-active descendant up.
+    def aggregate_status_for_session(self, session_id: str) -> Optional["Status"]:
+        """Return the canonical status for ``session_id`` and all descendants.
 
-        A parent that's ``awaiting_child`` for a yielded grandchild should
-        itself surface as yielded so the whole chain lights up in the UI.
+        Walks the latest-report view and merges the session's own status
+        with every descendant's via :func:`unwind.status.merge`. Priority
+        is ``live > yield > failed > done`` — a running descendant pulls
+        an otherwise-yielded ancestor's status back to ``live`` so the
+        UI signals that work is still happening.
 
-        Priority (highest first): ``yielded`` > ``running`` / ``in_progress``
-        / ``pending`` > the session's own terminal status (``complete`` /
-        ``failed`` / ``error``). Returns ``None`` if this session doesn't
-        appear in any report.
-
-        Uses ``_latest_view`` so a stale yielded snapshot from an older
-        report doesn't override the current ``complete`` from a newer one.
+        Returns ``None`` if this session doesn't appear in any report.
+        Callers that need to distinguish "session is live (genuinely in
+        flight)" from "session is waiting" should check the canonical
+        ``"live"`` / ``"yield"`` directly.
         """
         canonical, children_sids, root_status = self._latest_view()
         if session_id not in canonical and session_id not in root_status:
             return None
 
-        statuses: list[str] = []
+        statuses: list[Optional[Status]] = []
         own = canonical.get(session_id)
-        if own is not None and own.status:
-            statuses.append(own.status.lower())
+        if own is not None:
+            statuses.append(_from_raw_status(own.status))
         if session_id in root_status:
-            statuses.append(root_status[session_id])
+            statuses.append(_from_raw_status(root_status[session_id]))
 
         visited: set[str] = {session_id}
         queue: list[str] = list(children_sids.get(session_id, []))
@@ -303,20 +304,15 @@ class CallstackIndex:
                 continue
             visited.add(sid)
             node = canonical.get(sid)
-            if node is not None and node.status:
-                statuses.append(node.status.lower())
+            if node is not None:
+                statuses.append(_from_raw_status(node.status))
             if sid in root_status:
-                statuses.append(root_status[sid])
+                statuses.append(_from_raw_status(root_status[sid]))
             queue.extend(children_sids.get(sid, []))
 
-        if any(s == "yielded" for s in statuses):
-            return "yielded"
-        if any(s in ("running", "in_progress", "pending") for s in statuses):
-            return "running"
-        for s in statuses:
-            if s in ("complete", "failed", "error"):
-                return s
-        return statuses[0] if statuses else None
+        if not any(s is not None for s in statuses):
+            return None
+        return _merge_status(statuses)
 
     def direct_children_of(self, session_id: str) -> list["TaskNode"]:
         """Find this session's direct children across every report.

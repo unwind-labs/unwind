@@ -36,6 +36,7 @@ from .jsonl import (
     parse_ts as _parse_ts,
 )
 from .pricing import cost_usd as _cost_usd
+from .status import Status, from_raw as _from_raw_status, merge as _merge_status
 
 
 # --- Data classes -------------------------------------------------------
@@ -406,15 +407,18 @@ def _compute_windows(
         # waiting" — earlier windows whose task yielded got resumed
         # (that's how a later window came to exist) and are now in the
         # past, so they show as ``done``. The final window's status
-        # mirrors the invocation's task status verbatim.
-        inv_status = (inv.status or "").lower()
+        # mirrors the invocation's task status (via the canonical
+        # translator) but gates ``live`` on actual process liveness.
+        canonical = _from_raw_status(inv.status) or "done"
         is_last = k == n - 1
         if not is_last:
-            status = "done"
-        elif inv_status == "yielded":
+            status: Status = "done"
+        elif canonical == "yield":
             status = "yield"
-        elif inv_status in ("running", "in_progress", "pending"):
+        elif canonical == "live":
             status = "live" if is_live else "done"
+        elif canonical == "failed":
+            status = "failed"
         else:
             status = "done"
 
@@ -457,25 +461,34 @@ def _attribute_self_usage(
         _add_into(w.self_cost, _cost_usd(ev.model, ev.cw, ev.cr, ev.r, ev.w))
 
 
-_STATUS_PRIORITY = {"done": 0, "yield": 1, "live": 2}
-
-
-def _aggregate_subtree_status(node: WindowNode) -> str:
+def _aggregate_subtree_status(
+    node: WindowNode, _seen: Optional[set[str]] = None
+) -> Status:
     """Post-order walk: each node's ``subtree_status`` = the highest-priority
-    status across the node itself and every descendant. Priority is
-    ``live`` > ``yield`` > ``done`` — a single live descendant pulls an
-    otherwise-finished ancestor's rail back into "live" so the UI signals
-    that work is still happening somewhere below.
+    status across the node itself and every descendant.
+
+    Delegates priority to :func:`unwind.status.merge` — ``live > yield >
+    failed > done``. A single live descendant pulls an otherwise-finished
+    ancestor's rail back into ``live`` so the UI signals that work is
+    still happening somewhere below.
+
+    The ``_seen`` set defends against accidental cycles in the wiring
+    pass (a window grafted under two parents). Without it, the recursion
+    would loop forever; with it, the second visit returns ``done`` so
+    aggregation stays bounded.
     """
-    best = node.status
-    best_p = _STATUS_PRIORITY.get(best, 0)
-    for child in node.children:
-        child_status = _aggregate_subtree_status(child)
-        child_p = _STATUS_PRIORITY.get(child_status, 0)
-        if child_p > best_p:
-            best, best_p = child_status, child_p
-    node.subtree_status = best
-    return best
+    if _seen is None:
+        _seen = set()
+    if node.window_id in _seen:
+        return "done"
+    _seen.add(node.window_id)
+    own = _from_raw_status(node.status) or "done"
+    child_statuses: list[Optional[Status]] = [
+        _aggregate_subtree_status(c, _seen) for c in node.children
+    ]
+    merged = _merge_status([own, *child_statuses])
+    node.subtree_status = merged
+    return merged
 
 
 def _aggregate_subtree_usage(node: WindowNode) -> tuple[dict[str, int], dict[str, float]]:

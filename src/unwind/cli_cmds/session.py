@@ -37,18 +37,13 @@ def _row_for(summary, ci, project_path: Optional[str]) -> SessionRow:
     # — short version: terminal callstack status on a "root only" (main)
     # session must defer to live process detection so a session the user is
     # still driving doesn't get marked done after its last invoke completes.
-    status = "done"
     cs_status = ci.aggregate_status_for_session(summary.session_id) if ci.has_logs else None
-    if cs_status is not None:
-        cs_norm = cs_status.lower()
-        if cs_norm == "yielded":
-            status = "yield"
-        elif cs_norm in ("running", "in_progress"):
-            status = "live"
-        elif ci.is_callstack_task(summary.session_id):
-            status = "done"
-        else:
-            status = session_status(summary.cwd or project_path, last_epoch)
+    if cs_status == "yield":
+        status = "yield"
+    elif cs_status == "live":
+        status = "live"
+    elif cs_status is not None and ci.is_callstack_task(summary.session_id):
+        status = "done"
     else:
         status = session_status(summary.cwd or project_path, last_epoch)
     return SessionRow(

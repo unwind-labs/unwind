@@ -128,12 +128,12 @@ export type WindowNode = {
   label: string;
   window_start: string | null;
   window_end: string | null;
-  status: "done" | "live" | "yield";
+  status: "done" | "live" | "yield" | "failed";
   /** Max-priority status across this window and every descendant
-   *  (``live`` > ``yield`` > ``done``). Lets the rail on an
-   *  otherwise-finished ancestor reflect "work is still happening
+   *  (``live`` > ``yield`` > ``failed`` > ``done``). Lets the rail on
+   *  an otherwise-finished ancestor reflect "work is still happening
    *  somewhere below". */
-  subtree_status: "done" | "live" | "yield";
+  subtree_status: "done" | "live" | "yield" | "failed";
   kind: "root" | "call" | "subagent" | "resume";
   parent_window_id: string | null;
   window_index: number;

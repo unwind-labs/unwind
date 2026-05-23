@@ -247,8 +247,7 @@ def _fork_task_still_running(ci, builder, sid: str) -> bool:
     """
     if not ci.has_logs or not ci.is_callstack_task(sid):
         return False
-    cs = ci.aggregate_status_for_session(sid)
-    if not cs or cs.lower() not in ("running", "in_progress"):
+    if ci.aggregate_status_for_session(sid) != "live":
         return False
     return not builder.get_scan(sid).has_returned
 
@@ -276,11 +275,10 @@ def _compute_session_status(
     """
     del cwd  # currently unused; reserved for future per-session checks
     cs_status = ci.aggregate_status_for_session(session_id) if ci.has_logs else None
-    cs_norm = cs_status.lower() if cs_status else None
     is_fork = ci.has_logs and ci.is_callstack_task(session_id)
 
     if is_fork:
-        if cs_norm == "yielded":
+        if cs_status == "yield":
             return "yield"
         builder = _rs_builder(rs, slug)
         return "live" if _fork_task_still_running(ci, builder, session_id) else "done"
@@ -298,7 +296,7 @@ def _compute_session_status(
             active_session_id = _active_session_for_project(index, project_path)
     if session_id != active_session_id:
         return "done"
-    if cs_norm == "yielded":
+    if cs_status == "yield":
         return "yield"
     # Reuse the canvas builder's cached SessionScan (mtime/size-keyed)
     # instead of re-walking the JSONL: the at-user-prompt state machine

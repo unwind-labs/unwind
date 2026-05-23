@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Iterable, Literal, Optional
 
 from .jsonl import parse_ts as _parse_ts, read_records
+from .status import from_raw as _from_raw_status, is_done as _is_done
 
 
 Role = Literal["user", "assistant", "tool_use", "tool_result", "system"]
@@ -204,41 +205,20 @@ def _resolver_from_legacy_args(
 def _done_for_spawn(s: Spawn, slug_callstack) -> Optional[bool]:
     """Map a Spawn's status to the spawn-row done flag.
 
-    For callstack spawns, prefer the LATEST status aggregated across
+    For callstack spawns, prefer the LATEST aggregated status across
     all reports (handles the "original yielded → resume completed"
     case). Falls back to the spawn's snapshot status.
     """
-    status = s.status
+    canonical = _from_raw_status(s.status)
     if (
         s.kind == "call"
         and s.child_session_id
         and slug_callstack is not None
     ):
         latest = slug_callstack.aggregate_status_for_session(s.child_session_id)
-        if latest:
-            status = latest
-    return _done_from_status(status)
-
-
-def _done_from_status(status: Optional[str]) -> Optional[bool]:
-    """Map a callstack task status into the spawn-row done flag.
-
-    From the PARENT's perspective, a CALL row is "done" the moment the
-    child returned control — including when the child yielded for user
-    input. The yield is a return; the parent's row should drop the
-    in-progress dots once that happens.
-
-    Returns True for terminal states, False for genuinely in-flight
-    states, None when unknown.
-    """
-    if not status:
-        return None
-    s = status.lower()
-    if s in ("complete", "yielded", "error", "failed"):
-        return True
-    if s in ("running", "in_progress", "pending"):
-        return False
-    return None
+        if latest is not None:
+            canonical = latest
+    return _is_done(canonical)
 
 
 def read_messages(
