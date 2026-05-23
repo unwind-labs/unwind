@@ -1,21 +1,17 @@
-import type { ReactNode } from "react";
-import { Box, DollarSign, Network } from "lucide-react";
+import { DollarSign, Network, Telescope } from "lucide-react";
 import type { TokenCost, TokenUsage } from "@/api/types";
 
 /** Footer with abbreviated token-usage counters and optional $ cost.
  *
- *  Layout:
- *  - One <table> with a header row (``Cache Write`` / ``Cache Read`` /
- *    ``Read`` / ``Write``) above four data columns. The leftmost column
- *    is a narrow icon cell — single-node icon for ``Self``, network
- *    icon for ``Subtree``, dollar icon for the root's $ row — so we
- *    stay at "4 data columns" without burning width on text labels.
- *  - The root card additionally renders a ``$N.NN total`` line below
- *    the table summing the subtree cost.
+ *  Layout (transposed): token categories run DOWN as rows, scopes
+ *  (``Here`` / ``Sub-calls`` / ``$``) run ACROSS as columns. The narrow
+ *  card is 380px wide — 4 category rows × up-to-3 scope columns reads
+ *  more naturally than 3 scope rows × 4 category columns (the older
+ *  layout pushed numbers into the tight right edge).
  *
- *  Font-size 80% (≈ -2px from the footer's 10px base) is applied to the
- *  table itself so headers, data, and the icon column all scale
- *  together. */
+ *  A grand-total $ amount renders below the table whenever the cost
+ *  column is shown — that's every card now (leaves see the cost of
+ *  their own work; branches see the cumulative subtree cost). */
 export function UsageFooter({
   self,
   subtree,
@@ -43,68 +39,68 @@ export function UsageFooter({
   }
   const costTotal =
     subtreeCost.cw + subtreeCost.cr + subtreeCost.r + subtreeCost.w;
+  const categories: { key: keyof TokenUsage; label: string }[] = [
+    { key: "cw", label: "Cache Write" },
+    { key: "cr", label: "Cache Read" },
+    { key: "r", label: "Read" },
+    { key: "w", label: "Write" },
+  ];
   return (
     <footer className="border-t border-border/60 px-4 py-2 font-mono text-[10px] text-muted-foreground/90">
       <table className="w-full tabular-nums" style={{ fontSize: "80%" }}>
         <thead>
           <tr className="text-[9px] font-medium uppercase tracking-[0.08em] text-muted-foreground/60">
-            <th className="w-4" />
-            <th className="text-right font-medium">Cache Write</th>
-            <th className="text-right font-medium">Cache Read</th>
-            <th className="text-right font-medium">Read</th>
-            <th className="text-right font-medium">Write</th>
+            <th className="text-left font-medium" />
+            <th className="pl-2 text-right font-medium">
+              <span className="inline-flex items-center justify-end">
+                <Telescope
+                  className="h-3.5 w-3.5"
+                  aria-label="this window"
+                />
+              </span>
+            </th>
+            {showSubtree ? (
+              <th className="pl-2 text-right font-medium">
+                <span className="inline-flex items-center justify-end">
+                  <Network
+                    className="h-3.5 w-3.5 -rotate-90"
+                    aria-label="this window + sub-calls"
+                  />
+                </span>
+              </th>
+            ) : null}
+            {showCost ? (
+              <th className="pl-2 text-right font-medium text-emerald-300/90">
+                <span className="inline-flex items-center justify-end">
+                  <DollarSign className="h-3.5 w-3.5" aria-label="cost" />
+                </span>
+              </th>
+            ) : null}
           </tr>
         </thead>
         <tbody>
-          <UsageRow
-            icon={<Box className="h-3 w-3" aria-label="self" />}
-            u={self}
-          />
-          {showSubtree ? (
-            <UsageRow
-              icon={<Network className="h-3 w-3" aria-label="subtree" />}
-              u={subtree}
-            />
-          ) : null}
-          {showCost ? <CostRow c={subtreeCost} /> : null}
+          {categories.map(({ key, label }) => (
+            <tr key={key}>
+              <td className="text-left text-muted-foreground/70">{label}</td>
+              <td className="pl-2 text-right">{fmtTokens(self[key])}</td>
+              {showSubtree ? (
+                <td className="pl-2 text-right">{fmtTokens(subtree[key])}</td>
+              ) : null}
+              {showCost ? (
+                <td className="pl-2 text-right text-emerald-300/90">
+                  {fmtUsd(subtreeCost[key])}
+                </td>
+              ) : null}
+            </tr>
+          ))}
         </tbody>
       </table>
       {showCost ? (
         <div className="mt-1 text-right tabular-nums text-emerald-300/90">
-          {fmtUsd(costTotal)} total
+          {fmtUsd(costTotal)}
         </div>
       ) : null}
     </footer>
-  );
-}
-
-function UsageRow({ icon, u }: { icon: ReactNode; u: TokenUsage }) {
-  return (
-    <tr>
-      <td className="w-4 pr-1 text-muted-foreground/70">{icon}</td>
-      <td className="text-right">{fmtTokens(u.cw)}</td>
-      <td className="text-right">{fmtTokens(u.cr)}</td>
-      <td className="text-right">{fmtTokens(u.r)}</td>
-      <td className="text-right">{fmtTokens(u.w)}</td>
-    </tr>
-  );
-}
-
-/** Per-category $ row on the root card. Uses the same 4-column layout
- *  as the token rows so the dollar amounts align vertically with their
- *  corresponding token counts. The grand total lives on its own line
- *  below the table. */
-function CostRow({ c }: { c: TokenCost }) {
-  return (
-    <tr className="text-emerald-300/90">
-      <td className="w-4 pr-1">
-        <DollarSign className="h-3 w-3" aria-label="cost" />
-      </td>
-      <td className="text-right">{fmtUsd(c.cw)}</td>
-      <td className="text-right">{fmtUsd(c.cr)}</td>
-      <td className="text-right">{fmtUsd(c.r)}</td>
-      <td className="text-right">{fmtUsd(c.w)}</td>
-    </tr>
   );
 }
 

@@ -13,7 +13,7 @@ import {
 import { SessionListPane } from "@/panes/SessionListPane";
 import { CanvasPane } from "@/panes/CanvasPane";
 import { ProjectPicker } from "@/panes/ProjectPicker";
-import { FolderSearch, FolderTree } from "lucide-react";
+import { FolderSearch, FolderTree, Telescope } from "lucide-react";
 
 export function App() {
   const slug = useUi((s) => s.slug);
@@ -195,9 +195,10 @@ function TopBar({
       <button
         type="button"
         onClick={openPicker}
-        className="text-sm font-semibold hover:underline"
+        className="inline-flex items-center gap-1.5 text-sm font-semibold hover:underline"
         title="pick a folder"
       >
+        <Telescope className="h-4 w-4" />
         unwind
       </button>
       <div className="text-xs text-muted-foreground">

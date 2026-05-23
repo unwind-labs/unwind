@@ -2,7 +2,7 @@ import { useProjects } from "@/api/client";
 import { useUi } from "@/store/ui";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Badge } from "@/components/ui/badge";
-import { FolderOpen, X } from "lucide-react";
+import { FolderOpen, Telescope, X } from "lucide-react";
 import { cn, formatRelativeTime } from "@/lib/utils";
 
 function basename(p: string): string {
@@ -23,7 +23,10 @@ export function ProjectPicker({ onClose }: { onClose?: () => void } = {}) {
     <div className="mx-auto flex h-full w-full max-w-2xl flex-col">
       <header className="flex items-start justify-between gap-3 px-6 pt-10">
         <div>
-          <div className="text-xl font-semibold">unwind</div>
+          <div className="inline-flex items-center gap-2 text-xl font-semibold">
+            <Telescope className="h-5 w-5" />
+            unwind
+          </div>
           <div className="mt-1 text-xs text-muted-foreground">
             pick a project to observe. all data lives under{" "}
             <code className="font-mono">~/.claude/projects/</code>.

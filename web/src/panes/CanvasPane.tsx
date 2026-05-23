@@ -480,7 +480,7 @@ function CanvasInner({
         fitView
         fitViewOptions={{ padding: 0.2, maxZoom: 1.0, minZoom: 0.05 }}
         minZoom={0.05}
-        maxZoom={1.5}
+        maxZoom={2.25}
         proOptions={{ hideAttribution: true }}
         nodesDraggable={false}
         nodesConnectable={false}

@@ -8,6 +8,7 @@ import {
   ChevronRight,
   CornerDownLeft,
   Leaf,
+  Telescope,
   Trees,
   Loader2,
 } from "lucide-react";
@@ -27,8 +28,11 @@ const ACTIVITY_HEIGHT = 28;
 const SPAWN_HEIGHT = 36;
 const HEADER_HEIGHT = 40;
 const PADDING_Y = 8;
-const FOOTER_HEIGHT_LEAF = 26;
-const FOOTER_HEIGHT_BRANCH = 46;
+// Transposed footer table: 1 header row + 4 category rows. Leaf has
+// 1 data column (Self); branch has 2 (Self + Subtree); root adds the
+// $ column and the grand-total line below the table.
+const FOOTER_HEIGHT_LEAF = 80;
+const FOOTER_HEIGHT_BRANCH = 80;
 
 export function estimateCardHeight(
   rows: Row[],
@@ -327,6 +331,13 @@ export function CompactCardNode({ data }: { data: CompactCardData }) {
       <div className="min-w-0 flex-1">
         <header className="flex items-center justify-between gap-2 border-b border-border/60 px-4 py-3">
           <div className="flex min-w-0 flex-1 items-center gap-1.5">
+            {data.selected || data.keyboardFocused ? (
+              <Telescope
+                className="h-3.5 w-3.5 shrink-0 text-primary"
+                aria-label="current node"
+                strokeWidth={2.25}
+              />
+            ) : null}
             {data.isResumeInstance ? (
               <ChevronRight
                 className="h-3.5 w-3.5 shrink-0 text-amber-400"
@@ -405,7 +416,7 @@ export function CompactCardNode({ data }: { data: CompactCardData }) {
           subtree={data.subtreeUsage}
           subtreeCost={data.subtreeCost}
           showSubtree={data.hasCanvasDescendants}
-          showCost={data.isRoot}
+          showCost={true}
         />
       </div>
     </div>

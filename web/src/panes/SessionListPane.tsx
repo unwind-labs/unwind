@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Search } from "lucide-react";
+import { Search, Telescope } from "lucide-react";
 import { useSessions } from "@/api/client";
 import type { SessionRow, SessionStatus } from "@/api/types";
 import { useUi } from "@/store/ui";
@@ -209,6 +209,13 @@ function SessionItem({
       >
         <div className="flex items-center gap-2">
           <StatusDot status={session.status ?? "done"} />
+          {selected ? (
+            <Telescope
+              className="h-3.5 w-3.5 shrink-0 text-primary"
+              aria-label="current session"
+              strokeWidth={2.25}
+            />
+          ) : null}
           <span className="flex-1 truncate text-[13px] text-foreground">
             {session.title || shortId(session.session_id)}
           </span>
