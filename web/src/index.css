@@ -197,6 +197,13 @@
     linear-gradient(rgb(20, 23, 31), rgb(13, 16, 21));
   border-color: rgba(245, 158, 11, 0.4);
 }
+/* Live: subtree is actively running. Emerald-tinted surface so the
+   whole card reads as "in progress" from across the canvas. Same
+   shorthand-background caveat as ``.uw-card-yield`` above. */
+.dark .uw-compact-card.uw-card-live {
+  background: linear-gradient(#17392c, #000000);
+  border-color: rgba(52, 211, 153, 0.4);
+}
 .dark .uw-compact-card:hover,
 .dark .react-flow__node:focus-visible .uw-compact-card {
   box-shadow:

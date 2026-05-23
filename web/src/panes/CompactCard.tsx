@@ -285,6 +285,7 @@ export function CompactCardNode({ data }: { data: CompactCardData }) {
         // index.css) because the dark gradient surface uses the
         // ``background`` shorthand and would stomp Tailwind bg-* classes.
         railStatus === "yield" && "uw-card-yield",
+        railStatus === "live" && "uw-card-live",
       )}
       style={{
         width: COMPACT_CARD_WIDTH,
