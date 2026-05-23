@@ -2,8 +2,27 @@ from pathlib import Path
 import json
 
 from unwind.callstack import CallstackIndex
+from unwind.fork_detect import ForkDetector
 from unwind.messages import annotate_spawns, read_messages
+from unwind.spawns import SpawnResolver
 from unwind.subagents import SubagentIndex
+
+
+def _resolver(
+    project_dir: Path,
+    log_dir: Path,
+    *,
+    callstack: CallstackIndex | None = None,
+) -> SpawnResolver:
+    """Build a SpawnResolver for tests with the same wiring as
+    registry.spawn_resolver_for_slug. ``log_dir`` is the callstack log
+    dir; pass a non-existent path when callstack isn't relevant."""
+    return SpawnResolver(
+        callstack if callstack is not None else CallstackIndex(log_dir),
+        ForkDetector(project_dir),
+        SubagentIndex(project_dir),
+        project_dir=project_dir,
+    )
 
 
 def _write(tmp: Path, lines: list[dict]) -> Path:
@@ -131,9 +150,9 @@ def test_in_flight_agent_matches_pending_subagent(tmp_path: Path):
     )
 
     page = read_messages(parent_jsonl)
-    si = SubagentIndex(project_dir)
+    resolver = _resolver(project_dir, project_dir / "nope-callstack")
     annotate_spawns(
-        page.messages, current_session_id=session_id, subagent_index=si
+        page.messages, current_session_id=session_id, spawn_resolver=resolver
     )
 
     tool_uses = [m for m in page.messages if m.role == "tool_use"]
@@ -248,7 +267,13 @@ def test_sibling_callstack_invokes_dont_phantom_each_others_children(tmp_path: P
 
     page = read_messages(parent)
     ci = CallstackIndex(log_dir)
-    annotate_spawns(page.messages, slug_callstack=ci, current_session_id=session_id)
+    resolver = _resolver(tmp_path, log_dir, callstack=ci)
+    annotate_spawns(
+        page.messages,
+        slug_callstack=ci,
+        current_session_id=session_id,
+        spawn_resolver=resolver,
+    )
 
     by_id = {m.tool_use_id: m for m in page.messages if m.role == "tool_use"}
 
@@ -338,7 +363,13 @@ def test_in_flight_callstack_anchors_via_shared_report(tmp_path: Path):
 
     page = read_messages(parent)
     ci = CallstackIndex(log_dir)
-    annotate_spawns(page.messages, slug_callstack=ci, current_session_id=session_id)
+    resolver = _resolver(tmp_path, log_dir, callstack=ci)
+    annotate_spawns(
+        page.messages,
+        slug_callstack=ci,
+        current_session_id=session_id,
+        spawn_resolver=resolver,
+    )
 
     by_id = {m.tool_use_id: m for m in page.messages if m.role == "tool_use"}
 
@@ -406,7 +437,13 @@ def test_partial_completion_marks_done_per_child(tmp_path: Path):
 
     page = read_messages(parent)
     ci = CallstackIndex(log_dir)
-    annotate_spawns(page.messages, slug_callstack=ci, current_session_id=session_id)
+    resolver = _resolver(tmp_path, log_dir, callstack=ci)
+    annotate_spawns(
+        page.messages,
+        slug_callstack=ci,
+        current_session_id=session_id,
+        spawn_resolver=resolver,
+    )
 
     spec = next(m for m in page.messages if m.role == "tool_use")
     assert spec.spawn_session_ids == [f"sp-sess-{i}" for i in range(5)]

@@ -120,32 +120,22 @@ def annotate_spawns(
     slug_callstack=None,
     *,
     current_session_id: Optional[str] = None,
-    subagent_index=None,
-    fork_detector=None,
-    spawn_resolver: Optional[SpawnResolver] = None,
+    spawn_resolver: SpawnResolver,
 ) -> None:
     """Tag tool_use messages with their spawned children's session ids.
 
-    Pass ``spawn_resolver`` (preferred) for one-shot resolution. The
-    resolver consolidates callstack reports, fork detector, and the
-    subagent index — see :mod:`unwind.spawns`.
-
-    The legacy parameters ``slug_callstack``, ``subagent_index``, and
-    ``fork_detector`` are accepted for backwards compatibility (notably
-    in tests). When ``spawn_resolver`` is None, an ad-hoc resolver is
-    composed from whichever of those were provided. Anything missing is
-    handled by best-effort no-op stand-ins.
+    ``spawn_resolver`` is mandatory — it consolidates callstack reports,
+    fork detector, and the subagent index in one place (see
+    :mod:`unwind.spawns`). ``slug_callstack`` stays optional because
+    only one downstream step (the latest-aggregated-status override in
+    ``_done_for_spawn``) needs it directly.
     """
     if not current_session_id:
         # Without the parent's session id we can't anchor anything.
         # Old behaviour: silently no-op.
         return
 
-    resolver = spawn_resolver or _resolver_from_legacy_args(
-        slug_callstack, fork_detector, subagent_index
-    )
-    if resolver is None:
-        return
+    resolver = spawn_resolver
 
     spawns = resolver.anchor_to_messages(current_session_id, messages)
     spawns_by_tu: dict[str, list[Spawn]] = {}
@@ -174,37 +164,6 @@ def annotate_spawns(
         # spawns — covers the "original call yielded, later resume
         # completed" case where the spawn's snapshot status is stale.
         m.spawn_done = [_done_for_spawn(s, slug_callstack) for s in bound]
-
-
-def _resolver_from_legacy_args(
-    slug_callstack, fork_detector, subagent_index
-) -> Optional[SpawnResolver]:
-    """Compose a resolver from the legacy keyword args (used by tests)."""
-    from .callstack import CallstackIndex
-    from .fork_detect import ForkDetector
-    from .subagents import SubagentIndex
-
-    if slug_callstack is None and fork_detector is None and subagent_index is None:
-        return None
-
-    # Tests sometimes pass only one source; fill the rest with empty
-    # stand-ins rooted at a non-existent path so they're always empty.
-    from pathlib import Path as _Path
-    sentinel = _Path("/dev/null/no-data")
-
-    cs = slug_callstack if slug_callstack is not None else CallstackIndex(sentinel)
-    fd = fork_detector if fork_detector is not None else ForkDetector(sentinel)
-    sa = subagent_index if subagent_index is not None else SubagentIndex(sentinel)
-
-    # Project dir: derive from whichever real source we got, else sentinel.
-    project_dir = sentinel
-    for src in (subagent_index, fork_detector):
-        attr = getattr(src, "_project_dir", None)
-        if attr is not None:
-            project_dir = attr
-            break
-
-    return SpawnResolver(cs, fd, sa, project_dir=project_dir)
 
 
 def _done_for_spawn(s: Spawn, slug_callstack) -> Optional[bool]:

@@ -24,7 +24,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, NamedTuple, Optional
+from typing import TYPE_CHECKING, Any, Callable, NamedTuple, Optional
+
+if TYPE_CHECKING:
+    from .spawns import SpawnResolver
 
 import re
 
@@ -320,49 +323,13 @@ def _is_tool_result_record(rec: dict[str, Any]) -> bool:
 
 
 def collect_invocations(
-    callstack_index: Any = None,
-    subagent_index: Any = None,
-    *,
-    known_session_ids: Optional[set[str]] = None,
-    spawn_resolver: Any = None,
-    fork_detector: Any = None,
+    spawn_resolver: "SpawnResolver",
 ) -> dict[str, list[Invocation]]:
     """Enumerate every parent → child invocation, keyed by child session id.
 
-    Sources are unified by :class:`unwind.spawns.SpawnResolver` — one
-    place that knows about callstack reports, the fork detector (for
-    in-flight forks before ``report.yaml`` lands), and the subagent
-    index. Pass ``spawn_resolver`` for new code; the legacy
-    ``callstack_index`` / ``subagent_index`` / ``fork_detector`` kwargs
-    are accepted (composing an ad-hoc resolver) so existing tests still
-    work.
-
     Each list is sorted chronologically by ``started_at`` so the K-th
     entry corresponds to the K-th window of the child.
-
-    ``known_session_ids`` is no longer used (the resolver enumerates
-    subagent parents itself); kept as a keyword for backward
-    compatibility with the previous signature.
     """
-    del known_session_ids  # unused; kept for signature compatibility
-
-    if spawn_resolver is None:
-        from .spawns import SpawnResolver
-        from .callstack import CallstackIndex
-        from .fork_detect import ForkDetector
-        from .subagents import SubagentIndex
-
-        sentinel = Path("/dev/null/no-data")
-        cs = callstack_index or CallstackIndex(sentinel)
-        fd = fork_detector or ForkDetector(sentinel)
-        sa = subagent_index or SubagentIndex(sentinel)
-        proj_dir = (
-            getattr(fd, "_project_dir", None)
-            or getattr(sa, "_project_dir", None)
-            or sentinel
-        )
-        spawn_resolver = SpawnResolver(cs, fd, sa, project_dir=proj_dir)
-
     out: dict[str, list[Invocation]] = {}
     for parent_sid, spawns in spawn_resolver.spawns_by_parent().items():
         for s in spawns:
@@ -589,30 +556,20 @@ TitleFn = Callable[[str], Optional[str]]
 def build_canvas_tree(
     project_dir: Path,
     root_session_id: str,
-    callstack_index: Any = None,
     *,
-    subagent_index: Any = None,
-    fork_detector: Any = None,
-    spawn_resolver: Any = None,
+    spawn_resolver: "SpawnResolver",
     builder: Optional["CanvasTreeBuilder"] = None,
     is_live_session: IsLiveFn = lambda _sid: False,
     title_for: TitleFn = lambda _sid: None,
 ) -> tuple[WindowNode, list[WindowNode]]:
     """Compute the canvas tree rooted at ``root_session_id``.
 
-    Pass ``spawn_resolver`` (preferred) — a unified view over callstack
-    reports + fork detector + subagent index. The legacy individual
-    indexes are accepted for backwards compatibility (an ad-hoc
-    resolver is composed from them).
+    ``spawn_resolver`` is mandatory — it unifies the callstack reports,
+    fork detector, and subagent index views into one Spawn iterator.
 
     Returns ``(root_window, all_windows_flat)``.
     """
-    invocations_by_target = collect_invocations(
-        callstack_index,
-        subagent_index,
-        spawn_resolver=spawn_resolver,
-        fork_detector=fork_detector,
-    )
+    invocations_by_target = collect_invocations(spawn_resolver)
 
     # BFS from root over the parent → child edges to discover every
     # session reachable from this canvas.

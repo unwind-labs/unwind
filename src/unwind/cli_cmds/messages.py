@@ -11,8 +11,8 @@ from ..jsonl import collect_uuids
 from ..messages import Message, annotate_spawns, base_uuid, read_messages
 from ..registry import (
     callstack_for_slug,
-    fork_detector_for_slug,
     index_for_slug,
+    spawn_resolver_for_slug,
     subagent_index_for_slug,
 )
 from ..subagents import SUBAGENT_PREFIX
@@ -30,7 +30,7 @@ def _load_messages(
 ) -> list[Message]:
     ci = callstack_for_slug(slug)
     si = subagent_index_for_slug(slug)
-    fd = fork_detector_for_slug(slug)
+    resolver = spawn_resolver_for_slug(slug)
     if session_id.startswith(SUBAGENT_PREFIX):
         sa_path = si.resolve(session_id)
         if sa_path is None:
@@ -40,8 +40,7 @@ def _load_messages(
             page.messages,
             slug_callstack=ci,
             current_session_id=session_id,
-            subagent_index=si,
-            fork_detector=fd,
+            spawn_resolver=resolver,
         )
         return page.messages
 
@@ -54,8 +53,7 @@ def _load_messages(
         page.messages,
         slug_callstack=ci,
         current_session_id=session_id,
-        subagent_index=si,
-        fork_detector=fd,
+        spawn_resolver=resolver,
     )
 
     if strip_inherited and ci.has_logs:

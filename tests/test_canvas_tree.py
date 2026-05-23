@@ -13,6 +13,24 @@ from unwind.canvas_tree import (
     collect_invocations,
     scan_session,
 )
+from unwind.fork_detect import ForkDetector
+from unwind.spawns import SpawnResolver
+from unwind.subagents import SubagentIndex
+
+
+def _resolver(
+    project_dir: Path,
+    callstack: CallstackIndex,
+) -> SpawnResolver:
+    """Build a SpawnResolver wired the same way registry does."""
+    builder = CanvasTreeBuilder(project_dir)
+    return SpawnResolver(
+        callstack,
+        ForkDetector(project_dir, session_scanner=builder.get_scan),
+        SubagentIndex(project_dir),
+        project_dir=project_dir,
+        session_scanner=builder.get_scan,
+    )
 
 
 # --- helpers -------------------------------------------------------------
@@ -199,7 +217,7 @@ def test_collect_invocations_returns_one_entry_per_report(tmp_path: Path):
             ],
         )
     ci = CallstackIndex(log)
-    invs = collect_invocations(ci)
+    invs = collect_invocations(_resolver(tmp_path / "proj" if (tmp_path / "proj").exists() else tmp_path, ci))
     assert "CHILD" in invs
     assert len(invs["CHILD"]) == 3
     # Sorted by started_at.
@@ -233,7 +251,7 @@ def test_collect_invocations_walks_nested_children(tmp_path: Path):
         ],
     )
     ci = CallstackIndex(log)
-    invs = collect_invocations(ci)
+    invs = collect_invocations(_resolver(tmp_path / "proj" if (tmp_path / "proj").exists() else tmp_path, ci))
     assert {"P", "C"} <= set(invs.keys())
     # P was invoked by MAIN, C was invoked by P.
     assert invs["P"][0].caller_session_id == "MAIN"
@@ -250,7 +268,7 @@ def test_lone_session_with_no_callstack_data_is_one_window(tmp_path: Path):
     log = tmp_path / "log"
     log.mkdir()
     ci = CallstackIndex(log)
-    root, all_w = build_canvas_tree(proj, sid, ci)
+    root, all_w = build_canvas_tree(proj, sid, spawn_resolver=_resolver(proj, ci))
     assert root.session_id == sid
     assert root.kind == "root"
     assert root.children == []
@@ -282,7 +300,7 @@ def test_root_calls_child_once_yields_two_node_tree(tmp_path: Path):
         ],
     )
     ci = CallstackIndex(log)
-    root, all_w = build_canvas_tree(proj, "MAIN", ci)
+    root, all_w = build_canvas_tree(proj, "MAIN", spawn_resolver=_resolver(proj, ci))
     assert root.session_id == "MAIN"
     assert len(root.children) == 1
     child = root.children[0]
@@ -353,7 +371,7 @@ def test_usage_self_and_subtree_aggregate_post_order(tmp_path: Path):
         ],
     )
     ci = CallstackIndex(log)
-    root, _all = build_canvas_tree(proj, "MAIN", ci)
+    root, _all = build_canvas_tree(proj, "MAIN", spawn_resolver=_resolver(proj, ci))
     child = root.children[0]
     # Leaf: self == subtree.
     assert child.self_usage == {"cw": 30, "cr": 40, "r": 10, "w": 20}
@@ -401,7 +419,7 @@ def test_usage_cost_aggregates_per_model_rates(tmp_path: Path):
     log = tmp_path / "log"
     log.mkdir()
     ci = CallstackIndex(log)
-    root, _ = build_canvas_tree(proj, sid, ci)
+    root, _ = build_canvas_tree(proj, sid, spawn_resolver=_resolver(proj, ci))
     # Sonnet input @ $3/M for 1M tokens = $3.00
     # Opus input @ $15/M for 1M tokens = $15.00
     # Total input cost = $18.00. Other categories are zero.
@@ -438,7 +456,7 @@ def test_window_node_to_dict_includes_usage_fields(tmp_path: Path):
     log = tmp_path / "log"
     log.mkdir()
     ci = CallstackIndex(log)
-    root, _ = build_canvas_tree(proj, sid, ci)
+    root, _ = build_canvas_tree(proj, sid, spawn_resolver=_resolver(proj, ci))
     d = root.to_dict()
     assert d["self_usage"] == {"cw": 0, "cr": 0, "r": 7, "w": 11}
     assert d["subtree_usage"] == {"cw": 0, "cr": 0, "r": 7, "w": 11}
@@ -473,7 +491,7 @@ def test_three_invocations_produce_three_child_windows(tmp_path: Path):
             ],
         )
     ci = CallstackIndex(log)
-    root, _all = build_canvas_tree(proj, "MAIN", ci)
+    root, _all = build_canvas_tree(proj, "MAIN", spawn_resolver=_resolver(proj, ci))
     assert len(root.children) == 3
     # Each child is a distinct window of CHILD.
     sids = {c.session_id for c in root.children}
@@ -538,7 +556,7 @@ def test_grandchild_chain_each_level_gets_own_windows(tmp_path: Path):
             ],
         )
     ci = CallstackIndex(log)
-    root, all_w = build_canvas_tree(proj, "MAIN", ci)
+    root, all_w = build_canvas_tree(proj, "MAIN", spawn_resolver=_resolver(proj, ci))
     p_windows = [w for w in all_w if w.session_id == "P"]
     c_windows = [w for w in all_w if w.session_id == "C"]
     g_windows = [w for w in all_w if w.session_id == "G"]
@@ -584,7 +602,7 @@ def test_yielded_status_propagates(tmp_path: Path):
         ],
     )
     ci = CallstackIndex(log)
-    root, _ = build_canvas_tree(proj, "MAIN", ci)
+    root, _ = build_canvas_tree(proj, "MAIN", spawn_resolver=_resolver(proj, ci))
     assert root.children[0].status == "yield"
 
 
@@ -622,7 +640,7 @@ def test_only_the_last_window_can_be_yield(tmp_path: Path):
         ],
     )
     ci = CallstackIndex(log)
-    root, _ = build_canvas_tree(proj, "MAIN", ci)
+    root, _ = build_canvas_tree(proj, "MAIN", spawn_resolver=_resolver(proj, ci))
     assert len(root.children) == 2
     # First window: yielded then resumed → done (the yield was answered).
     assert root.children[0].status == "done"
@@ -649,7 +667,7 @@ def test_last_window_with_yielded_status_shows_yield(tmp_path: Path):
         ],
     )
     ci = CallstackIndex(log)
-    root, _ = build_canvas_tree(proj, "MAIN", ci)
+    root, _ = build_canvas_tree(proj, "MAIN", spawn_resolver=_resolver(proj, ci))
     assert len(root.children) == 1
     assert root.children[0].status == "yield"
 
@@ -676,7 +694,7 @@ def test_yield_in_live_root_sets_root_status_to_yield(tmp_path: Path):
     log.mkdir()
     ci = CallstackIndex(log)
     root, _ = build_canvas_tree(
-        proj, sid, ci, is_live_session=lambda _sid: True
+        proj, sid, spawn_resolver=_resolver(proj, ci), is_live_session=lambda _sid: True
     )
     assert root.status == "yield"
 
@@ -705,7 +723,7 @@ def test_subtree_status_propagates_live_descendant_to_done_root(tmp_path: Path):
     )
     ci = CallstackIndex(log)
     root, _ = build_canvas_tree(
-        proj, "MAIN", ci, is_live_session=lambda sid: sid == "CHILD"
+        proj, "MAIN", spawn_resolver=_resolver(proj, ci), is_live_session=lambda sid: sid == "CHILD"
     )
     assert root.status == "done"
     assert root.subtree_status == "live"
@@ -734,7 +752,7 @@ def test_subtree_status_yield_beats_done_but_loses_to_live(tmp_path: Path):
     )
     ci = CallstackIndex(log)
     root, _ = build_canvas_tree(
-        proj, "MAIN", ci, is_live_session=lambda sid: sid in {"Y", "L"}
+        proj, "MAIN", spawn_resolver=_resolver(proj, ci), is_live_session=lambda sid: sid in {"Y", "L"}
     )
     assert root.status == "done"
     assert root.subtree_status == "live"
@@ -758,7 +776,7 @@ def test_stale_root_with_yield_envelope_is_done_not_yield(tmp_path: Path):
     log = tmp_path / "log"
     log.mkdir()
     ci = CallstackIndex(log)
-    root, _ = build_canvas_tree(proj, sid, ci, is_live_session=lambda _sid: False)
+    root, _ = build_canvas_tree(proj, sid, spawn_resolver=_resolver(proj, ci), is_live_session=lambda _sid: False)
     assert root.status == "done"
 
 
