@@ -386,19 +386,24 @@ def test_usage_cost_aggregates_per_model_rates(tmp_path: Path):
     field, then aggregated subtree-style like the token counters. A
     sonnet turn and an opus turn in the same window add at their
     respective rates (sonnet input $3/M, opus input $15/M).
+
+    Inputs are kept under the Sonnet >200K context tier so this test
+    isolates per-family rates from tier selection — see the dedicated
+    tier test below for the latter.
     """
     proj = tmp_path / "proj"
     sid = "ROOT"
     # Two assistant turns, same input_tokens count, different models.
-    # Expected cost.r = 1,000,000 * $3/M (sonnet) + 1,000,000 * $15/M (opus)
-    #                 = $3 + $15 = $18
+    # 100K stays under the 200K Sonnet premium-tier threshold.
+    # Expected cost.r = 100,000 * $3/M (sonnet) + 100,000 * $15/M (opus)
+    #                 = $0.30 + $1.50 = $1.80
     def _assist_with_model(uuid: str, ts: str, model: str) -> dict:
         rec = _assistant(
             sid,
             ts,
             uuid=uuid,
             usage={
-                "input_tokens": 1_000_000,
+                "input_tokens": 100_000,
                 "output_tokens": 0,
                 "cache_creation_input_tokens": 0,
                 "cache_read_input_tokens": 0,
@@ -420,15 +425,52 @@ def test_usage_cost_aggregates_per_model_rates(tmp_path: Path):
     log.mkdir()
     ci = CallstackIndex(log)
     root, _ = build_canvas_tree(proj, sid, spawn_resolver=_resolver(proj, ci))
-    # Sonnet input @ $3/M for 1M tokens = $3.00
-    # Opus input @ $15/M for 1M tokens = $15.00
-    # Total input cost = $18.00. Other categories are zero.
-    assert abs(root.self_cost["r"] - 18.0) < 1e-9
+    # Sonnet input @ $3/M for 100K tokens = $0.30
+    # Opus input @ $15/M for 100K tokens = $1.50
+    # Total input cost = $1.80. Other categories are zero.
+    assert abs(root.self_cost["r"] - 1.80) < 1e-9
     assert root.self_cost["cw"] == 0
     assert root.self_cost["cr"] == 0
     assert root.self_cost["w"] == 0
     # Leaf: subtree == self.
     assert root.subtree_cost == root.self_cost
+
+
+def test_sonnet_premium_tier_kicks_in_over_200k_context(tmp_path: Path):
+    """Sonnet 4.x prompts whose input context exceeds 200K tokens bill
+    at the premium tier ($6 input / $22.50 output, with cache rates
+    scaled likewise). The threshold is checked on prompt size
+    (uncached + cache-read + cache-write), not output tokens.
+    """
+    proj = tmp_path / "proj"
+    sid = "ROOT"
+    # 250K uncached input + 100K output. Prompt size 250K > 200K, so:
+    #   r: 250,000 * $6/M  = $1.50  (premium)
+    #   w: 100,000 * $22.50/M = $2.25 (premium)
+    rec = _assistant(
+        sid,
+        "2026-05-04T10:00:01Z",
+        uuid="a-1",
+        usage={
+            "input_tokens": 250_000,
+            "output_tokens": 100_000,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+        },
+    )
+    rec["message"]["model"] = "claude-sonnet-4-6"
+
+    _write_session(
+        proj,
+        sid,
+        [_user(sid, "2026-05-04T10:00:00Z"), rec],
+    )
+    log = tmp_path / "log"
+    log.mkdir()
+    ci = CallstackIndex(log)
+    root, _ = build_canvas_tree(proj, sid, spawn_resolver=_resolver(proj, ci))
+    assert abs(root.self_cost["r"] - 1.50) < 1e-9
+    assert abs(root.self_cost["w"] - 2.25) < 1e-9
 
 
 def test_window_node_to_dict_includes_usage_fields(tmp_path: Path):
