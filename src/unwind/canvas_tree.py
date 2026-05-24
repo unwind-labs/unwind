@@ -1,7 +1,5 @@
-"""Canvas tree builder.
-
-Compute the canvas's window-tree directly from session JSONLs and
-callstack ``report.yaml`` files, in a single deterministic pass.
+"""Canvas tree builder: assemble per-session :class:`SessionScan` results
+into the window-tree that the frontend renders.
 
 A *window* is a slice of one session's activity bounded by parent
 invocations. The parent calls the child K times (initial + K-1
@@ -9,15 +7,19 @@ resumes); the child has K windows, one per invocation. Each parent
 window is the slice of the parent that contains a particular
 invocation timestamp.
 
-This replaces the incremental, race-prone protocol where every
-CompactCard emits spawn rows up to the canvas. The new design:
+This module owns assembly only. The single-pass JSONL parser that
+feeds it lives in :mod:`unwind.session_scan` (re-exported below as
+:class:`SessionScan` / :func:`scan_session` / :class:`CanvasTreeBuilder`
+for legacy import paths). The high-level flow:
 
-* enumerates all parent → child invocations from callstack reports
-* scans each reachable session's JSONL once for yields and bounds
-* assigns the K-th invocation to the K-th window of the target
-* finds the parent's containing window by timestamp
+* enumerate all parent → child invocations via :class:`SpawnResolver`
+* pull each reachable session's cached :class:`SessionScan`
+* assign the K-th invocation to the K-th window of the target
+* find the parent's containing window by timestamp
+* finalise the tree (status + token usage + USD cost) in one post-order
+  walk via :func:`_finalize_subtree`
 
-Producing a single immutable tree the frontend renders directly.
+The result is a single immutable tree the frontend renders directly.
 """
 from __future__ import annotations
 
@@ -303,55 +305,53 @@ def _attribute_self_usage(
         w = _find_window_for_ts(windows, ev.ts)
         if w is None:
             continue
-        _add_into(w.self_usage, ev._asdict())
+        # Build the token-dict explicitly: ``_add_into`` only iterates
+        # ``_TOKEN_KEYS`` (cw/cr/r/w), but ``ev._asdict()`` also includes
+        # ``ts`` / ``model``. The current loop happens to work because
+        # ``_TOKEN_KEYS`` is a subset; an explicit dict keeps that
+        # invariant from quietly breaking if either side changes.
+        _add_into(w.self_usage, {"cw": ev.cw, "cr": ev.cr, "r": ev.r, "w": ev.w})
         _add_into(w.self_cost, _cost_usd(ev.model, ev.cw, ev.cr, ev.r, ev.w))
 
 
-def _aggregate_subtree_status(
+def _finalize_subtree(
     node: WindowNode, _seen: Optional[set[str]] = None
-) -> Status:
-    """Post-order walk: each node's ``subtree_status`` = the highest-priority
-    status across the node itself and every descendant.
+) -> tuple[Status, dict[str, int], dict[str, float]]:
+    """Post-order walk: roll status + token usage + USD cost up the tree
+    in a single pass.
 
-    Delegates priority to :func:`unwind.status.merge` — ``live > yield >
-    failed > done``. A single live descendant pulls an otherwise-finished
-    ancestor's rail back into ``live`` so the UI signals that work is
-    still happening somewhere below.
+    Each parent's ``subtree_status`` is the highest-priority status across
+    itself and every descendant (priority via :func:`unwind.status.merge`
+    — ``live > yield > failed > done``). A single live descendant pulls
+    an otherwise-finished ancestor's rail back into ``live`` so the UI
+    signals that work is still happening somewhere below.
+
+    Each parent's ``subtree_usage`` / ``subtree_cost`` are its own
+    ``self_*`` plus every descendant's, summed element-wise.
 
     The ``_seen`` set defends against accidental cycles in the wiring
-    pass (a window grafted under two parents). Without it, the recursion
-    would loop forever; with it, the second visit returns ``done`` so
-    aggregation stays bounded.
+    pass (a window grafted under two parents). On a second visit, status
+    short-circuits to ``done`` and the usage/cost contribution is zero
+    so aggregation stays bounded across all three fields.
     """
     if _seen is None:
         _seen = set()
     if node.window_id in _seen:
-        return "done"
+        return "done", _zero_tokens(), _zero_costs()
     _seen.add(node.window_id)
-    own = _from_raw_status(node.status) or "done"
-    child_statuses: list[Optional[Status]] = [
-        _aggregate_subtree_status(c, _seen) for c in node.children
-    ]
-    merged = _merge_status([own, *child_statuses])
-    node.subtree_status = merged
-    return merged
-
-
-def _aggregate_subtree_usage(node: WindowNode) -> tuple[dict[str, int], dict[str, float]]:
-    """Post-order walk: each parent's ``subtree_*`` = its own ``self_*``
-    plus every descendant's. Children are visited before the parent so
-    leaves are settled first and the totals bubble up toward the root.
-    Returns ``(subtree_usage, subtree_cost)``.
-    """
+    own_status = _from_raw_status(node.status) or "done"
+    statuses: list[Optional[Status]] = [own_status]
     usage = dict(node.self_usage)
     cost = dict(node.self_cost)
     for child in node.children:
-        c_usage, c_cost = _aggregate_subtree_usage(child)
+        c_status, c_usage, c_cost = _finalize_subtree(child, _seen)
+        statuses.append(c_status)
         _add_into(usage, c_usage)
         _add_into(cost, c_cost)
+    node.subtree_status = _merge_status(statuses)
     node.subtree_usage = usage
     node.subtree_cost = cost
-    return usage, cost
+    return node.subtree_status, usage, cost
 
 
 def _find_window_for_ts(
@@ -497,18 +497,22 @@ def build_canvas_tree(
         if parent_sid in display_order_cache:
             return display_order_cache[parent_sid]
         order: dict[str, int] = {}
-        if spawn_resolver is not None:
-            path = project_dir / f"{parent_sid}.jsonl"
-            if path.is_file():
-                try:
-                    from .messages import read_messages
+        path = project_dir / f"{parent_sid}.jsonl"
+        if path.is_file():
+            from .messages import read_messages
 
-                    page = read_messages(path)
-                    order = spawn_resolver.child_display_order(
-                        parent_sid, page.messages
-                    )
-                except Exception:
-                    order = {}
+            # Narrow exception scope: the only realistic failure here is
+            # the filesystem read; if ``child_display_order`` raises,
+            # that's a bug we want to surface, not silently fall back to
+            # an empty order.
+            try:
+                page = read_messages(path)
+            except OSError:
+                page = None
+            if page is not None:
+                order = spawn_resolver.child_display_order(
+                    parent_sid, page.messages
+                )
         display_order_cache[parent_sid] = order
         return order
 
@@ -524,9 +528,13 @@ def build_canvas_tree(
         )
 
     # Root window is index 0 of root_session_id (root sessions always
-    # get a single window — see _compute_windows).
+    # get a single window — see _compute_windows). When the root session
+    # isn't even on disk (e.g. an in-flight subagent canvas), fabricate a
+    # placeholder so the tree still has a root to anchor descendants to.
     root_windows = windows_by_session.get(root_session_id) or []
-    if not root_windows:
+    if root_windows:
+        root = root_windows[0]
+    else:
         root = WindowNode(
             window_id=f"{root_session_id}#0",
             session_id=root_session_id,
@@ -539,14 +547,11 @@ def build_canvas_tree(
             window_index=0,
         )
         all_windows.append(root)
-        _aggregate_subtree_usage(root)
-        _aggregate_subtree_status(root)
-        return root, all_windows
-    root = root_windows[0]
-    # Post-order subtree token totals — must run AFTER children are wired
-    # in above so the recursion sees the full descendant set.
-    _aggregate_subtree_usage(root)
-    _aggregate_subtree_status(root)
+
+    # Post-order subtree finalisation: status + token usage + USD cost
+    # in one walk. Must run AFTER children are wired in above so the
+    # recursion sees the full descendant set.
+    _finalize_subtree(root)
     return root, all_windows
 
 

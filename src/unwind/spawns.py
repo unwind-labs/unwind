@@ -27,7 +27,7 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterator, Literal, Optional, TypeAlias, Union
+from typing import Any, Callable, Iterator, Literal, Optional, TypeAlias, Union
 
 from .callstack import CallstackIndex, TaskNode
 from .fork_detect import ForkDetector
@@ -36,7 +36,14 @@ from .jsonl import (
     read_records,
     stringify_tool_result as _stringify_result,
 )
+from .session_scan import SessionScan
 from .subagents import SubagentIndex
+
+
+# Signature for the optional per-session scan accessor. Production wires
+# ``CanvasTreeBuilder.get_scan`` (mtime-cached); tests can pass ``None``
+# to short-circuit the fork-status read.
+SessionScanner: TypeAlias = "Callable[[str], Optional[SessionScan]]"
 
 
 # Tool names whose tool_use spawns child sessions/agents we drill into.
@@ -179,7 +186,7 @@ class SpawnResolver:
         *,
         project_dir: Path,
         invoke_index: Optional[dict[str, list[str]]] = None,
-        session_scanner: Optional[Any] = None,
+        session_scanner: Optional[SessionScanner] = None,
     ) -> None:
         self._cs = callstack
         self._fd = forks
@@ -187,17 +194,15 @@ class SpawnResolver:
         self._project_dir = project_dir
         self._cached: Optional[dict[str, list[Spawn]]] = None
         # ``session_scanner(sid) -> SessionScan`` from canvas_tree. When
-        # provided (by registry.spawn_resolver_for_slug), the fork-status
+        # wired (by registry.spawn_resolver_for_slug), the fork-status
         # inference reads from the mtime-cached scan instead of walking
-        # the child JSONL a second time. Falls back to an inline walk
-        # when missing (tests, ad-hoc construction).
-        self._session_scanner = session_scanner
-        # Pre-computed invoke_id → [candidate_session_id, ...]. When
-        # provided (by registry.spawn_resolver_for_slug), we skip the
-        # per-request full-project JSONL scan in
-        # _invoke_id_to_parent_session.
-        if invoke_index is not None:
-            self._invoke_index_cache = invoke_index
+        # the child JSONL a second time. ``None`` is a valid value —
+        # tests and ad-hoc construction skip the read.
+        self._session_scanner: Optional[SessionScanner] = session_scanner
+        # Pre-computed invoke_id → [candidate_session_id, ...]. ``None``
+        # means "not provided — compute lazily on first need". Either
+        # way the field is always present; readers don't getattr() it.
+        self._invoke_index_cache: Optional[dict[str, list[str]]] = invoke_index
 
     # --- enumeration ----------------------------------------------------
 
@@ -613,9 +618,8 @@ class SpawnResolver:
         is cached on the resolver instance, or (preferred) injected by
         the registry so all requests share one scan.
         """
-        cached = getattr(self, "_invoke_index_cache", None)
-        if cached is not None:
-            return cached
+        if self._invoke_index_cache is not None:
+            return self._invoke_index_cache
         out = compute_invoke_index_for_project(self._project_dir)
         self._invoke_index_cache = out
         return out
@@ -647,13 +651,16 @@ class SpawnResolver:
             return "running", None
         return ("complete" if kind == "return" else "yielded"), scan.last_envelope_ts
 
-    def _scan_for(self, sid: str) -> Optional[Any]:
+    def _scan_for(self, sid: str) -> Optional[SessionScan]:
         """Return the cached SessionScan for ``sid`` if a scanner is wired."""
         if self._session_scanner is None:
             return None
         try:
             return self._session_scanner(sid)
-        except Exception:
+        except OSError:
+            # Filesystem race: the JSONL vanished between probe and read.
+            # Higher-priority signals (callstack reports) usually cover
+            # for it; return None and let the caller fall back.
             return None
 
     def _fork_birth(self, fork_sid: str) -> Optional[datetime]:

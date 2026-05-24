@@ -18,6 +18,13 @@ from pathlib import Path
 from typing import Any, Iterable, Literal, Optional
 
 from .jsonl import parse_ts as _parse_ts, read_records
+from .spawns import (
+    CALLSTACK_TOOL_NAMES,
+    SUBAGENT_TOOL_NAMES,
+    CallSpawn,
+    Spawn,
+    SpawnResolver,
+)
 from .status import from_raw as _from_raw_status, is_done as _is_done
 
 
@@ -90,15 +97,6 @@ def base_uuid(message_uuid: str) -> str:
     if ":" in message_uuid:
         return message_uuid.split(":", 1)[0]
     return message_uuid
-
-
-from .spawns import (  # noqa: E402
-    CALLSTACK_TOOL_NAMES,
-    SUBAGENT_TOOL_NAMES,
-    CallSpawn,
-    Spawn,
-    SpawnResolver,
-)
 
 
 def _spawn_kind_for_tool(name: Optional[str]) -> Optional[str]:

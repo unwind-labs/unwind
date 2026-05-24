@@ -27,27 +27,10 @@ const RAIL_WIDTH = 42;
 const ACTIVITY_HEIGHT = 28;
 const SPAWN_HEIGHT = 36;
 const HEADER_HEIGHT = 40;
-const PADDING_Y = 8;
-// Transposed footer table: 1 header row + 4 category rows. Leaf has
-// 1 data column (Self); branch has 2 (Self + Subtree); root adds the
-// $ column and the grand-total line below the table.
-const FOOTER_HEIGHT_LEAF = 80;
-const FOOTER_HEIGHT_BRANCH = 80;
-
-export function estimateCardHeight(
-  rows: Row[],
-  opts?: { hasChildren?: boolean; hasUsage?: boolean },
-): number {
-  let h = HEADER_HEIGHT + PADDING_Y * 2;
-  for (const r of rows) {
-    h += r.kind === "spawn" ? SPAWN_HEIGHT : ACTIVITY_HEIGHT;
-    h += 4; // gap
-  }
-  if (opts?.hasUsage) {
-    h += opts.hasChildren ? FOOTER_HEIGHT_BRANCH : FOOTER_HEIGHT_LEAF;
-  }
-  return Math.max(h, HEADER_HEIGHT + PADDING_Y * 2);
-}
+// Card height is measured via ResizeObserver (see ``cardRef``) and
+// reported back to the canvas through ``onMeasure`` — there is no
+// estimate path. Constants above are referenced for Handle positioning
+// and per-row layout, not for total-card sizing.
 
 export type CompactCardData = {
   slug: string;
@@ -428,7 +411,7 @@ export function CompactCardNode({ data }: { data: CompactCardData }) {
           subtree={data.subtreeUsage}
           subtreeCost={data.subtreeCost}
           showSubtree={data.hasCanvasDescendants}
-          showCost={true}
+          isRoot={data.isRoot}
         />
       </div>
     </div>

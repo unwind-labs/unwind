@@ -1,7 +1,7 @@
 import { DollarSign, Network, Telescope } from "lucide-react";
 import type { TokenCost, TokenUsage } from "@/api/types";
 
-/** Footer with abbreviated token-usage counters and optional $ cost.
+/** Footer with abbreviated token-usage counters and $ cost.
  *
  *  Layout (transposed): token categories run DOWN as rows, scopes
  *  (``Here`` / ``Sub-calls`` / ``$``) run ACROSS as columns. The narrow
@@ -9,32 +9,28 @@ import type { TokenCost, TokenUsage } from "@/api/types";
  *  more naturally than 3 scope rows × 4 category columns (the older
  *  layout pushed numbers into the tight right edge).
  *
- *  A grand-total $ amount renders below the table whenever the cost
- *  column is shown — that's every card now (leaves see the cost of
- *  their own work; branches see the cumulative subtree cost). */
+ *  ``isRoot`` forces the footer to render even when every counter is
+ *  zero — the root's grand-total $ line stays visible on brand-new
+ *  sessions whose first assistant message hasn't been written yet.
+ *  Non-root cards in that state hide entirely (no point showing a sea
+ *  of zeros). */
 export function UsageFooter({
   self,
   subtree,
   subtreeCost,
   showSubtree,
-  showCost,
+  isRoot,
 }: {
   self: TokenUsage;
   subtree: TokenUsage;
   subtreeCost: TokenCost;
   showSubtree: boolean;
-  showCost: boolean;
+  isRoot: boolean;
 }) {
-  // Hide the footer entirely when nothing has been logged yet (e.g. a
-  // brand-new live session whose first assistant message hasn't been
-  // written). Avoids a row of `0 0 0 0` on empty intermediate cards.
-  // EXCEPTION: the root card always shows so the $ total line stays
-  // visible even on sessions with no assistant turns yet (legitimate
-  // for live sessions still waiting on the first reply).
   const empty = (u: TokenUsage) => !u.cw && !u.cr && !u.r && !u.w;
   const selfEmpty = empty(self);
   const subtreeEmpty = !showSubtree || empty(subtree);
-  if (!showCost && selfEmpty && subtreeEmpty) {
+  if (!isRoot && selfEmpty && subtreeEmpty) {
     return null;
   }
   const costTotal =
@@ -69,13 +65,11 @@ export function UsageFooter({
                 </span>
               </th>
             ) : null}
-            {showCost ? (
-              <th className="pl-2 text-right font-medium text-emerald-300/90">
-                <span className="inline-flex items-center justify-end">
-                  <DollarSign className="h-3.5 w-3.5" aria-label="cost" />
-                </span>
-              </th>
-            ) : null}
+            <th className="pl-2 text-right font-medium text-emerald-300/90">
+              <span className="inline-flex items-center justify-end">
+                <DollarSign className="h-3.5 w-3.5" aria-label="cost" />
+              </span>
+            </th>
           </tr>
         </thead>
         <tbody>
@@ -86,20 +80,16 @@ export function UsageFooter({
               {showSubtree ? (
                 <td className="pl-2 text-right">{fmtTokens(subtree[key])}</td>
               ) : null}
-              {showCost ? (
-                <td className="pl-2 text-right text-emerald-300/90">
-                  {fmtUsd(subtreeCost[key])}
-                </td>
-              ) : null}
+              <td className="pl-2 text-right text-emerald-300/90">
+                {fmtUsd(subtreeCost[key])}
+              </td>
             </tr>
           ))}
         </tbody>
       </table>
-      {showCost ? (
-        <div className="mt-1 text-right tabular-nums text-emerald-300/90">
-          {fmtUsd(costTotal)}
-        </div>
-      ) : null}
+      <div className="mt-1 text-right tabular-nums text-emerald-300/90">
+        {fmtUsd(costTotal)}
+      </div>
     </footer>
   );
 }

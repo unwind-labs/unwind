@@ -51,7 +51,11 @@ def cost_usd(
     Keys mirror the ``TokenUsage`` shape (``cw`` / ``cr`` / ``r`` / ``w``)
     so callers can sum the dicts element-wise across records.
     """
-    rates = RATES[model_family(model)]
+    # ``model_family`` only returns keys we put in ``RATES``, but route
+    # through ``.get`` with the default family so a future model-id that
+    # doesn't match any branch in ``model_family`` (or a typo in ``RATES``)
+    # degrades to sonnet rates instead of throwing KeyError mid-aggregation.
+    rates = RATES.get(model_family(model), RATES[DEFAULT_FAMILY])
     return {
         "cw": cw * rates["cw"] / 1_000_000,
         "cr": cr * rates["cr"] / 1_000_000,

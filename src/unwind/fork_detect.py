@@ -22,11 +22,19 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Callable, Optional, TYPE_CHECKING, TypeAlias
 
 from ._cache import PathCache
 from .jsonl import file_birth_ts, iter_lines
 from .projects import project_jsonl_listing
+
+if TYPE_CHECKING:
+    from .session_scan import SessionScan
+
+
+# Signature for the optional per-session scan accessor. Production wires
+# ``CanvasTreeBuilder.get_scan`` (mtime-cached); tests can pass ``None``.
+SessionScanner: TypeAlias = "Callable[[str], Optional[SessionScan]]"
 
 
 # How many leading uuids to sample from each JSONL.
@@ -78,7 +86,7 @@ class ForkDetector:
         self,
         project_dir: Path,
         *,
-        session_scanner: Optional[Any] = None,
+        session_scanner: Optional[SessionScanner] = None,
     ) -> None:
         self._project_dir = project_dir
         self._lock = threading.Lock()
@@ -114,8 +122,18 @@ class ForkDetector:
             }
 
     def is_fork(self, session_id: str) -> Optional[bool]:
-        """Return True/False if known, None if we have no data on this session."""
-        return session_id in self.fork_session_ids() if self._probes else None
+        """Return True/False if known, None if we have no data on this session.
+
+        ``fork_session_ids`` calls ``_refresh`` itself; we therefore decide
+        "known vs unknown" against the POST-refresh probe set, not the
+        stale instance attribute. Pre-refresh, ``_probes`` is empty on a
+        fresh detector even when the project on disk has plenty of forks.
+        """
+        ids = self.fork_session_ids()
+        with self._lock:
+            if session_id not in self._probes:
+                return None
+        return session_id in ids
 
     def family_root(self, session_id: str) -> Optional[str]:
         """Return the canonical root of ``session_id``'s family, or None.
