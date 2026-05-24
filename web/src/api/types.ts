@@ -55,7 +55,7 @@ export type TreeResponse = {
 export type Message = {
   uuid: string;
   session_id: string;
-  role: "user" | "assistant" | "tool_use" | "tool_result" | "system";
+  role: "user" | "assistant" | "thinking" | "tool_use" | "tool_result" | "system";
   timestamp: string | null;
   text: string | null;
   tool_name: string | null;

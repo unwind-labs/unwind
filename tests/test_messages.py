@@ -86,6 +86,59 @@ def test_pairs_tool_use_with_tool_result(tmp_path: Path):
     assert tool_result.tool_result == "ok"
 
 
+def test_thinking_blocks_surface_as_thinking_messages(tmp_path: Path):
+    """Assistant chain-of-thought must reach the UI: a ``thinking`` content
+    block becomes a role=thinking Message carrying the reasoning text, rather
+    than being silently dropped alongside text/tool_use blocks."""
+    lines = [
+        {
+            "type": "assistant",
+            "uuid": "a1",
+            "sessionId": "s",
+            "timestamp": "2026-04-24T08:00:01.000Z",
+            "message": {
+                "role": "assistant",
+                "model": "sonnet",
+                "content": [
+                    {"type": "thinking", "thinking": "let me reason", "signature": "x"},
+                    {"type": "text", "text": "the answer"},
+                ],
+            },
+        },
+    ]
+    p = _write(tmp_path, lines)
+    page = read_messages(p)
+    roles = [m.role for m in page.messages]
+    assert roles == ["thinking", "assistant"]
+
+    thinking = [m for m in page.messages if m.role == "thinking"][0]
+    assert thinking.text == "let me reason"
+
+
+def test_redacted_thinking_surfaces_placeholder(tmp_path: Path):
+    """``redacted_thinking`` has encrypted ``data`` and no readable text, so
+    it surfaces a placeholder rather than an empty bubble."""
+    lines = [
+        {
+            "type": "assistant",
+            "uuid": "a1",
+            "sessionId": "s",
+            "timestamp": "2026-04-24T08:00:01.000Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "redacted_thinking", "data": "encrypted"},
+                ],
+            },
+        },
+    ]
+    p = _write(tmp_path, lines)
+    page = read_messages(p)
+    thinking = [m for m in page.messages if m.role == "thinking"]
+    assert len(thinking) == 1
+    assert thinking[0].text == "[redacted thinking]"
+
+
 def test_include_meta_toggles_attachments(tmp_path: Path):
     lines = [
         {

@@ -28,7 +28,12 @@ from .spawns import (
 from .status import from_raw as _from_raw_status, is_done as _is_done
 
 
-Role = Literal["user", "assistant", "tool_use", "tool_result", "system"]
+Role = Literal["user", "assistant", "thinking", "tool_use", "tool_result", "system"]
+
+# Surfaced in place of an empty body for ``redacted_thinking`` blocks
+# (encrypted reasoning that has no human-readable ``thinking`` field).
+# Asserted verbatim in tests, so this is an implicit UI contract.
+REDACTED_THINKING_PLACEHOLDER = "[redacted thinking]"
 
 
 @dataclass
@@ -351,6 +356,21 @@ def _normalize_assistant(
                         role="assistant", timestamp=ts,
                         text=block.get("text") or "",
                         model=model, raw_type="assistant",
+                        order_within_line=order,
+                    )
+                )
+            elif btype in ("thinking", "redacted_thinking"):
+                # ``redacted_thinking`` carries encrypted ``data`` instead of a
+                # human-readable ``thinking`` field; surface a placeholder.
+                thought = block.get("thinking") or (
+                    REDACTED_THINKING_PLACEHOLDER if btype == "redacted_thinking" else ""
+                )
+                out.append(
+                    Message(
+                        uuid=f"{uuid}:{order}", session_id=session_id,
+                        role="thinking", timestamp=ts,
+                        text=thought,
+                        model=model, raw_type="thinking",
                         order_within_line=order,
                     )
                 )
