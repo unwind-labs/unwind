@@ -155,3 +155,72 @@ export type CanvasTreeResponse = {
   root: WindowNode;
   all_windows: WindowNode[];
 };
+
+// --- Usage report ------------------------------------------------------
+
+/** One project's totals for the report window. Same shape as
+ *  ``ProjectGroupRow`` minus the ``project_count`` / ``label`` so the
+ *  Reports table can render top-N rows and bucket rows with one
+ *  component. */
+export type ProjectUsageRow = {
+  slug: string;
+  source_path: string;
+  session_count: number;
+  usage: TokenUsage;
+  cost: TokenCost;
+  total_tokens: number;
+  total_cost: number;
+};
+
+/** A rolled-up bucket — ``ephemeral`` (synthetic ``/tmp`` test runs) or
+ *  ``other`` (the long tail past top-N). Several projects collapsed
+ *  into one row. */
+export type ProjectGroupRow = {
+  label: string;
+  project_count: number;
+  session_count: number;
+  usage: TokenUsage;
+  cost: TokenCost;
+  total_tokens: number;
+  total_cost: number;
+};
+
+export type UsageBuckets = {
+  /** Top-N real projects, already sorted by ``total_cost`` desc. */
+  top: ProjectUsageRow[];
+  /** Aggregate of every project flagged as ``ephemeral`` (synthetic
+   *  ``/tmp`` scaffolds). ``null`` when there were none in the window. */
+  ephemeral: ProjectGroupRow | null;
+  /** Aggregate of every real project past the top-N cut. ``null`` when
+   *  there are no extra real projects. */
+  other: ProjectGroupRow | null;
+};
+
+export type UsageReportResponse = {
+  /** ``YYYY-MM`` — the local calendar month this report covers. */
+  month: string;
+  /** Informational timezone label (e.g. ``"PDT"``). Shown in the report
+   *  footer so users understand which clock the month boundary uses. */
+  tz_name: string;
+  window_start_utc: string;
+  window_end_utc: string;
+  /** Number of projects with at least one in-window event. */
+  project_count: number;
+  /** Number of sessions with at least one in-window event. */
+  session_count: number;
+  /** Sum of every in-window event's tokens — includes ephemerals and
+   *  the tail. The grand total card uses this directly. */
+  grand_usage: TokenUsage;
+  /** USD cost matching ``grand_usage``, priced per-event at the
+   *  recording model's rate. */
+  grand_cost: TokenCost;
+  total_tokens: number;
+  total_cost: number;
+  ephemeral_path_prefixes: string[];
+  ephemeral_slug_prefixes: string[];
+  buckets: UsageBuckets;
+  /** Every project with in-window activity, sorted by cost. The Reports
+   *  view uses ``buckets`` for its default layout; this list is here
+   *  for views that want to re-bucket or page beyond ``top``. */
+  projects: ProjectUsageRow[];
+};

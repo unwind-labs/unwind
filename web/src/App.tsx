@@ -13,11 +13,20 @@ import {
 import { SessionListPane } from "@/panes/SessionListPane";
 import { CanvasPane } from "@/panes/CanvasPane";
 import { ProjectPicker } from "@/panes/ProjectPicker";
-import { FolderSearch, FolderTree, Telescope } from "lucide-react";
+import { ReportsPane } from "@/panes/ReportsPane";
+import {
+  BarChart3,
+  FolderSearch,
+  FolderTree,
+  Telescope,
+} from "lucide-react";
 
 export function App() {
   const slug = useUi((s) => s.slug);
   const [showBrowser, setShowBrowser] = useState(false);
+  // Reports is project-agnostic (cross-project month rollup). Lives at
+  // the App level so it's reachable whether or not a project is selected.
+  const [showReports, setShowReports] = useState(false);
 
   const { data: defaultProject } = useDefaultProject();
   useLiveEvents(slug);
@@ -80,6 +89,7 @@ export function App() {
         defaultSourcePath={defaultProject?.source_path ?? null}
         slug={slug}
         onBrowse={() => setShowBrowser(true)}
+        onOpenReports={() => setShowReports(true)}
       />
       <div className="relative flex-1 overflow-hidden">
         {slug ? (
@@ -107,6 +117,19 @@ export function App() {
             }}
           >
             <ProjectPicker onClose={() => setShowBrowser(false)} />
+          </div>
+        )}
+        {showReports && (
+          <div
+            className="absolute inset-0 z-30 bg-background/95 backdrop-blur-sm"
+            // Mirrors the ProjectPicker overlay so click-outside-to-close
+            // behaves consistently across overlays. Higher z so Reports
+            // wins if both happen to be open at once.
+            onMouseDown={(e) => {
+              if (e.target === e.currentTarget) setShowReports(false);
+            }}
+          >
+            <ReportsPane onClose={() => setShowReports(false)} />
           </div>
         )}
       </div>
@@ -174,10 +197,12 @@ function TopBar({
   defaultSourcePath,
   slug,
   onBrowse,
+  onOpenReports,
 }: {
   defaultSourcePath: string | null;
   slug: string | null;
   onBrowse: () => void;
+  onOpenReports: () => void;
 }) {
   const { data: projects } = useProjects();
   const openPicker = useOpenFolderPicker();
@@ -226,6 +251,18 @@ function TopBar({
             <FolderTree className="h-3.5 w-3.5" />
           </button>
         )}
+        <button
+          type="button"
+          onClick={onOpenReports}
+          title="usage reports"
+          // Reports is project-agnostic so this button is always
+          // available, even before a project is selected. Sits to the
+          // right of the folder controls so the cluster reads as
+          // "where am I" → "what did I spend".
+          className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+        >
+          <BarChart3 className="h-3.5 w-3.5" />
+        </button>
       </div>
     </header>
   );

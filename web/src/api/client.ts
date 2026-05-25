@@ -6,6 +6,7 @@ import type {
   MessagesResponse,
   ProjectSummary,
   SessionRow,
+  UsageReportResponse,
 } from "./types";
 
 async function j<T>(url: string): Promise<T> {
@@ -117,6 +118,30 @@ export function useMessages(
       return mergeMessagesDelta(prev, fresh);
     },
     refetchInterval: POLL_SAFETY_NET_MS,
+  });
+}
+
+/** Monthly token + USD rollup across every known project. ``month`` is
+ *  ``YYYY-MM``; when ``null``/undefined the server picks the current
+ *  local month (and the response's ``month`` field tells you which one
+ *  was returned so the UI can reflect it back).
+ *
+ *  Cross-session aggregation isn't affected by the WS event stream the
+ *  way per-session queries are, so we skip the safety-net poll —
+ *  Reports view explicitly refetches when the user changes the month. */
+export function useUsageReport(
+  month: string | null | undefined,
+  topN: number = 20,
+) {
+  return useQuery({
+    queryKey: ["usage", month ?? "current", topN],
+    queryFn: () => {
+      const params = new URLSearchParams({ top: String(topN) });
+      if (month) params.set("month", month);
+      return j<UsageReportResponse>(`/api/usage?${params}`);
+    },
+    // Reports view re-queries on month change; no need to background-poll.
+    staleTime: 60_000,
   });
 }
 
