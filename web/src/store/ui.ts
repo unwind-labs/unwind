@@ -8,6 +8,8 @@ export type UrlSyncedState = {
   detailSessionId: string | null;
   detailWindow: { start: string | null; end: string | null } | null;
   canvasFocusedNodeId: string | null;
+  reportsOpen: boolean;
+  reportsMonth: string | null;
 };
 
 interface UiState {
@@ -39,6 +41,12 @@ interface UiState {
    *  specific node loses to the auto-focus race. The flag is consumed
    *  and cleared by the canvas's auto-focus effect. */
   canvasEnterIntent: "keyboard" | null;
+  /** Whether the cross-project Usage report overlay is open, and which
+   *  ``YYYY-MM`` month it shows. Lifted into the store (from local pane
+   *  state) so `lib/url-sync` mirrors both into the URL — refresh and
+   *  shared links restore the same view + month. */
+  reportsOpen: boolean;
+  reportsMonth: string | null;
   setSlug: (slug: string | null) => void;
   selectRootSession: (id: string | null) => void;
   selectThreadSession: (id: string | null) => void;
@@ -52,6 +60,9 @@ interface UiState {
   ) => void;
   closeDetail: () => void;
   setCanvasFocusedNodeId: (id: string | null) => void;
+  openReports: () => void;
+  closeReports: () => void;
+  setReportsMonth: (month: string) => void;
   /** Bulk-write the URL-synced fields without the destructive resets that
    *  ``setSlug``/``selectRootSession`` perform. ONLY used by the URL-sync
    *  popstate path to restore a history entry verbatim. */
@@ -76,6 +87,8 @@ export const useUi = create<UiState>((set, get) => ({
   detailWindow: null,
   canvasFocusedNodeId: null,
   canvasEnterIntent: null,
+  reportsOpen: false,
+  reportsMonth: null,
   focusedPane: "sessions",
   setSlug: (slug) =>
     set({
@@ -104,10 +117,21 @@ export const useUi = create<UiState>((set, get) => ({
     set({ detailSessionId: id, detailWindow: window ?? null }),
   closeDetail: () => set({ detailSessionId: null, detailWindow: null }),
   setCanvasFocusedNodeId: (id) => set({ canvasFocusedNodeId: id }),
+  // Default the month to the current one on first open so the URL always
+  // carries ``month``; reopening keeps the last-viewed month.
+  openReports: () =>
+    set((s) => ({
+      reportsOpen: true,
+      reportsMonth: s.reportsMonth ?? currentLocalMonth(),
+    })),
+  closeReports: () => set({ reportsOpen: false }),
+  setReportsMonth: (month) => set({ reportsMonth: month }),
   applyUrlState: (next) =>
     set((state) => ({
       slug: next.slug,
       rootSessionId: next.rootSessionId,
+      reportsOpen: next.reportsOpen,
+      reportsMonth: next.reportsMonth,
       // Preserve the user's drilled-in thread when the root hasn't
       // changed; resetting unconditionally meant refresh / popstate
       // forgot which child thread the user had open.
@@ -142,3 +166,10 @@ export const useUi = create<UiState>((set, get) => ({
     set({ focusedPane: "thread", canvasEnterIntent: "keyboard" }),
   clearCanvasEnterIntent: () => set({ canvasEnterIntent: null }),
 }));
+
+/** ``YYYY-MM`` in the user's local timezone. Duplicated from ReportsPane
+ *  (a 3-liner) so the store can default the month without importing a pane. */
+function currentLocalMonth(): string {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+}

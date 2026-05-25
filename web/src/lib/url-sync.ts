@@ -7,6 +7,8 @@ export type UrlState = {
   detailSessionId: string | null;
   detailWindow: { start: string | null; end: string | null } | null;
   canvasFocusedNodeId: string | null;
+  reportsOpen: boolean;
+  reportsMonth: string | null;
 };
 
 export function parseUrl(): UrlState {
@@ -21,12 +23,16 @@ export function parseUrl(): UrlState {
     detailSessionId && (ws || we)
       ? { start: ws, end: we }
       : null;
+  const reportsOpen = params.get("view") === "reports";
   return {
     slug,
     rootSessionId,
     detailSessionId,
     detailWindow,
     canvasFocusedNodeId: focus,
+    reportsOpen,
+    // ``month`` only carries meaning while Reports is open.
+    reportsMonth: reportsOpen ? params.get("month") : null,
   };
 }
 
@@ -40,6 +46,10 @@ function buildSearch(state: UrlState): string {
     if (state.detailWindow?.end) params.set("we", state.detailWindow.end);
   }
   if (state.canvasFocusedNodeId) params.set("focus", state.canvasFocusedNodeId);
+  if (state.reportsOpen) {
+    params.set("view", "reports");
+    if (state.reportsMonth) params.set("month", state.reportsMonth);
+  }
   const qs = params.toString();
   return qs ? `?${qs}` : "";
 }
@@ -57,6 +67,8 @@ function snapshot(): UrlState {
     detailSessionId: s.detailSessionId,
     detailWindow: s.detailWindow,
     canvasFocusedNodeId: s.canvasFocusedNodeId,
+    reportsOpen: s.reportsOpen,
+    reportsMonth: s.reportsMonth,
   };
 }
 
@@ -108,6 +120,21 @@ export const navigate = {
   },
   setCanvasFocus(id: string | null) {
     useUi.getState().setCanvasFocusedNodeId(id);
+    writeHistory(snapshot(), "replace");
+  },
+  openReports() {
+    useUi.getState().openReports();
+    writeHistory(snapshot(), "push");
+  },
+  // Push so the back button returns to the pre-Reports view (params drop).
+  closeReports() {
+    useUi.getState().closeReports();
+    writeHistory(snapshot(), "push");
+  },
+  // Month changes canonicalize in place (like canvas focus) so flipping
+  // through months doesn't stack history entries — refresh still restores.
+  setReportsMonth(month: string) {
+    useUi.getState().setReportsMonth(month);
     writeHistory(snapshot(), "replace");
   },
 };

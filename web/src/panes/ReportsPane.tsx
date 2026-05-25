@@ -1,6 +1,8 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo } from "react";
 import { ChevronLeft, ChevronRight, DollarSign, X } from "lucide-react";
 import { useUsageReport } from "@/api/client";
+import { useUi } from "@/store/ui";
+import { navigate } from "@/lib/url-sync";
 import type {
   ProjectGroupRow,
   ProjectUsageRow,
@@ -17,7 +19,9 @@ import { ScrollArea } from "@/components/ui/scroll-area";
  *  Reports is project-agnostic so this view lives at the App level
  *  (toggled from the TopBar), not under a project's pane group. */
 export function ReportsPane({ onClose }: { onClose?: () => void } = {}) {
-  const [month, setMonth] = useState<string>(() => currentLocalMonth());
+  // Month lives in the store (URL-synced via lib/url-sync). The fallback
+  // covers a hand-typed ``?view=reports`` link with no ``month`` param.
+  const month = useUi((s) => s.reportsMonth) ?? currentLocalMonth();
   const { data, isLoading, error } = useUsageReport(month, 20);
 
   const monthLabel = useMemo(() => formatMonth(month), [month]);
@@ -54,7 +58,11 @@ export function ReportsPane({ onClose }: { onClose?: () => void } = {}) {
           </div>
         </div>
         <div className="flex items-center gap-2">
-          <MonthPicker month={month} onChange={setMonth} label={monthLabel} />
+          <MonthPicker
+            month={month}
+            onChange={navigate.setReportsMonth}
+            label={monthLabel}
+          />
           {onClose && (
             <button
               type="button"

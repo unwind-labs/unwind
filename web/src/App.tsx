@@ -24,9 +24,10 @@ import {
 export function App() {
   const slug = useUi((s) => s.slug);
   const [showBrowser, setShowBrowser] = useState(false);
-  // Reports is project-agnostic (cross-project month rollup). Lives at
-  // the App level so it's reachable whether or not a project is selected.
-  const [showReports, setShowReports] = useState(false);
+  // Reports is project-agnostic (cross-project month rollup). Its open/closed
+  // state lives in the store so `lib/url-sync` mirrors it into the URL
+  // (?view=reports&month=…); reachable whether or not a project is selected.
+  const showReports = useUi((s) => s.reportsOpen);
 
   const { data: defaultProject } = useDefaultProject();
   useLiveEvents(slug);
@@ -89,7 +90,7 @@ export function App() {
         defaultSourcePath={defaultProject?.source_path ?? null}
         slug={slug}
         onBrowse={() => setShowBrowser(true)}
-        onOpenReports={() => setShowReports(true)}
+        onOpenReports={() => navigate.openReports()}
       />
       <div className="relative flex-1 overflow-hidden">
         {slug ? (
@@ -126,10 +127,10 @@ export function App() {
             // behaves consistently across overlays. Higher z so Reports
             // wins if both happen to be open at once.
             onMouseDown={(e) => {
-              if (e.target === e.currentTarget) setShowReports(false);
+              if (e.target === e.currentTarget) navigate.closeReports();
             }}
           >
-            <ReportsPane onClose={() => setShowReports(false)} />
+            <ReportsPane onClose={() => navigate.closeReports()} />
           </div>
         )}
       </div>
