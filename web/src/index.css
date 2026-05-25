@@ -198,11 +198,36 @@
   border-color: rgba(245, 158, 11, 0.4);
 }
 /* Live: subtree is actively running. Emerald-tinted surface so the
-   whole card reads as "in progress" from across the canvas. Same
-   shorthand-background caveat as ``.uw-card-yield`` above. */
+   whole card reads as "in progress" from across the canvas. A soft
+   emerald band is layered on top and slowly drifts vertically to give
+   the card a subtle "flowing" feel that signals ongoing work without
+   pulling the eye. Same shorthand-background caveat as
+   ``.uw-card-yield`` above. */
 .dark .uw-compact-card.uw-card-live {
-  background: linear-gradient(#17392c, #000000);
+  background:
+    repeating-linear-gradient(
+      180deg,
+      rgba(52, 211, 153, 0) 0px,
+      rgba(52, 211, 153, 0.18) 70px,
+      rgba(52, 211, 153, 0) 140px
+    ),
+    linear-gradient(#17392c, #000000);
+  background-repeat: repeat, no-repeat;
+  background-position: 0 0, 0 0;
+  animation: uw-live-flow 6s linear infinite;
   border-color: rgba(52, 211, 153, 0.4);
+}
+/* Continuously translate the repeating emerald band by exactly one
+   period (140px) so the pattern scrolls seamlessly. ``linear`` timing
+   keeps the motion fluid instead of pulsing. */
+@keyframes uw-live-flow {
+  from { background-position: 0 0,      0 0; }
+  to   { background-position: 0 -140px, 0 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .dark .uw-compact-card.uw-card-live {
+    animation: none;
+  }
 }
 .dark .uw-compact-card:hover,
 .dark .react-flow__node:focus-visible .uw-compact-card {
