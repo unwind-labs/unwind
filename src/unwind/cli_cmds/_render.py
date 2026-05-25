@@ -193,6 +193,102 @@ def _fmt_usd(n: float) -> str:
     return f"${n:,.2f}"
 
 
+def _friendly_project_name(slug: str, source_path: str) -> str:
+    """Best-effort short display name for a project.
+
+    If ``source_path`` looks like a real filesystem path (i.e. not just
+    ``~/.claude/projects/<slug>`` synthesized for a never-registered
+    project), use its last two segments. Otherwise reverse-translate the
+    slug back to a path by replacing leading ``-`` with ``/`` and use
+    its last two segments. This is lossy (slugs aren't reversible if a
+    path component itself contained ``-``) but good enough for a
+    display label.
+    """
+    if "/.claude/projects/" not in source_path:
+        path = source_path.rstrip("/")
+    else:
+        # Synthesized — recover something readable from the slug.
+        path = "/" + slug.lstrip("-").replace("-", "/")
+    parts = [p for p in path.split("/") if p]
+    if len(parts) >= 2:
+        return parts[-2] + "/" + parts[-1]
+    return parts[-1] if parts else slug
+
+
+def render_usage_report(bucketed: Any) -> None:
+    """Render a :class:`unwind.usage_report.BucketedReport` as a Rich table.
+
+    Format mirrors :func:`render_session_usage` columns (CW / CR / In /
+    Out for both tokens and USD) so the Reports view feels continuous
+    with the per-session canvas footer. Uses a fixed wide console width
+    so Rich doesn't crush the numeric columns down to single-character
+    rows on narrow terminals.
+    """
+    report = bucketed.report
+    title = (
+        f"Usage — {report.month} ({report.tz_name}) · "
+        f"{report.session_count} sessions across {report.project_count} projects"
+    )
+    table = Table(title=title, show_lines=False, expand=False)
+    table.add_column("project", overflow="fold", min_width=24, max_width=40)
+    table.add_column("sess", justify="right", no_wrap=True)
+    table.add_column("CW", justify="right", no_wrap=True)
+    table.add_column("CR", justify="right", no_wrap=True)
+    table.add_column("In", justify="right", no_wrap=True)
+    table.add_column("Out", justify="right", no_wrap=True)
+    table.add_column("$CW", justify="right", no_wrap=True)
+    table.add_column("$CR", justify="right", no_wrap=True)
+    table.add_column("$In", justify="right", no_wrap=True)
+    table.add_column("$Out", justify="right", no_wrap=True)
+    table.add_column("$Total", justify="right", style="bold", no_wrap=True)
+
+    def _row(name: str, sess: int, u: dict, c: dict, total: float, style: str = ""):
+        table.add_row(
+            f"[{style}]{name}[/]" if style else name,
+            str(sess),
+            _fmt_tokens(u.get("cw", 0)),
+            _fmt_tokens(u.get("cr", 0)),
+            _fmt_tokens(u.get("r", 0)),
+            _fmt_tokens(u.get("w", 0)),
+            _fmt_usd(c.get("cw", 0.0)),
+            _fmt_usd(c.get("cr", 0.0)),
+            _fmt_usd(c.get("r", 0.0)),
+            _fmt_usd(c.get("w", 0.0)),
+            _fmt_usd(total),
+        )
+
+    for p in bucketed.top:
+        _row(
+            _friendly_project_name(p.slug, p.source_path),
+            p.session_count,
+            p.usage,
+            p.cost,
+            p.total_cost,
+        )
+
+    if bucketed.ephemeral is not None:
+        g = bucketed.ephemeral
+        _row(g.label, g.session_count, g.usage, g.cost, g.total_cost, style="dim")
+    if bucketed.other is not None:
+        g = bucketed.other
+        _row(g.label, g.session_count, g.usage, g.cost, g.total_cost, style="dim")
+
+    # Grand total row — always sums everything in the report, including
+    # ephemerals and the tail, so the headline number matches.
+    _row(
+        "TOTAL",
+        report.session_count,
+        report.grand_usage,
+        report.grand_cost,
+        report.total_cost,
+        style="bold green",
+    )
+    # Force a wide console so the 11 columns don't collapse on a narrow
+    # terminal. Rich's default auto-detect uses 80 cols when stdout
+    # isn't a TTY (e.g. piped to a file), which crushes the table.
+    Console(width=180).print(table)
+
+
 def render_messages_text(
     messages: Iterable[Message],
     *,

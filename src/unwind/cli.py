@@ -25,6 +25,7 @@ from .cli_cmds import messages as messages_cmd
 from .cli_cmds import project as project_cmd
 from .cli_cmds import session as session_cmd
 from .cli_cmds import task as task_cmd
+from .cli_cmds import usage as usage_cmd
 from .projects import ProjectPaths, claude_projects_root
 from .settings import get_settings
 from . import __version__
@@ -64,6 +65,7 @@ app.add_typer(project_cmd.app, name="project", help="Inspect known projects.")
 app.add_typer(session_cmd.app, name="session", help="Inspect sessions in a project.")
 app.add_typer(messages_cmd.app, name="messages", help="Read session messages.")
 app.add_typer(task_cmd.app, name="task", help="Inspect callstack/subagent task trees.")
+app.add_typer(usage_cmd.app, name="usage", help="Cross-project token + USD usage reports.")
 
 
 def _pick_port(preferred: Optional[int]) -> int:
