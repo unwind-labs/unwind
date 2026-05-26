@@ -197,37 +197,36 @@
     linear-gradient(rgb(20, 23, 31), rgb(13, 16, 21));
   border-color: rgba(245, 158, 11, 0.4);
 }
-/* Live: subtree is actively running. Emerald-tinted surface so the
-   whole card reads as "in progress" from across the canvas. A soft
-   emerald band is layered on top and slowly drifts vertically to give
-   the card a subtle "flowing" feel that signals ongoing work without
-   pulling the eye. Same shorthand-background caveat as
-   ``.uw-card-yield`` above. */
+/* Live: subtree is actively running. Flat light-gray surface inverts
+   the dark-card / light-text scheme used elsewhere on the canvas, so
+   live cards visually pop. Supersedes the emerald flowing wash from
+   commit aeaa1c1. Same shorthand-background caveat as ``.uw-card-yield``
+   above. */
 .dark .uw-compact-card.uw-card-live {
-  background:
-    repeating-linear-gradient(
-      180deg,
-      rgba(52, 211, 153, 0) 0px,
-      rgba(52, 211, 153, 0.18) 70px,
-      rgba(52, 211, 153, 0) 140px
-    ),
-    linear-gradient(#17392c, #000000);
-  background-repeat: repeat, no-repeat;
-  background-position: 0 0, 0 0;
-  animation: uw-live-flow 6s linear infinite;
-  border-color: rgba(52, 211, 153, 0.4);
+  background: #72849a;
+  border-color: rgba(203, 213, 225, 0.6);
+  /* Override text-color vars so all Tailwind ``text-foreground`` /
+     ``text-muted-foreground`` / ``border-border`` descendants flip
+     to near-black against the light surface. Neutral hue + very low
+     lightness gives strong contrast. */
+  --foreground: 220 15% 4%;
+  --card-foreground: 220 15% 4%;
+  --muted-foreground: 220 12% 18%;
+  --border: 220 10% 35%;
 }
-/* Continuously translate the repeating emerald band by exactly one
-   period (140px) so the pattern scrolls seamlessly. ``linear`` timing
-   keeps the motion fluid instead of pulsing. */
-@keyframes uw-live-flow {
-  from { background-position: 0 0,      0 0; }
-  to   { background-position: 0 -140px, 0 0; }
+/* The $ column in UsageFooter uses ``text-emerald-300/90`` (a light
+   emerald) which is invisible against the live card's light-gray
+   surface. Swap it for a dark emerald here only — non-live cards
+   keep the original light tint. The escaped ``\/`` matches Tailwind's
+   slash-alpha class name. */
+.dark .uw-compact-card.uw-card-live .text-emerald-300\/90 {
+  color: #065f46; /* emerald-800 */
 }
-@media (prefers-reduced-motion: reduce) {
-  .dark .uw-compact-card.uw-card-live {
-    animation: none;
-  }
+/* The "current node" Telescope icon in the header uses ``text-primary``
+   (a bright sky color) which gets lost on the light-gray live surface.
+   Re-tint it to the same near-black as the body text. */
+.dark .uw-compact-card.uw-card-live .text-primary {
+  color: hsl(220 15% 4%);
 }
 .dark .uw-compact-card:hover,
 .dark .react-flow__node:focus-visible .uw-compact-card {
