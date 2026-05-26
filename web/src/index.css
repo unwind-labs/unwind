@@ -107,14 +107,26 @@
 
 /* Three-dot in-progress indicator on active CALL rows. */
 @keyframes uw-dot-pulse {
-  0%, 60%, 100% { opacity: 0.2; }
-  30% { opacity: 1; }
+  0%,
+  60%,
+  100% {
+    opacity: 0.2;
+  }
+  30% {
+    opacity: 1;
+  }
 }
-.dot-pulse-1, .dot-pulse-2, .dot-pulse-3 {
+.dot-pulse-1,
+.dot-pulse-2,
+.dot-pulse-3 {
   animation: uw-dot-pulse 1.2s infinite;
 }
-.dot-pulse-2 { animation-delay: 0.2s; }
-.dot-pulse-3 { animation-delay: 0.4s; }
+.dot-pulse-2 {
+  animation-delay: 0.2s;
+}
+.dot-pulse-3 {
+  animation-delay: 0.4s;
+}
 
 /* React Flow tweaks. */
 .react-flow__edge-path {
@@ -159,14 +171,12 @@
 .dark .uw-pane-focused .react-flow {
   background:
     radial-gradient(at 25% 20%, rgba(184, 164, 255, 0.06), transparent 55%),
-    radial-gradient(at 78% 82%, rgba(127, 200, 255, 0.04), transparent 55%),
-    hsl(var(--background));
+    radial-gradient(at 78% 82%, rgba(127, 200, 255, 0.04), transparent 55%), hsl(var(--background));
 }
 .dark .uw-pane-focused .uw-session-pane {
   background:
     radial-gradient(at 30% 15%, rgba(184, 164, 255, 0.05), transparent 60%),
-    radial-gradient(at 70% 85%, rgba(127, 200, 255, 0.03), transparent 60%),
-    hsl(var(--background));
+    radial-gradient(at 70% 85%, rgba(127, 200, 255, 0.03), transparent 60%), hsl(var(--background));
 }
 .dark .uw-pane-blurred .react-flow,
 .dark .uw-pane-blurred .uw-session-pane {
@@ -190,10 +200,7 @@
    ``bg-amber-*`` classes — keep this in sync if either changes. */
 .dark .uw-compact-card.uw-card-yield {
   background:
-    linear-gradient(
-      rgba(245, 158, 11, 0.25),
-      rgba(245, 158, 11, 0.15)
-    ),
+    linear-gradient(rgba(245, 158, 11, 0.25), rgba(245, 158, 11, 0.15)),
     linear-gradient(rgb(20, 23, 31), rgb(13, 16, 21));
   border-color: rgba(245, 158, 11, 0.4);
 }
@@ -203,7 +210,7 @@
    commit aeaa1c1. Same shorthand-background caveat as ``.uw-card-yield``
    above. */
 .dark .uw-compact-card.uw-card-live {
-  background: #72849a;
+  background: #a5b7cd;
   border-color: rgba(203, 213, 225, 0.6);
   /* Override text-color vars so all Tailwind ``text-foreground`` /
      ``text-muted-foreground`` / ``border-border`` descendants flip
@@ -280,7 +287,9 @@
   width: 26px;
   height: 26px;
   padding: 0;
-  transition: background-color 120ms, color 120ms;
+  transition:
+    background-color 120ms,
+    color 120ms;
 }
 .react-flow__controls-button + .react-flow__controls-button {
   margin-top: 0;
@@ -317,9 +326,15 @@
 .uw-markdown h3 {
   @apply font-semibold my-2;
 }
-.uw-markdown h1 { @apply text-base; }
-.uw-markdown h2 { @apply text-sm; }
-.uw-markdown h3 { @apply text-sm; }
+.uw-markdown h1 {
+  @apply text-base;
+}
+.uw-markdown h2 {
+  @apply text-sm;
+}
+.uw-markdown h3 {
+  @apply text-sm;
+}
 .uw-markdown ul,
 .uw-markdown ol {
   @apply pl-5 my-1;
