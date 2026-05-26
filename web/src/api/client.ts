@@ -1,4 +1,4 @@
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import type {
   CanvasTreeResponse,
   DefaultProject,
@@ -143,6 +143,22 @@ export function useUsageReport(
     // Reports view re-queries on month change; no need to background-poll.
     staleTime: 60_000,
   });
+}
+
+/** Clear ``last_uuid`` on every cached MessagesResponse for ``slug`` so the
+ *  next refetch is FULL (no ``since_uuid``). Use when a server-side event
+ *  may have re-annotated already-cached messages — the delta endpoint slices
+ *  re-annotated rows off (they're older than ``since_uuid``), so a plain
+ *  invalidate alone refetches nothing useful and the UI stays stale until
+ *  a hard browser refresh evicts the cache. Caller is responsible for
+ *  calling ``invalidateQueries`` afterwards to actually trigger the refetch;
+ *  the cached ``messages`` array stays in place during it so the UI doesn't
+ *  flash "loading…". */
+export function resetMessagesTail(qc: QueryClient, slug: string): void {
+  qc.getQueriesData<MessagesResponse>({ queryKey: ["messages", slug] })
+    .forEach(([key, data]) => {
+      if (data) qc.setQueryData(key, { ...data, last_uuid: null });
+    });
 }
 
 /** Merge a delta response into the cached snapshot. Dedup by uuid in case

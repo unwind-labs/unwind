@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
 import { useQueryClient } from "@tanstack/react-query";
+import { resetMessagesTail } from "@/api/client";
 import type { Message, MessagesResponse, SessionRow } from "@/api/types";
 
 type WsEvent =
@@ -210,8 +211,12 @@ function handleEvent(
       // A new callstack report wrote: sessions list needs a fresh server view
       // since fork-classification only happens after report.yaml exists.
       qc.invalidateQueries({ queryKey: ["sessions", slug], exact: false });
-      // Also invalidate any open child traces — their spawn metadata may have
-      // changed (new resolved children, etc.).
+      // Also invalidate any open child traces — their spawn metadata may
+      // have changed (new resolved children, etc.). A new report can mutate
+      // ``spawn_done`` / ``spawn_session_ids`` on a parent's already-cached
+      // ``tool_use`` message; reset the delta tail first so the refetch
+      // pulls a full payload (see ``resetMessagesTail`` for the rationale).
+      resetMessagesTail(qc, slug);
       qc.invalidateQueries({ queryKey: ["messages", slug], exact: false });
       break;
     }
