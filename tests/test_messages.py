@@ -115,6 +115,63 @@ def test_thinking_blocks_surface_as_thinking_messages(tmp_path: Path):
     assert thinking.text == "let me reason"
 
 
+def test_empty_thinking_with_signature_surfaces_encrypted_placeholder(tmp_path: Path):
+    """Claude Opus 4.7 routinely emits ``type: thinking`` blocks with an empty
+    ``thinking`` field and a populated ``signature`` (the encrypted reasoning).
+    Without a placeholder these render as "(empty)" in the trace, which reads
+    like a bug. Surface a distinct placeholder so the user sees the model
+    thought, but the text is unavailable."""
+    lines = [
+        {
+            "type": "assistant",
+            "uuid": "a1",
+            "sessionId": "s",
+            "timestamp": "2026-04-24T08:00:01.000Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "thinking", "thinking": "", "signature": "ENC=="},
+                    {"type": "text", "text": "the answer"},
+                ],
+            },
+        },
+    ]
+    p = _write(tmp_path, lines)
+    page = read_messages(p)
+    thinking = [m for m in page.messages if m.role == "thinking"]
+    assert len(thinking) == 1
+    assert thinking[0].text == "[encrypted thinking]"
+
+
+def test_whitespace_only_thinking_with_signature_surfaces_encrypted_placeholder(
+    tmp_path: Path,
+):
+    """Whitespace-only ``thinking`` text is functionally empty — it would
+    render as a blank bubble — so the placeholder logic must treat it the
+    same as an empty string. Pins the ``.strip()`` check in
+    ``_normalize_assistant`` so a regression to truthy-check-only behavior
+    is caught."""
+    lines = [
+        {
+            "type": "assistant",
+            "uuid": "a1",
+            "sessionId": "s",
+            "timestamp": "2026-04-24T08:00:01.000Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "thinking", "thinking": "   \n  ", "signature": "ENC=="},
+                ],
+            },
+        },
+    ]
+    p = _write(tmp_path, lines)
+    page = read_messages(p)
+    thinking = [m for m in page.messages if m.role == "thinking"]
+    assert len(thinking) == 1
+    assert thinking[0].text == "[encrypted thinking]"
+
+
 def test_redacted_thinking_surfaces_placeholder(tmp_path: Path):
     """``redacted_thinking`` has encrypted ``data`` and no readable text, so
     it surfaces a placeholder rather than an empty bubble."""

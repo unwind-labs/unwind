@@ -35,6 +35,13 @@ Role = Literal["user", "assistant", "thinking", "tool_use", "tool_result", "syst
 # Asserted verbatim in tests, so this is an implicit UI contract.
 REDACTED_THINKING_PLACEHOLDER = "[redacted thinking]"
 
+# Surfaced for ``thinking`` blocks whose ``thinking`` text is empty but that
+# carry a ``signature`` — Claude Opus 4.7's extended-thinking response can
+# include the encrypted reasoning signature without an accompanying summary.
+# Without this the UI shows the generic "(empty)" body, which reads like a
+# bug. Asserted verbatim in tests.
+ENCRYPTED_THINKING_PLACEHOLDER = "[encrypted thinking]"
+
 
 @dataclass
 class Message:
@@ -360,11 +367,27 @@ def _normalize_assistant(
                     )
                 )
             elif btype in ("thinking", "redacted_thinking"):
-                # ``redacted_thinking`` carries encrypted ``data`` instead of a
-                # human-readable ``thinking`` field; surface a placeholder.
-                thought = block.get("thinking") or (
-                    REDACTED_THINKING_PLACEHOLDER if btype == "redacted_thinking" else ""
-                )
+                # Four cases, all rendered as role=thinking so the UI stays
+                # uniform. Whitespace-only ``thinking`` is treated as empty
+                # (it would render as "(empty)" anyway):
+                #   - thinking with non-blank text: regular case, pass through.
+                #   - redacted_thinking: encrypted ``data``, no readable text
+                #     → REDACTED placeholder.
+                #   - thinking with blank text + ``signature``: extended
+                #     thinking mode where only the encrypted signature comes
+                #     back (Opus 4.7 does this routinely) → ENCRYPTED
+                #     placeholder.
+                #   - thinking with blank text and no signature: malformed-
+                #     but-tolerated input → empty string.
+                raw_thought = block.get("thinking") or ""
+                if raw_thought.strip():
+                    thought = raw_thought
+                elif btype == "redacted_thinking":
+                    thought = REDACTED_THINKING_PLACEHOLDER
+                elif block.get("signature"):
+                    thought = ENCRYPTED_THINKING_PLACEHOLDER
+                else:
+                    thought = ""
                 out.append(
                     Message(
                         uuid=f"{uuid}:{order}", session_id=session_id,
