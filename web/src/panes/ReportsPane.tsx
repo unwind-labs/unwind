@@ -3,12 +3,7 @@ import { ChevronLeft, ChevronRight, DollarSign, X } from "lucide-react";
 import { useUsageReport } from "@/api/client";
 import { useUi } from "@/store/ui";
 import { navigate } from "@/lib/url-sync";
-import type {
-  ProjectGroupRow,
-  ProjectUsageRow,
-  TokenCost,
-  TokenUsage,
-} from "@/api/types";
+import type { ProjectGroupRow, ProjectUsageRow, TokenCost, TokenUsage } from "@/api/types";
 import { ScrollArea } from "@/components/ui/scroll-area";
 
 /** Monthly cross-project token + USD report. Renders the same shape as
@@ -51,18 +46,13 @@ export function ReportsPane({ onClose }: { onClose?: () => void } = {}) {
             Usage report
           </div>
           <div className="mt-1 text-xs text-muted-foreground">
-            Token usage and USD cost across every known project. A token
-            is counted in a month when the assistant turn that produced
-            it falls in that local calendar month
+            Token usage and USD cost across every known project. A token is counted in a month when
+            the assistant turn that produced it falls in that local calendar month
             {data?.tz_name ? ` (${data.tz_name})` : ""}.
           </div>
         </div>
         <div className="flex items-center gap-2">
-          <MonthPicker
-            month={month}
-            onChange={navigate.setReportsMonth}
-            label={monthLabel}
-          />
+          <MonthPicker month={month} onChange={navigate.setReportsMonth} label={monthLabel} />
           {onClose && (
             <button
               type="button"
@@ -76,18 +66,14 @@ export function ReportsPane({ onClose }: { onClose?: () => void } = {}) {
             >
               <X className="h-3.5 w-3.5" />
               close
-              <kbd className="ml-1 rounded border border-border bg-muted px-1 text-[10px]">
-                esc
-              </kbd>
+              <kbd className="ml-1 rounded border border-border bg-muted px-1 text-[10px]">esc</kbd>
             </button>
           )}
         </div>
       </header>
 
       <ScrollArea className="flex-1 px-6 pb-8">
-        {isLoading && (
-          <div className="py-8 text-sm text-muted-foreground">loading…</div>
-        )}
+        {isLoading && <div className="py-8 text-sm text-muted-foreground">loading…</div>}
         {error && (
           <div className="py-8 text-sm text-destructive">
             failed to load report: {String(error)}
@@ -147,9 +133,7 @@ function MonthPicker({
         // ``type=month`` shows a native picker; the text label below is a
         // human-readable fallback for browsers without month-picker UI.
       />
-      <span className="hidden text-xs text-muted-foreground sm:inline">
-        {label}
-      </span>
+      <span className="hidden text-xs text-muted-foreground sm:inline">{label}</span>
       <button
         type="button"
         title="next month"
@@ -184,15 +168,7 @@ function KpiStrip({
   );
 }
 
-function Kpi({
-  label,
-  value,
-  accent,
-}: {
-  label: string;
-  value: string;
-  accent?: "emerald";
-}) {
+function Kpi({ label, value, accent }: { label: string; value: string; accent?: "emerald" }) {
   return (
     <div className="rounded border border-border bg-card p-3">
       <div className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
@@ -237,12 +213,8 @@ function CategoryBreakdown({
             return (
               <tr key={key} className="border-t border-border/40">
                 <td className="py-1 pr-3 text-muted-foreground">{label}</td>
-                <td className="w-24 py-1 pr-3 text-right font-mono">
-                  {fmtTokens(usage[key])}
-                </td>
-                <td className="w-24 py-1 pr-3 text-right font-mono">
-                  {fmtUsd(cost[key])}
-                </td>
+                <td className="w-24 py-1 pr-3 text-right font-mono">{fmtTokens(usage[key])}</td>
+                <td className="w-24 py-1 pr-3 text-right font-mono">{fmtUsd(cost[key])}</td>
                 <td className="py-1">
                   <div className="h-1.5 w-full overflow-hidden rounded bg-muted">
                     <div
@@ -343,11 +315,11 @@ function ProjectTable({
         </tfoot>
       </table>
       <div className="border-t border-border px-3 py-1.5 text-[10px] text-muted-foreground">
-        Grand total sums every event in the window, including ephemeral
-        test runs and the long tail. Category totals are{" "}
+        Grand total sums every event in the window, including ephemeral test runs and the long tail.
+        Category totals are{" "}
         <span className="font-mono">
-          ${grandCost.cw.toFixed(0)} CW · ${grandCost.cr.toFixed(0)} CR ·
-          ${grandCost.r.toFixed(0)} In · ${grandCost.w.toFixed(0)} Out
+          ${grandCost.cw.toFixed(0)} CW · ${grandCost.cr.toFixed(0)} CR · ${grandCost.r.toFixed(0)}{" "}
+          In · ${grandCost.w.toFixed(0)} Out
         </span>
         .
       </div>
@@ -371,17 +343,10 @@ function ProjectRow({
   muted?: boolean;
 }) {
   return (
-    <tr
-      className={
-        "border-t border-border/40 " +
-        (muted ? "text-muted-foreground" : "")
-      }
-    >
+    <tr className={"border-t border-border/40 " + (muted ? "text-muted-foreground" : "")}>
       <td className="px-3 py-1.5">
         <div className="font-medium">{name}</div>
-        <div className="truncate text-[10px] text-muted-foreground/80">
-          {sub}
-        </div>
+        <div className="truncate text-[10px] text-muted-foreground/80">{sub}</div>
       </td>
       <td className="px-2 py-1.5 text-right">{sessions.toLocaleString()}</td>
       <td className="px-2 py-1.5 text-right font-mono">{fmtTokens(usage.cw)}</td>

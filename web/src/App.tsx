@@ -5,21 +5,12 @@ import { useUi } from "@/store/ui";
 import { isTypingTarget } from "@/lib/keyboard";
 import { navigate, useUrlSync } from "@/lib/url-sync";
 import { useLiveEvents } from "@/ws/client";
-import {
-  ResizableHandle,
-  ResizablePanel,
-  ResizablePanelGroup,
-} from "@/components/ui/resizable";
+import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/components/ui/resizable";
 import { SessionListPane } from "@/panes/SessionListPane";
 import { CanvasPane } from "@/panes/CanvasPane";
 import { ProjectPicker } from "@/panes/ProjectPicker";
 import { ReportsPane } from "@/panes/ReportsPane";
-import {
-  BarChart3,
-  FolderSearch,
-  FolderTree,
-  Telescope,
-} from "lucide-react";
+import { BarChart3, FolderSearch, FolderTree, Telescope } from "lucide-react";
 
 export function App() {
   const slug = useUi((s) => s.slug);
@@ -171,9 +162,7 @@ function PaneFrame({
       onMouseDown={() => onFocus(paneKey)}
       className={
         "relative h-full transition-shadow outline-none focus-visible:ring-2 focus-visible:ring-primary/40 " +
-        (focused
-          ? "uw-pane-focused ring-1 ring-inset ring-primary/30"
-          : "uw-pane-blurred")
+        (focused ? "uw-pane-focused ring-1 ring-inset ring-primary/30" : "uw-pane-blurred")
       }
     >
       {children}
@@ -213,8 +202,7 @@ function TopBar({
   // resolves source_path from the most recent session's ``cwd`` when the
   // project was entered slug-only, so this is the real folder either way.
   const currentSourcePath =
-    (slug && projects?.find((p) => p.slug === slug)?.source_path) ||
-    defaultSourcePath;
+    (slug && projects?.find((p) => p.slug === slug)?.source_path) || defaultSourcePath;
 
   return (
     <header className="flex items-center gap-3 border-b border-border bg-card px-4 py-2">

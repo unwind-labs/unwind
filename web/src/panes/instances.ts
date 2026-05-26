@@ -9,7 +9,6 @@
 
 import type { Message, SpawnCardData } from "@/api/types";
 
-
 /** Filter ``extra_spawns`` to a single window ``[start, end)``.
  *
  *  Extras represent callstack-Skill spawns without an MCP tool_use anchor,
@@ -31,7 +30,6 @@ export function filterExtrasByWindow(
     return t >= startMs && t < endMs;
   });
 }
-
 
 /** Filter a child session's messages to a window ``[start, end)``.
  *

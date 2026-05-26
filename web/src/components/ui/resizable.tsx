@@ -8,12 +8,7 @@ import {
 import { cn } from "@/lib/utils";
 
 export function ResizablePanelGroup(props: PanelGroupProps) {
-  return (
-    <PanelGroup
-      {...props}
-      className={cn("h-full w-full", props.className)}
-    />
-  );
+  return <PanelGroup {...props} className={cn("h-full w-full", props.className)} />;
 }
 
 export function ResizablePanel(props: PanelProps) {

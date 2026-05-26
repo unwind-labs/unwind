@@ -102,14 +102,8 @@ describe("deriveRows — invoke_resume", () => {
   it("flags resume rows with isResume + carries user_reply", () => {
     const rows = deriveRows(messages);
     const spawns = rows.filter((r) => r.kind === "spawn");
-    expect(spawns.map((r) => r.kind === "spawn" && r.isResume)).toEqual([
-      false,
-      true,
-      true,
-    ]);
-    const replies = spawns.map((r) =>
-      r.kind === "spawn" ? r.userReply : null,
-    );
+    expect(spawns.map((r) => r.kind === "spawn" && r.isResume)).toEqual([false, true, true]);
+    const replies = spawns.map((r) => (r.kind === "spawn" ? r.userReply : null));
     expect(replies).toEqual([undefined, "000000", "yes please"]);
   });
 
@@ -118,11 +112,7 @@ describe("deriveRows — invoke_resume", () => {
     const ts = rows
       .filter((r) => r.kind === "spawn")
       .map((r) => (r.kind === "spawn" ? r.parentToolUseTs : null));
-    expect(ts).toEqual([
-      "2026-05-01T23:44:47Z",
-      "2026-05-01T23:45:35Z",
-      "2026-05-01T23:46:03Z",
-    ]);
+    expect(ts).toEqual(["2026-05-01T23:44:47Z", "2026-05-01T23:45:35Z", "2026-05-01T23:46:03Z"]);
   });
 
   it("titles resume rows with the user_reply (no decorative prefix)", () => {
@@ -173,26 +163,32 @@ describe("deriveRows — extras handleId uniqueness", () => {
   it("produces distinct handleIds for the same positional index across calls", () => {
     // Simulate the bug scenario: two separate parents each emit one extra
     // (their first child). Without the fix both produce ``extra-0-0``.
-    const parentA = deriveRows([], [
-      {
-        invoke_id: "",
-        started_at: null,
-        ended_at: null,
-        status: "complete",
-        children: ["aaaa1111-aaaa-aaaa-aaaa-aaaaaaaaaaaa"],
-        tasks: ["task-a"],
-      },
-    ]);
-    const parentB = deriveRows([], [
-      {
-        invoke_id: "",
-        started_at: null,
-        ended_at: null,
-        status: "complete",
-        children: ["bbbb2222-bbbb-bbbb-bbbb-bbbbbbbbbbbb"],
-        tasks: ["task-b"],
-      },
-    ]);
+    const parentA = deriveRows(
+      [],
+      [
+        {
+          invoke_id: "",
+          started_at: null,
+          ended_at: null,
+          status: "complete",
+          children: ["aaaa1111-aaaa-aaaa-aaaa-aaaaaaaaaaaa"],
+          tasks: ["task-a"],
+        },
+      ],
+    );
+    const parentB = deriveRows(
+      [],
+      [
+        {
+          invoke_id: "",
+          started_at: null,
+          ended_at: null,
+          status: "complete",
+          children: ["bbbb2222-bbbb-bbbb-bbbb-bbbbbbbbbbbb"],
+          tasks: ["task-b"],
+        },
+      ],
+    );
     const ha = parentA.find((r) => r.kind === "spawn");
     const hb = parentB.find((r) => r.kind === "spawn");
     if (ha?.kind !== "spawn" || hb?.kind !== "spawn") throw new Error("no spawn");

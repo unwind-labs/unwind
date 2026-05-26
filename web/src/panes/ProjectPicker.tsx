@@ -45,13 +45,9 @@ export function ProjectPicker({ onClose }: { onClose?: () => void } = {}) {
       </header>
       <ScrollArea className="flex-1">
         <ul className="divide-y divide-border px-2 py-4">
-          {isLoading && (
-            <li className="px-4 py-3 text-xs text-muted-foreground">loading…</li>
-          )}
+          {isLoading && <li className="px-4 py-3 text-xs text-muted-foreground">loading…</li>}
           {error && (
-            <li className="px-4 py-3 text-xs text-destructive">
-              {(error as Error).message}
-            </li>
+            <li className="px-4 py-3 text-xs text-destructive">{(error as Error).message}</li>
           )}
           {data?.map((p) => (
             <li key={p.slug}>
@@ -76,9 +72,7 @@ export function ProjectPicker({ onClose }: { onClose?: () => void } = {}) {
                   <div className="truncate text-sm font-medium text-foreground">
                     {basename(p.source_path)}
                   </div>
-                  <div className="truncate text-[10px] text-muted-foreground">
-                    {p.source_path}
-                  </div>
+                  <div className="truncate text-[10px] text-muted-foreground">{p.source_path}</div>
                 </div>
                 <Badge variant="outline">
                   {p.session_count} {p.session_count === 1 ? "session" : "sessions"}

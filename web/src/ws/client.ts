@@ -146,11 +146,7 @@ export function useLiveEvents(slug: string | null | undefined) {
   }, [slug, qc]);
 }
 
-function handleEvent(
-  qc: ReturnType<typeof useQueryClient>,
-  slug: string,
-  ev: WsEvent,
-) {
+function handleEvent(qc: ReturnType<typeof useQueryClient>, slug: string, ev: WsEvent) {
   switch (ev.type) {
     case "session_created": {
       // Don't optimistically insert: at creation time, the heuristic may not
@@ -165,9 +161,7 @@ function handleEvent(
       if (!summary) break;
       qc.setQueriesData<SessionRow[]>({ queryKey: ["sessions", slug] }, (prev) => {
         const list = prev ?? [];
-        const next = list.map((s) =>
-          s.session_id === session_id ? { ...s, ...summary } : s,
-        );
+        const next = list.map((s) => (s.session_id === session_id ? { ...s, ...summary } : s));
         next.sort(
           (a, b) =>
             (b.last_timestamp ? Date.parse(b.last_timestamp) : 0) -
@@ -178,32 +172,25 @@ function handleEvent(
       break;
     }
     case "messages_appended": {
-      const { session_id, messages } = ev as Extract<
-        WsEvent,
-        { type: "messages_appended" }
-      >;
+      const { session_id, messages } = ev as Extract<WsEvent, { type: "messages_appended" }>;
       // Patch both include_meta=false and =true caches if they exist.
       for (const meta of [false, true]) {
-        qc.setQueryData<MessagesResponse>(
-          ["messages", slug, session_id, meta],
-          (prev) => {
-            if (!prev) return prev;
-            const seen = new Set(prev.messages.map((m) => m.uuid));
-            const merged = [...prev.messages];
-            for (const m of messages) {
-              if (!seen.has(m.uuid)) {
-                merged.push(m);
-                seen.add(m.uuid);
-              }
+        qc.setQueryData<MessagesResponse>(["messages", slug, session_id, meta], (prev) => {
+          if (!prev) return prev;
+          const seen = new Set(prev.messages.map((m) => m.uuid));
+          const merged = [...prev.messages];
+          for (const m of messages) {
+            if (!seen.has(m.uuid)) {
+              merged.push(m);
+              seen.add(m.uuid);
             }
-            return {
-              ...prev,
-              messages: merged,
-              last_uuid:
-                merged.length > 0 ? merged[merged.length - 1].uuid : prev.last_uuid,
-            };
-          },
-        );
+          }
+          return {
+            ...prev,
+            messages: merged,
+            last_uuid: merged.length > 0 ? merged[merged.length - 1].uuid : prev.last_uuid,
+          };
+        });
       }
       break;
     }

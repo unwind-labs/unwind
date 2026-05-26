@@ -19,10 +19,7 @@ export function parseUrl(): UrlState {
   const ws = params.get("ws");
   const we = params.get("we");
   const focus = params.get("focus");
-  const detailWindow =
-    detailSessionId && (ws || we)
-      ? { start: ws, end: we }
-      : null;
+  const detailWindow = detailSessionId && (ws || we) ? { start: ws, end: we } : null;
   const reportsOpen = params.get("view") === "reports";
   return {
     slug,
@@ -72,11 +69,7 @@ function snapshot(): UrlState {
   };
 }
 
-function writeHistory(
-  state: UrlState,
-  mode: "push" | "replace",
-  opts?: { force?: boolean },
-) {
+function writeHistory(state: UrlState, mode: "push" | "replace", opts?: { force?: boolean }) {
   if (!opts?.force && isApplyingFromUrl) return;
   const target = window.location.pathname + buildSearch(state);
   const current = window.location.pathname + window.location.search;

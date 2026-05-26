@@ -9,9 +9,5 @@
 export function isTypingTarget(e: Event): boolean {
   const target = e.target as HTMLElement | null;
   if (!target) return false;
-  return (
-    target.tagName === "INPUT" ||
-    target.tagName === "TEXTAREA" ||
-    target.isContentEditable
-  );
+  return target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable;
 }

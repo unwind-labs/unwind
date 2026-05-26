@@ -115,16 +115,8 @@ export function CompactCardNode({ data }: { data: CompactCardData }) {
   // Earlier slices stop at the next invoke_resume; the latest is open-ended.
   const windowed = useMemo(() => {
     if (!messages) return null;
-    const filtered = filterMessagesByWindow(
-      messages.messages,
-      data.windowStart,
-      data.windowEnd,
-    );
-    const extras = filterExtrasByWindow(
-      messages.extra_spawns,
-      data.windowStart,
-      data.windowEnd,
-    );
+    const filtered = filterMessagesByWindow(messages.messages, data.windowStart, data.windowEnd);
+    const extras = filterExtrasByWindow(messages.extra_spawns, data.windowStart, data.windowEnd);
     return { messages: filtered, extras };
   }, [messages, data.windowStart, data.windowEnd]);
   // Pass the FULL unwindowed message stream as the third arg so spawn
@@ -135,11 +127,7 @@ export function CompactCardNode({ data }: { data: CompactCardData }) {
   const rows: Row[] = useMemo(
     () =>
       windowed
-        ? deriveRows(
-            windowed.messages,
-            windowed.extras,
-            messages?.messages ?? windowed.messages,
-          )
+        ? deriveRows(windowed.messages, windowed.extras, messages?.messages ?? windowed.messages)
         : [],
     [windowed, messages],
   );
@@ -204,10 +192,8 @@ export function CompactCardNode({ data }: { data: CompactCardData }) {
   // without any layout shift (see hover comment below).
   // No background changes from hover/focus — only border + shadow.
   const cursorColor = "hsl(var(--primary) / 0.7)";
-  const borderColor =
-    !data.selected && data.keyboardFocused ? cursorColor : undefined;
-  const outlineColor =
-    !data.selected && data.keyboardFocused ? cursorColor : undefined;
+  const borderColor = !data.selected && data.keyboardFocused ? cursorColor : undefined;
+  const outlineColor = !data.selected && data.keyboardFocused ? cursorColor : undefined;
 
   // Pop-style mapping from this card's spawn rows to the canvas tree's
   // child windows: each row claims the next-unused child whose
@@ -261,7 +247,8 @@ export function CompactCardNode({ data }: { data: CompactCardData }) {
         // keyboard focus), not this inner div.
         "uw-compact-card hover:border-sky-400/70 hover:outline-sky-400/70 hover:shadow-lg",
         // Currently-open state: solid primary border + matching outline + subtle fill.
-        data.selected && "border-primary outline-primary bg-primary/10 hover:border-primary hover:outline-primary",
+        data.selected &&
+          "border-primary outline-primary bg-primary/10 hover:border-primary hover:outline-primary",
         // Yielded: bold amber background so the whole card pops in the
         // canvas — the session is paused waiting for user input. The
         // amber wash is applied via the .uw-card-yield CSS rule (see
@@ -316,11 +303,7 @@ export function CompactCardNode({ data }: { data: CompactCardData }) {
           className="text-[8.5px] font-bold uppercase tracking-[0.32em] text-foreground/70"
           style={{ writingMode: "vertical-rl", transform: "rotate(180deg)" }}
         >
-          {railStatus === "yield"
-            ? "waiting"
-            : kind === "resume"
-              ? "continued"
-              : kind}
+          {railStatus === "yield" ? "waiting" : kind === "resume" ? "continued" : kind}
         </span>
       </div>
       <div className="min-w-0 flex-1">
@@ -340,29 +323,17 @@ export function CompactCardNode({ data }: { data: CompactCardData }) {
                 strokeWidth={2.5}
               />
             ) : null}
-            <div className="truncate text-[12px] font-medium text-foreground">
-              {data.label}
-            </div>
+            <div className="truncate text-[12px] font-medium text-foreground">{data.label}</div>
           </div>
-          <span className="font-mono text-[10px] text-muted-foreground/70">
-            {shortSessionId}
-          </span>
+          <span className="font-mono text-[10px] text-muted-foreground/70">{shortSessionId}</span>
         </header>
         <ul className="flex flex-col gap-1 p-3">
           {!messages && (
-            <li className="px-2 py-1 text-[10px] italic text-muted-foreground">
-              loading…
-            </li>
+            <li className="px-2 py-1 text-[10px] italic text-muted-foreground">loading…</li>
           )}
           {rows.map((r, i) => {
             if (r.kind === "activity") {
-              return (
-                <ActivityRow
-                  key={i}
-                  count={r.count}
-                  spanSeconds={r.spanSeconds}
-                />
-              );
+              return <ActivityRow key={i} count={r.count} spanSeconds={r.spanSeconds} />;
             }
             // Anchor the row's source Handle to its corresponding canvas
             // child window — pop the next-unused canvas child whose
@@ -385,9 +356,7 @@ export function CompactCardNode({ data }: { data: CompactCardData }) {
             );
           })}
           {messages && rows.length === 0 && (
-            <li className="px-2 py-1 text-[10px] italic text-muted-foreground">
-              (empty)
-            </li>
+            <li className="px-2 py-1 text-[10px] italic text-muted-foreground">(empty)</li>
           )}
           {/* Terminator row: every window that ended its work closes
               with a single line indicating HOW it ended — either it
@@ -401,9 +370,7 @@ export function CompactCardNode({ data }: { data: CompactCardData }) {
               caller" — the COMPLETE label would be misleading. The
               root still shows the YIELD terminator when it's
               actively waiting for user input. */}
-          {selfStatus === "done" && !data.isRoot && (
-            <TerminatorRow kind="complete" />
-          )}
+          {selfStatus === "done" && !data.isRoot && <TerminatorRow kind="complete" />}
           {selfStatus === "yield" && <TerminatorRow kind="yield" />}
         </ul>
         <UsageFooter
@@ -432,12 +399,7 @@ function TerminatorRow({ kind }: { kind: "complete" | "yield" }) {
       ) : (
         <CornerDownLeft className={cn("h-3.5 w-3.5", accentText)} />
       )}
-      <span
-        className={cn(
-          "text-[9px] font-bold uppercase tracking-[0.18em]",
-          accentText,
-        )}
-      >
+      <span className={cn("text-[9px] font-bold uppercase tracking-[0.18em]", accentText)}>
         {label}
       </span>
     </li>
@@ -582,7 +544,8 @@ function SpawnRowDisplay({
               onFocus();
             }
           : undefined
-      }>
+      }
+    >
       {!isCall ? (
         <Sparkles className={cn("h-3 w-3", accentText)} />
       ) : isFreshCross ? (
@@ -592,10 +555,7 @@ function SpawnRowDisplay({
       ) : (
         <GitFork className={cn("h-3 w-3", accentText)} />
       )}
-      <Badge
-        variant="outline"
-        className={cn("border text-[9px] uppercase", badgeBorderText)}
-      >
+      <Badge variant="outline" className={cn("border text-[9px] uppercase", badgeBorderText)}>
         {row.isResume
           ? "continued"
           : !isCall
@@ -606,17 +566,10 @@ function SpawnRowDisplay({
                 ? "fresh"
                 : "call"}
       </Badge>
-      <span
-        className="flex-1 truncate font-mono text-[11px] text-foreground"
-        title={row.title}
-      >
+      <span className="flex-1 truncate font-mono text-[11px] text-foreground" title={row.title}>
         {row.title}
       </span>
-      {row.done ? (
-        <CheckCircle2 className="h-4 w-4 text-emerald-400" />
-      ) : (
-        <DotPulse />
-      )}
+      {row.done ? <CheckCircle2 className="h-4 w-4 text-emerald-400" /> : <DotPulse />}
       <Handle
         type="source"
         position={Position.Right}
@@ -645,4 +598,3 @@ function formatSpan(s: number): string {
   const sec = Math.floor(s % 60);
   return `${m}m ${sec}s`;
 }
-

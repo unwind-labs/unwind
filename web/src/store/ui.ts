@@ -54,10 +54,7 @@ interface UiState {
   setSessionFilter: (v: string) => void;
   setShowForks: (v: boolean) => void;
   setCallsOnly: (v: boolean) => void;
-  openDetail: (
-    id: string,
-    window?: { start: string | null; end: string | null } | null,
-  ) => void;
+  openDetail: (id: string, window?: { start: string | null; end: string | null } | null) => void;
   closeDetail: () => void;
   setCanvasFocusedNodeId: (id: string | null) => void;
   openReports: () => void;
@@ -113,8 +110,7 @@ export const useUi = create<UiState>((set, get) => ({
   setSessionFilter: (v) => set({ sessionFilter: v }),
   setShowForks: (v) => set({ showForks: v }),
   setCallsOnly: (v) => set({ callsOnly: v }),
-  openDetail: (id, window) =>
-    set({ detailSessionId: id, detailWindow: window ?? null }),
+  openDetail: (id, window) => set({ detailSessionId: id, detailWindow: window ?? null }),
   closeDetail: () => set({ detailSessionId: null, detailWindow: null }),
   setCanvasFocusedNodeId: (id) => set({ canvasFocusedNodeId: id }),
   // Default the month to the current one on first open so the URL always
@@ -136,9 +132,7 @@ export const useUi = create<UiState>((set, get) => ({
       // changed; resetting unconditionally meant refresh / popstate
       // forgot which child thread the user had open.
       threadSessionId:
-        next.rootSessionId !== state.rootSessionId
-          ? next.rootSessionId
-          : state.threadSessionId,
+        next.rootSessionId !== state.rootSessionId ? next.rootSessionId : state.threadSessionId,
       detailSessionId: next.detailSessionId,
       detailWindow: next.detailWindow,
       canvasFocusedNodeId: next.canvasFocusedNodeId,
@@ -162,8 +156,7 @@ export const useUi = create<UiState>((set, get) => ({
       canvasEnterIntent: nextPane === "thread" ? "keyboard" : get().canvasEnterIntent,
     });
   },
-  enterCanvasViaKeyboard: () =>
-    set({ focusedPane: "thread", canvasEnterIntent: "keyboard" }),
+  enterCanvasViaKeyboard: () => set({ focusedPane: "thread", canvasEnterIntent: "keyboard" }),
   clearCanvasEnterIntent: () => set({ canvasEnterIntent: null }),
 }));
 

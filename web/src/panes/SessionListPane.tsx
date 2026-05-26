@@ -25,12 +25,7 @@ function StatusDot({ status }: { status: SessionStatus }) {
         : status === "idle"
           ? "bg-amber-500"
           : "bg-muted-foreground/40";
-  return (
-    <span
-      className={cn("inline-block h-2 w-2 shrink-0 rounded-full", cls)}
-      title={status}
-    />
-  );
+  return <span className={cn("inline-block h-2 w-2 shrink-0 rounded-full", cls)} title={status} />;
 }
 
 export function SessionListPane() {
@@ -76,9 +71,7 @@ export function SessionListPane() {
       const target = e.target as HTMLElement | null;
       const typing =
         target &&
-        (target.tagName === "INPUT" ||
-          target.tagName === "TEXTAREA" ||
-          target.isContentEditable);
+        (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable);
       if (!typing && e.key === "/") {
         e.preventDefault();
         searchRef.current?.focus();
@@ -93,10 +86,7 @@ export function SessionListPane() {
       if (!filtered.length) return;
       e.preventDefault();
       const idx = filtered.findIndex((s) => s.session_id === selectedId);
-      const goDown =
-        e.key === "ArrowDown" ||
-        e.key === "j" ||
-        (e.key === "Tab" && !e.shiftKey);
+      const goDown = e.key === "ArrowDown" || e.key === "j" || (e.key === "Tab" && !e.shiftKey);
       const next = goDown
         ? Math.min(filtered.length - 1, idx < 0 ? 0 : idx + 1)
         : Math.max(0, idx < 0 ? 0 : idx - 1);
@@ -130,13 +120,9 @@ export function SessionListPane() {
         </div>
       </header>
       <ScrollArea className="flex-1">
-        {isLoading && (
-          <div className="px-3 py-4 text-xs text-muted-foreground">loading…</div>
-        )}
+        {isLoading && <div className="px-3 py-4 text-xs text-muted-foreground">loading…</div>}
         {error && (
-          <div className="px-3 py-4 text-xs text-destructive">
-            {(error as Error).message}
-          </div>
+          <div className="px-3 py-4 text-xs text-destructive">{(error as Error).message}</div>
         )}
         {data && data.length === 0 && (
           <div className="px-3 py-4 text-xs text-muted-foreground">

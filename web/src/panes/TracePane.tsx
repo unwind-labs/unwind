@@ -18,11 +18,7 @@ import type { Message, SpawnCardData } from "@/api/types";
 import { useUi } from "@/store/ui";
 import { filterExtrasByWindow, filterMessagesByWindow } from "@/panes/instances";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import {
-  Collapsible,
-  CollapsibleContent,
-  CollapsibleTrigger,
-} from "@/components/ui/collapsible";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Badge } from "@/components/ui/badge";
 import { cn, shortId } from "@/lib/utils";
 import { isTypingTarget } from "@/lib/keyboard";
@@ -85,9 +81,7 @@ export function TracePane({
         return;
       const root = scrollRef.current;
       if (!root) return;
-      const el = root.querySelector(
-        "[data-radix-scroll-area-viewport]",
-      ) as HTMLElement | null;
+      const el = root.querySelector("[data-radix-scroll-area-viewport]") as HTMLElement | null;
       if (!el) return;
       e.preventDefault();
       const dy =
@@ -115,16 +109,12 @@ export function TracePane({
   }
 
   const windowed =
-    windowOverride && (windowOverride.start || windowOverride.end)
-      ? windowOverride
-      : null;
+    windowOverride && (windowOverride.start || windowOverride.end) ? windowOverride : null;
   return (
     <Shell>
       <header className="flex items-center justify-between border-b border-border px-3 py-2">
         <div>
-          <div className="text-[11px] uppercase tracking-wider text-muted-foreground">
-            trace
-          </div>
+          <div className="text-[11px] uppercase tracking-wider text-muted-foreground">trace</div>
           <div className="flex items-center gap-2 text-xs text-muted-foreground">
             <span className="font-mono">{sessionId}</span>
             {windowed ? (
@@ -223,23 +213,12 @@ function SessionTrace({
     if (!traceWindow || (!traceWindow.start && !traceWindow.end)) return data;
     return {
       ...data,
-      messages: filterMessagesByWindow(
-        data.messages,
-        traceWindow.start,
-        traceWindow.end,
-      ),
-      extra_spawns: filterExtrasByWindow(
-        data.extra_spawns,
-        traceWindow.start,
-        traceWindow.end,
-      ),
+      messages: filterMessagesByWindow(data.messages, traceWindow.start, traceWindow.end),
+      extra_spawns: filterExtrasByWindow(data.extra_spawns, traceWindow.start, traceWindow.end),
     };
   }, [data, traceWindow]);
 
-  const groups = useMemo(
-    () => (windowed ? groupMessages(windowed.messages) : []),
-    [windowed],
-  );
+  const groups = useMemo(() => (windowed ? groupMessages(windowed.messages) : []), [windowed]);
 
   // Place extra spawn cards immediately after the last assistant message in
   // this session — that's where the JSON envelope was emitted that callstack
@@ -282,25 +261,15 @@ function SessionTrace({
     return items.filter(
       (it) =>
         it.kind === "extra" ||
-        (it.kind === "group" &&
-          it.group.kind === "tool" &&
-          it.group.toolUse.spawn_kind != null),
+        (it.kind === "group" && it.group.kind === "tool" && it.group.toolUse.spawn_kind != null),
     );
   }, [items, callsOnly]);
 
   if (isLoading) {
-    return (
-      <div className="text-xs text-muted-foreground">
-        loading {shortId(sessionId)}…
-      </div>
-    );
+    return <div className="text-xs text-muted-foreground">loading {shortId(sessionId)}…</div>;
   }
   if (error) {
-    return (
-      <div className="text-xs text-destructive">
-        {(error as Error).message}
-      </div>
-    );
+    return <div className="text-xs text-destructive">{(error as Error).message}</div>;
   }
   if (!data) return null;
 
@@ -347,7 +316,6 @@ type RenderGroup =
 type OrderedItem =
   | { kind: "group"; group: RenderGroup; ts: number }
   | { kind: "extra"; spawn: SpawnCardData; ts: number };
-
 
 function groupMessages(messages: Message[]): RenderGroup[] {
   const out: RenderGroup[] = [];
@@ -481,7 +449,11 @@ function SpawnCard({
 
 function perChildTasks(m: Message, childCount: number): string[] {
   const input = m.tool_input as Record<string, unknown> | null;
-  if (input && typeof input === "object" && Array.isArray((input as Record<string, unknown>).tasks)) {
+  if (
+    input &&
+    typeof input === "object" &&
+    Array.isArray((input as Record<string, unknown>).tasks)
+  ) {
     const tasks = (input as { tasks: unknown[] }).tasks.map(String);
     if (tasks.length === childCount) return tasks;
   }
@@ -600,10 +572,7 @@ function SpawnRow({
     : null;
 
   return (
-    <Collapsible
-      open={open && expandable}
-      onOpenChange={(v) => expandable && setOpen(v)}
-    >
+    <Collapsible open={open && expandable} onOpenChange={(v) => expandable && setOpen(v)}>
       <CollapsibleTrigger
         disabled={!expandable}
         className={cn(
@@ -625,11 +594,7 @@ function SpawnRow({
         {accent.icon}
         <Badge
           variant="outline"
-          className={cn(
-            "uppercase text-[10px]",
-            accent.pillBorder,
-            accent.pillText,
-          )}
+          className={cn("uppercase text-[10px]", accent.pillBorder, accent.pillText)}
         >
           {accent.label}
         </Badge>
@@ -643,17 +608,11 @@ function SpawnRow({
             error
           </span>
         )}
-        {status === "ok" && (
-          <CheckCircle2 className="h-3 w-3 text-emerald-400" />
-        )}
+        {status === "ok" && <CheckCircle2 className="h-3 w-3 text-emerald-400" />}
         {shortChildId ? (
-          <span className="font-mono text-[10px] text-muted-foreground">
-            {shortChildId}
-          </span>
+          <span className="font-mono text-[10px] text-muted-foreground">{shortChildId}</span>
         ) : (
-          <span className="text-[10px] italic text-muted-foreground">
-            resolving…
-          </span>
+          <span className="text-[10px] italic text-muted-foreground">resolving…</span>
         )}
         {timestamp ? (
           <span className="text-[10px] text-muted-foreground tabular-nums">
@@ -663,12 +622,7 @@ function SpawnRow({
       </CollapsibleTrigger>
       {expandable && (
         <CollapsibleContent>
-          <div
-            className={cn(
-              "ml-3 mt-2 space-y-3 border-l-2 pl-4",
-              accent.railBorder,
-            )}
-          >
+          <div className={cn("ml-3 mt-2 space-y-3 border-l-2 pl-4", accent.railBorder)}>
             <SessionTrace
               slug={slug}
               sessionId={childId!}
@@ -717,17 +671,17 @@ type BubbleVariant = {
 };
 
 const BUBBLE_VARIANT: Record<Message["role"], BubbleVariant> = {
-  user:        { Icon: User },
-  assistant:   { Icon: Bot },
-  system:      { Icon: Info,     bubbleClass: "bg-muted/40" },
-  tool_result: { Icon: Info,     bubbleClass: "bg-muted/40" },
-  thinking:    {
+  user: { Icon: User },
+  assistant: { Icon: Bot },
+  system: { Icon: Info, bubbleClass: "bg-muted/40" },
+  tool_result: { Icon: Info, bubbleClass: "bg-muted/40" },
+  thinking: {
     Icon: Sparkles,
     iconClass: "text-muted-foreground",
     bubbleClass: "border-dashed bg-muted/30 italic text-muted-foreground",
     collapsible: true,
   },
-  tool_use:    { Icon: Wrench }, // not normally routed here; ToolCard handles tool_use
+  tool_use: { Icon: Wrench }, // not normally routed here; ToolCard handles tool_use
 };
 
 function MessageBubble({ msg }: { msg: Message }) {
@@ -739,9 +693,7 @@ function MessageBubble({ msg }: { msg: Message }) {
         <ChevronRight className="h-3.5 w-3.5 transition-transform group-data-[state=open]:rotate-90" />
       ) : null}
       <span>{msg.role}</span>
-      {msg.model ? (
-        <span className="font-mono normal-case">{msg.model}</span>
-      ) : null}
+      {msg.model ? <span className="font-mono normal-case">{msg.model}</span> : null}
       {msg.timestamp ? (
         <span className="tabular-nums normal-case">
           {new Date(msg.timestamp).toLocaleTimeString()}
@@ -751,18 +703,10 @@ function MessageBubble({ msg }: { msg: Message }) {
   );
 
   const body = (
-    <div
-      className={cn(
-        "rounded-lg border border-border bg-card px-3 py-2",
-        bubbleClass,
-      )}
-    >
+    <div className={cn("rounded-lg border border-border bg-card px-3 py-2", bubbleClass)}>
       {msg.text ? (
         <div className="uw-markdown">
-          <ReactMarkdown
-            remarkPlugins={[remarkGfm]}
-            urlTransform={safeUrlTransform}
-          >
+          <ReactMarkdown remarkPlugins={[remarkGfm]} urlTransform={safeUrlTransform}>
             {msg.text}
           </ReactMarkdown>
         </div>
@@ -800,13 +744,7 @@ function MessageBubble({ msg }: { msg: Message }) {
   );
 }
 
-function ToolCard({
-  toolUse,
-  toolResult,
-}: {
-  toolUse: Message;
-  toolResult?: Message;
-}) {
+function ToolCard({ toolUse, toolResult }: { toolUse: Message; toolResult?: Message }) {
   const status: "pending" | "ok" | "error" = !toolResult
     ? "pending"
     : toolResult.is_error
@@ -821,9 +759,7 @@ function ToolCard({
       <div className="min-w-0 flex-1">
         <div className="mb-1 flex items-center gap-2 text-[10px] uppercase tracking-wider text-muted-foreground">
           <span>tool</span>
-          <span className="font-mono text-foreground normal-case">
-            {toolUse.tool_name ?? "?"}
-          </span>
+          <span className="font-mono text-foreground normal-case">{toolUse.tool_name ?? "?"}</span>
           {status === "pending" && <Badge variant="warn">pending</Badge>}
           {status === "ok" && (
             <span className="inline-flex items-center gap-1 text-emerald-400 normal-case">
@@ -864,9 +800,7 @@ function ToolCard({
                 <section>
                   <div className="mb-1 flex items-center gap-2 text-[10px] uppercase tracking-wider text-muted-foreground">
                     result
-                    {toolResult.is_error && (
-                      <Badge variant="error">error</Badge>
-                    )}
+                    {toolResult.is_error && <Badge variant="error">error</Badge>}
                   </div>
                   <pre className="overflow-x-auto whitespace-pre-wrap break-words text-xs font-mono">
                     {stringifyResult(toolResult.tool_result)}
@@ -874,9 +808,7 @@ function ToolCard({
                 </section>
               ) : (
                 <section>
-                  <div className="text-[11px] italic text-muted-foreground">
-                    awaiting result…
-                  </div>
+                  <div className="text-[11px] italic text-muted-foreground">awaiting result…</div>
                 </section>
               )}
             </div>

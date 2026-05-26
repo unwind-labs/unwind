@@ -90,10 +90,7 @@ export function CanvasPane() {
               </span>
             </div>
             <div className="flex-1 overflow-hidden">
-              <DetailView
-                sessionId={detailSessionId}
-                window={detailWindow}
-              />
+              <DetailView sessionId={detailSessionId} window={detailWindow} />
             </div>
           </div>
         ) : null}
@@ -156,9 +153,7 @@ function CanvasInner({
   );
 
   // Per-node measured heights — fed back from each card's ResizeObserver.
-  const [measuredHeights, setMeasuredHeights] = useState<Record<string, number>>(
-    {},
-  );
+  const [measuredHeights, setMeasuredHeights] = useState<Record<string, number>>({});
   useEffect(() => {
     setMeasuredHeights({});
   }, [rootSessionId]);
@@ -179,11 +174,7 @@ function CanvasInner({
   // and only after the tree query has settled — without that gate, the
   // first render of an empty tree would auto-open and then the real
   // tree would arrive a beat later, producing a jarring open-then-close.
-  const { data: rootMessages, isFetching: rootFetching } = useMessages(
-    slug,
-    rootSessionId,
-    false,
-  );
+  const { data: rootMessages, isFetching: rootFetching } = useMessages(slug, rootSessionId, false);
   const autoOpenedForRef = useRef<string | null>(null);
   useEffect(() => {
     if (!canvasTree) return;
@@ -214,13 +205,7 @@ function CanvasInner({
       navigate.openDetailAuto(rootSessionId);
     }, 400);
     return () => window.clearTimeout(t);
-  }, [
-    canvasTree,
-    rootMessages,
-    rootFetching,
-    rootSessionId,
-    onOpenDetail,
-  ]);
+  }, [canvasTree, rootMessages, rootFetching, rootSessionId, onOpenDetail]);
 
   // Forward declare focusAndPan so treeToReactFlow can reference it; we
   // assign the real implementation below (it depends on `nodes`).
@@ -285,8 +270,7 @@ function CanvasInner({
       parent[e.target] = e.source;
       (children[e.source] ??= []).push(e.target);
     }
-    const yOf = (id: string) =>
-      nodes.find((n) => n.id === id)?.position.y ?? 0;
+    const yOf = (id: string) => nodes.find((n) => n.id === id)?.position.y ?? 0;
     for (const k in children) {
       children[k].sort((a, b) => yOf(a) - yOf(b));
     }
@@ -342,13 +326,7 @@ function CanvasInner({
       focusAndPan(orderedNodeIds[0]);
     }
     clearCanvasEnterIntent();
-  }, [
-    canvasEnterIntent,
-    canvasFocusedNodeId,
-    orderedNodeIds,
-    focusAndPan,
-    clearCanvasEnterIntent,
-  ]);
+  }, [canvasEnterIntent, canvasFocusedNodeId, orderedNodeIds, focusAndPan, clearCanvasEnterIntent]);
 
   const navStateRef = useRef({
     focusedPane,
@@ -411,8 +389,7 @@ function CanvasInner({
 
       if (isLeft || isRight) {
         e.preventDefault();
-        const current =
-          s.canvasFocusedNodeId ?? s.orderedNodeIds[0] ?? s.rootSessionId;
+        const current = s.canvasFocusedNodeId ?? s.orderedNodeIds[0] ?? s.rootSessionId;
         if (isLeft) {
           const parent = s.parentByNode[current];
           if (parent) {
@@ -428,9 +405,7 @@ function CanvasInner({
             // Leaf: hop to the next column.
             const cur = s.nodes.find((n) => n.id === current);
             if (cur) {
-              const rightNodes = s.nodes.filter(
-                (n) => n.position.x > cur.position.x,
-              );
+              const rightNodes = s.nodes.filter((n) => n.position.x > cur.position.x);
               if (rightNodes.length > 0) {
                 const nextX = Math.min(...rightNodes.map((n) => n.position.x));
                 const col = rightNodes.filter((n) => n.position.x === nextX);
@@ -445,9 +420,7 @@ function CanvasInner({
 
       if (s.orderedNodeIds.length === 0) return;
       e.preventDefault();
-      const idx = s.canvasFocusedNodeId
-        ? s.orderedNodeIds.indexOf(s.canvasFocusedNodeId)
-        : -1;
+      const idx = s.canvasFocusedNodeId ? s.orderedNodeIds.indexOf(s.canvasFocusedNodeId) : -1;
       const next = isDown
         ? Math.min(s.orderedNodeIds.length - 1, idx < 0 ? 0 : idx + 1)
         : Math.max(0, idx < 0 ? 0 : idx - 1);
@@ -556,14 +529,7 @@ function AutoFit({
         timerRef.current = null;
       }
     };
-  }, [
-    rootSessionId,
-    nodeCount,
-    heightsSignature,
-    fitView,
-    userInteracted,
-    programmaticMove,
-  ]);
+  }, [rootSessionId, nodeCount, heightsSignature, fitView, userInteracted, programmaticMove]);
   return null;
 }
 
@@ -591,18 +557,14 @@ function layoutTree(
   heights: Record<string, number>,
 ): Record<string, { x: number; y: number }> {
   const positions: Record<string, { x: number; y: number }> = {};
-  const heightOf = (n: WindowNode) =>
-    heights[n.window_id] ?? DEFAULT_NODE_HEIGHT;
+  const heightOf = (n: WindowNode) => heights[n.window_id] ?? DEFAULT_NODE_HEIGHT;
 
   // First pass: largest fan-out per depth, so we know how wide each
   // inter-column gap needs to be. Depth d's "fan-out" = max number of
   // direct children among parents at depth d.
   const maxFanOutAtDepth: number[] = [];
   function recordFanOut(n: WindowNode, depth: number) {
-    maxFanOutAtDepth[depth] = Math.max(
-      maxFanOutAtDepth[depth] ?? 0,
-      n.children.length,
-    );
+    maxFanOutAtDepth[depth] = Math.max(maxFanOutAtDepth[depth] ?? 0, n.children.length);
     n.children.forEach((c) => recordFanOut(c, depth + 1));
   }
   recordFanOut(root, 0);
@@ -689,10 +651,7 @@ function treeToReactFlow(args: {
     (childrenByParent[w.parent_window_id] ??= []).push(w);
   }
   for (const ws of Object.values(childrenByParent)) {
-    ws.sort(
-      (a, b) =>
-        (positions[a.window_id]?.y ?? 0) - (positions[b.window_id]?.y ?? 0),
-    );
+    ws.sort((a, b) => (positions[a.window_id]?.y ?? 0) - (positions[b.window_id]?.y ?? 0));
   }
 
   // Build edges with per-parent symmetric offsets (e.g. 5 edges →
@@ -718,9 +677,7 @@ function treeToReactFlow(args: {
           // Pulse the edge if the child or anything below it is still
           // working — otherwise a live grandchild leaves the inbound
           // edge frozen even though the path is clearly active.
-          (w.subtree_status === "live" || w.subtree_status === "yield"
-            ? " uw-edge-pending"
-            : ""),
+          (w.subtree_status === "live" || w.subtree_status === "yield" ? " uw-edge-pending" : ""),
       });
     });
   }
@@ -738,23 +695,25 @@ function treeToReactFlow(args: {
         isRoot: w.kind === "root",
         selected: w.session_id === selectedSessionId,
         keyboardFocused:
-          w.window_id === keyboardFocusedNodeId &&
-          w.session_id !== selectedSessionId,
+          w.window_id === keyboardFocusedNodeId && w.session_id !== selectedSessionId,
         onOpenDetail,
         onFocusChild,
         onMeasure,
         status: w.status === "yield" ? "yield" : w.status === "live" ? "live" : "done",
         subtreeStatus:
-          w.subtree_status === "yield"
-            ? "yield"
-            : w.subtree_status === "live"
-              ? "live"
-              : "done",
+          w.subtree_status === "yield" ? "yield" : w.subtree_status === "live" ? "live" : "done",
         nodeId: w.window_id,
         windowStart: w.window_start,
         windowEnd: w.window_end,
         isResumeInstance: w.kind === "resume",
-        spawnKind: w.kind === "subagent" ? "subagent" : w.kind === "resume" ? "call" : (w.kind === "call" ? "call" : null),
+        spawnKind:
+          w.kind === "subagent"
+            ? "subagent"
+            : w.kind === "resume"
+              ? "call"
+              : w.kind === "call"
+                ? "call"
+                : null,
         canvasChildren: (childrenByParent[w.window_id] ?? []).map((c) => ({
           window_id: c.window_id,
           session_id: c.session_id,

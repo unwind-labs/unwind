@@ -33,8 +33,7 @@ export function UsageFooter({
   if (!isRoot && selfEmpty && subtreeEmpty) {
     return null;
   }
-  const costTotal =
-    subtreeCost.cw + subtreeCost.cr + subtreeCost.r + subtreeCost.w;
+  const costTotal = subtreeCost.cw + subtreeCost.cr + subtreeCost.r + subtreeCost.w;
   const categories: { key: keyof TokenUsage; label: string }[] = [
     { key: "cw", label: "Cache Write" },
     { key: "cr", label: "Cache Read" },
@@ -49,10 +48,7 @@ export function UsageFooter({
             <th className="text-left font-medium" />
             <th className="pl-2 text-right font-medium">
               <span className="inline-flex items-center justify-end">
-                <Telescope
-                  className="h-3.5 w-3.5"
-                  aria-label="this window"
-                />
+                <Telescope className="h-3.5 w-3.5" aria-label="this window" />
               </span>
             </th>
             {showSubtree ? (
@@ -77,19 +73,13 @@ export function UsageFooter({
             <tr key={key}>
               <td className="text-left text-muted-foreground/70">{label}</td>
               <td className="pl-2 text-right">{fmtTokens(self[key])}</td>
-              {showSubtree ? (
-                <td className="pl-2 text-right">{fmtTokens(subtree[key])}</td>
-              ) : null}
-              <td className="pl-2 text-right text-emerald-300/90">
-                {fmtUsd(subtreeCost[key])}
-              </td>
+              {showSubtree ? <td className="pl-2 text-right">{fmtTokens(subtree[key])}</td> : null}
+              <td className="pl-2 text-right text-emerald-300/90">{fmtUsd(subtreeCost[key])}</td>
             </tr>
           ))}
         </tbody>
       </table>
-      <div className="mt-1 text-right tabular-nums text-emerald-300/90">
-        {fmtUsd(costTotal)}
-      </div>
+      <div className="mt-1 text-right tabular-nums text-emerald-300/90">{fmtUsd(costTotal)}</div>
     </footer>
   );
 }

@@ -81,8 +81,7 @@ export function deriveRows(
       const tooluse = m.tool_use_id ?? m.uuid;
       const isResume = m.tool_name === INVOKE_RESUME_TOOL;
       const userReply = isResume ? extractUserReply(m) : undefined;
-      const callDone =
-        m.tool_use_id !== null && seenResultFor.has(m.tool_use_id ?? "");
+      const callDone = m.tool_use_id !== null && seenResultFor.has(m.tool_use_id ?? "");
       const labels =
         m.spawn_tasks && m.spawn_tasks.length === m.spawn_session_ids.length
           ? m.spawn_tasks
@@ -92,10 +91,7 @@ export function deriveRows(
         // server via spawn_done). Falls back to the parent tool_result's
         // arrival when the report doesn't know yet.
         const perChild = m.spawn_done?.[i];
-        const done =
-          perChild != null
-            ? perChild && childId !== ""
-            : callDone && childId !== "";
+        const done = perChild != null ? perChild && childId !== "" : callDone && childId !== "";
         const rawLabel = labels[i] || "";
         const title = isResume
           ? labelForResume(userReply ?? rawLabel)
@@ -175,9 +171,7 @@ export function deriveRows(
     s.children.forEach((childId, i) => {
       const callDone = s.status !== "running" && s.status !== "in_progress";
       const taskName = s.tasks[i] ?? `child ${i + 1}`;
-      const stem = s.invoke_id
-        ? `${s.invoke_id}-${childId || i}`
-        : (childId || `${ei}-${i}`);
+      const stem = s.invoke_id ? `${s.invoke_id}-${childId || i}` : childId || `${ei}-${i}`;
       out.push({
         kind: "spawn",
         spawnKind: "call",

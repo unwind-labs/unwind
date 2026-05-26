@@ -61,17 +61,12 @@ export function useProjects() {
 // half a minute of a missed event.
 const POLL_SAFETY_NET_MS = 30_000;
 
-export function useSessions(
-  slug: string | null | undefined,
-  includeForks: boolean = false,
-) {
+export function useSessions(slug: string | null | undefined, includeForks: boolean = false) {
   return useQuery({
     enabled: !!slug,
     queryKey: ["sessions", slug, includeForks],
     queryFn: () =>
-      j<SessionRow[]>(
-        `/api/projects/${enc(slug!)}/sessions?include_forks=${includeForks}`,
-      ),
+      j<SessionRow[]>(`/api/projects/${enc(slug!)}/sessions?include_forks=${includeForks}`),
     refetchInterval: POLL_SAFETY_NET_MS,
   });
 }
@@ -87,9 +82,7 @@ export function useCanvasTree(
     enabled: !!slug && !!rootSessionId,
     queryKey: ["canvas-tree", slug, rootSessionId],
     queryFn: () =>
-      j<CanvasTreeResponse>(
-        `/api/projects/${enc(slug!)}/sessions/${enc(rootSessionId!)}/canvas`,
-      ),
+      j<CanvasTreeResponse>(`/api/projects/${enc(slug!)}/sessions/${enc(rootSessionId!)}/canvas`),
     refetchInterval: POLL_SAFETY_NET_MS,
   });
 }
@@ -129,10 +122,7 @@ export function useMessages(
  *  Cross-session aggregation isn't affected by the WS event stream the
  *  way per-session queries are, so we skip the safety-net poll —
  *  Reports view explicitly refetches when the user changes the month. */
-export function useUsageReport(
-  month: string | null | undefined,
-  topN: number = 20,
-) {
+export function useUsageReport(month: string | null | undefined, topN: number = 20) {
   return useQuery({
     queryKey: ["usage", month ?? "current", topN],
     queryFn: () => {
@@ -155,19 +145,15 @@ export function useUsageReport(
  *  the cached ``messages`` array stays in place during it so the UI doesn't
  *  flash "loading…". */
 export function resetMessagesTail(qc: QueryClient, slug: string): void {
-  qc.getQueriesData<MessagesResponse>({ queryKey: ["messages", slug] })
-    .forEach(([key, data]) => {
-      if (data) qc.setQueryData(key, { ...data, last_uuid: null });
-    });
+  qc.getQueriesData<MessagesResponse>({ queryKey: ["messages", slug] }).forEach(([key, data]) => {
+    if (data) qc.setQueryData(key, { ...data, last_uuid: null });
+  });
 }
 
 /** Merge a delta response into the cached snapshot. Dedup by uuid in case
  *  the server falls back to a full payload (e.g. unknown since_uuid after
  *  file rotation) or the WS already patched in some of the same rows. */
-function mergeMessagesDelta(
-  prev: MessagesResponse,
-  delta: MessagesResponse,
-): MessagesResponse {
+function mergeMessagesDelta(prev: MessagesResponse, delta: MessagesResponse): MessagesResponse {
   const seen = new Set(prev.messages.map((m) => m.uuid));
   const merged: Message[] = [...prev.messages];
   for (const m of delta.messages) {

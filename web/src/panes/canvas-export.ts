@@ -37,9 +37,7 @@ export async function exportCanvasPng(
 ): Promise<void> {
   const internalNodes = reactFlow.getNodes();
   if (internalNodes.length === 0) return;
-  const viewportEl = document.querySelector(
-    ".react-flow__viewport",
-  ) as HTMLElement | null;
+  const viewportEl = document.querySelector(".react-flow__viewport") as HTMLElement | null;
   if (!viewportEl) return;
 
   const bounds = getNodesBounds(internalNodes);
@@ -80,9 +78,7 @@ function applyExportStyles(
 ): () => void {
   const restorers: Array<() => void> = [];
 
-  const edgeSvgs = Array.from(
-    viewportEl.querySelectorAll(".react-flow__edges"),
-  ) as SVGSVGElement[];
+  const edgeSvgs = Array.from(viewportEl.querySelectorAll(".react-flow__edges")) as SVGSVGElement[];
   for (const svg of edgeSvgs) {
     const origStyle = svg.getAttribute("style");
     const origViewBox = svg.getAttribute("viewBox");
@@ -103,9 +99,7 @@ function applyExportStyles(
   // Live edge stroke is rgba(255,255,255,0.2) — hard to see in a
   // downscaled PNG. Boost opacity + width for the capture only.
   const isDark = document.documentElement.classList.contains("dark");
-  const exportStroke = isDark
-    ? "rgba(255, 255, 255, 0.28)"
-    : "rgba(0, 0, 0, 0.22)";
+  const exportStroke = isDark ? "rgba(255, 255, 255, 0.28)" : "rgba(0, 0, 0, 0.22)";
   const paths = Array.from(
     viewportEl.querySelectorAll(".react-flow__edge-path"),
   ) as SVGPathElement[];
