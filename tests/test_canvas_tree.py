@@ -184,11 +184,14 @@ def test_scan_session_extracts_usage_events(tmp_path: Path):
     )
     scan = scan_session(proj / f"{sid}.jsonl")
     assert len(scan.usage_events) == 2
-    # (ts, model, cw, cr, r, w) ordering
-    _ts1, _m1, cw1, cr1, r1, w1 = scan.usage_events[0]
-    assert (cw1, cr1, r1, w1) == (100, 1000, 10, 20)
-    _ts2, _m2, cw2, cr2, r2, w2 = scan.usage_events[1]
-    assert (cw2, cr2, r2, w2) == (0, 0, 5, 7)
+    ev1 = scan.usage_events[0]
+    assert (ev1.cw, ev1.cr, ev1.r, ev1.w) == (100, 1000, 10, 20)
+    # uuid is captured so consumers can drop events inherited from a
+    # callstack-fork parent (``--fork-session`` mirrors them).
+    assert ev1.uuid == "a-1"
+    ev2 = scan.usage_events[1]
+    assert (ev2.cw, ev2.cr, ev2.r, ev2.w) == (0, 0, 5, 7)
+    assert ev2.uuid == "a-3"
 
 
 # --- collect_invocations ------------------------------------------------
@@ -379,6 +382,125 @@ def test_usage_self_and_subtree_aggregate_post_order(tmp_path: Path):
     # Parent: self counts only its own tokens; subtree adds the child's.
     assert root.self_usage == {"cw": 3, "cr": 4, "r": 1, "w": 2}
     assert root.subtree_usage == {"cw": 33, "cr": 44, "r": 11, "w": 22}
+
+
+def test_fork_window_skips_usage_inherited_from_parent(tmp_path: Path):
+    """``claude --fork-session`` copies the parent's JSONL verbatim into
+    the child's file, including each assistant turn's ``message.usage``
+    block. Without filtering, every fork double-counts the parent's
+    prefix tokens against itself (and N forks of one parent multiply
+    that by N+1 in the subtree rollup). Verify the fork's ``self_usage``
+    ignores assistant records whose uuid is in the parent's JSONL.
+    """
+    proj = tmp_path / "proj"
+    # Parent: two assistant turns, both with usage.
+    _write_session(
+        proj,
+        "MAIN",
+        [
+            _user("MAIN", "2026-05-04T10:00:00Z", uuid="m-u-1"),
+            _assistant(
+                "MAIN",
+                "2026-05-04T10:00:02Z",
+                text="m1",
+                uuid="m-a-1",
+                usage={
+                    "input_tokens": 1,
+                    "output_tokens": 2,
+                    "cache_creation_input_tokens": 100,
+                    "cache_read_input_tokens": 50,
+                },
+            ),
+            _assistant(
+                "MAIN",
+                "2026-05-04T10:00:03Z",
+                text="m2",
+                uuid="m-a-2",
+                usage={
+                    "input_tokens": 1,
+                    "output_tokens": 2,
+                    "cache_creation_input_tokens": 5,
+                    "cache_read_input_tokens": 150,
+                },
+            ),
+        ],
+    )
+    # Fork: inherits the parent's two turns verbatim (same uuids, same
+    # timestamps, same usage), then does its own new assistant turn
+    # after the fork point.
+    _write_session(
+        proj,
+        "FORK",
+        [
+            _user("MAIN", "2026-05-04T10:00:00Z", uuid="m-u-1"),
+            _assistant(
+                "MAIN",
+                "2026-05-04T10:00:02Z",
+                text="m1",
+                uuid="m-a-1",
+                usage={
+                    "input_tokens": 1,
+                    "output_tokens": 2,
+                    "cache_creation_input_tokens": 100,
+                    "cache_read_input_tokens": 50,
+                },
+            ),
+            _assistant(
+                "MAIN",
+                "2026-05-04T10:00:03Z",
+                text="m2",
+                uuid="m-a-2",
+                usage={
+                    "input_tokens": 1,
+                    "output_tokens": 2,
+                    "cache_creation_input_tokens": 5,
+                    "cache_read_input_tokens": 150,
+                },
+            ),
+            _user("FORK", "2026-05-04T10:00:10Z", uuid="f-u-1"),
+            _assistant(
+                "FORK",
+                "2026-05-04T10:00:11Z",
+                text="f1",
+                uuid="f-a-1",
+                usage={
+                    "input_tokens": 7,
+                    "output_tokens": 9,
+                    "cache_creation_input_tokens": 11,
+                    "cache_read_input_tokens": 13,
+                },
+            ),
+        ],
+    )
+    log = tmp_path / "log"
+    _write_report(
+        log,
+        "i0",
+        parent_sid="MAIN",
+        started_at="2026-05-04T10:00:04+00:00",
+        ended_at="2026-05-04T10:00:20+00:00",
+        tasks=[
+            {
+                "task": "/task-x",
+                "status": "complete",
+                "depth": 1,
+                "session_id": "FORK",
+            }
+        ],
+    )
+    ci = CallstackIndex(log)
+    root, _all = build_canvas_tree(proj, "MAIN", spawn_resolver=_resolver(proj, ci))
+    fork = root.children[0]
+    # The fork's "own" usage is just the post-fork assistant turn —
+    # NOT the two inherited turns even though they live in the fork's
+    # JSONL too.
+    assert fork.self_usage == {"cw": 11, "cr": 13, "r": 7, "w": 9}
+    # Subtree (= self for a leaf) matches.
+    assert fork.subtree_usage == fork.self_usage
+    # Parent retains its full prefix usage exactly once.
+    assert root.self_usage == {"cw": 105, "cr": 200, "r": 2, "w": 4}
+    # Subtree adds parent + fork once apiece — no inherited duplication.
+    assert root.subtree_usage == {"cw": 116, "cr": 213, "r": 9, "w": 13}
 
 
 def test_usage_cost_aggregates_per_model_rates(tmp_path: Path):

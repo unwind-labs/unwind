@@ -33,6 +33,7 @@ from .callstack import CallstackIndex, TaskNode
 from .fork_detect import ForkDetector
 from .projects import project_jsonl_listing
 from .jsonl import (
+    collect_uuids,
     read_records,
     stringify_tool_result as _stringify_result,
 )
@@ -203,6 +204,14 @@ class SpawnResolver:
         # means "not provided — compute lazily on first need". Either
         # way the field is always present; readers don't getattr() it.
         self._invoke_index_cache: Optional[dict[str, list[str]]] = invoke_index
+        # Memoized ``session_id -> union of every ancestor JSONL's uuid
+        # set``. ``claude --fork-session`` copies the parent transcript
+        # verbatim into the child's JSONL, so any record whose uuid is
+        # in the parent's file represents work the parent already paid
+        # for. Consumers that aggregate per-session usage skip events
+        # whose uuid lands in this set; without that, a parent with N
+        # forks gets its prefix tokens counted N+1 times.
+        self._inherited_uuids_cache: dict[str, set[str]] = {}
 
     # --- enumeration ----------------------------------------------------
 
@@ -351,6 +360,36 @@ class SpawnResolver:
 
     def for_parent(self, parent_sid: str) -> list[Spawn]:
         return list(self.spawns_by_parent().get(parent_sid, []))
+
+    def inherited_uuids_for(self, session_id: str) -> set[str]:
+        """Return uuids this session inherited from its callstack ancestors.
+
+        Walks ``CallstackIndex.parent_chain`` and unions every ancestor
+        JSONL's uuid set (``collect_uuids`` is mtime-cached, so repeated
+        calls across a request are cheap). Returns an empty set for
+        non-fork sessions and for forks whose parent chain isn't
+        reflected in ``report.yaml`` yet.
+
+        Memoized per resolver instance; the cache is implicitly bounded
+        by the per-request resolver lifetime.
+
+        TODO: non-callstack forks (manual ``claude --fork-session``
+        outside the runtime) won't appear in ``parent_chain`` and so
+        still over-count. ``ForkDetector.family_root`` could provide a
+        one-level parent for those; left for a follow-up because the
+        rest of the canvas already treats them as independent roots.
+        """
+        cached = self._inherited_uuids_cache.get(session_id)
+        if cached is not None:
+            return cached
+        chain = self._cs.parent_chain(session_id) if self._cs.has_logs else []
+        out: set[str] = set()
+        for ancestor_id in chain:
+            anc_path = self._project_dir / f"{ancestor_id}.jsonl"
+            if anc_path.is_file():
+                out |= collect_uuids(anc_path)
+        self._inherited_uuids_cache[session_id] = out
+        return out
 
     def child_display_order(
         self, parent_sid: str, messages: list[Any]

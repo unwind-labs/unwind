@@ -289,6 +289,7 @@ def _compute_windows(
 def _attribute_self_usage(
     windows: list[WindowNode],
     usage_events: list[UsageEvent],
+    inherited_uuids: Optional[set[str]] = None,
 ) -> None:
     """Sum each per-record event into the window whose
     ``[window_start, window_end)`` contains ``ts``, and price it at the
@@ -298,10 +299,19 @@ def _attribute_self_usage(
     ``_find_window_for_ts`` uses for ``ts is None``); events past the
     last window's end attribute to the last window so late bookkeeping
     still gets counted somewhere.
+
+    ``inherited_uuids`` is the set of uuids this session inherited from
+    its callstack ancestors (``--fork-session`` mirrors the parent's
+    transcript, including each assistant turn's ``message.usage``).
+    Events with a matching uuid are skipped so the fork's window
+    doesn't double-count tokens the parent already paid for.
     """
     if not windows or not usage_events:
         return
+    inh = inherited_uuids or ()
     for ev in usage_events:
+        if ev.uuid is not None and ev.uuid in inh:
+            continue
         w = _find_window_for_ts(windows, ev.ts)
         if w is None:
             continue
@@ -450,7 +460,14 @@ def build_canvas_tree(
             is_live=is_live_session(sid),
             title=title,
         )
-        _attribute_self_usage(ws, scan.usage_events)
+        # Inherited uuids from the parent chain — events with these
+        # uuids were copied into this fork's JSONL by
+        # ``--fork-session`` and represent work the parent already
+        # booked. Root sessions have no ancestors; skip the lookup.
+        inherited = (
+            set() if is_root else spawn_resolver.inherited_uuids_for(sid)
+        )
+        _attribute_self_usage(ws, scan.usage_events, inherited_uuids=inherited)
         windows_by_session[sid] = ws
 
     # Wire parent → child edges by matching the K-th invocation of a

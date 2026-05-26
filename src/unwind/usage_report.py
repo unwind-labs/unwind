@@ -17,9 +17,14 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone, tzinfo
 from typing import Optional
 
+from .jsonl import collect_uuids
 from .pricing import cost_usd
 from .projects import project_jsonl_listing
-from .registry import canvas_tree_builder_for_slug, list_known_projects
+from .registry import (
+    callstack_for_slug,
+    canvas_tree_builder_for_slug,
+    list_known_projects,
+)
 
 # A project whose ``source_path`` starts with one of these prefixes is
 # treated as a throwaway integration-test scaffold rather than a real
@@ -149,12 +154,38 @@ def build_month_report(
     rows: list[ProjectUsage] = []
     for slug, source_path in list_known_projects():
         builder = canvas_tree_builder_for_slug(slug)
+        ci = callstack_for_slug(slug)
+        # Per-session "uuids inherited from callstack ancestors". Lazy:
+        # only forks (sessions with a non-empty parent chain) need it,
+        # and the underlying ``collect_uuids`` is mtime-cached, so
+        # repeated lookups for sibling forks of the same parent share
+        # work. Without this filter, every fork double-counts the
+        # parent's prefix tokens (``--fork-session`` mirrors the parent
+        # transcript verbatim into the child JSONL).
+        inherited_cache: dict[str, set[str]] = {}
+
+        def _inherited(sid: str) -> set[str]:
+            cached = inherited_cache.get(sid)
+            if cached is not None:
+                return cached
+            chain = ci.parent_chain(sid) if ci.has_logs else []
+            out: set[str] = set()
+            for ancestor_id in chain:
+                anc_path = builder.project_dir / f"{ancestor_id}.jsonl"
+                if anc_path.is_file():
+                    out |= collect_uuids(anc_path)
+            inherited_cache[sid] = out
+            return out
+
         row = ProjectUsage(slug=slug, source_path=str(source_path))
         for entry in project_jsonl_listing(builder.project_dir):
             scan = builder.get_scan(entry.sid)
+            inherited = _inherited(entry.sid)
             session_had_event = False
             for ev in scan.usage_events:
                 if ev.ts is None or ev.ts < start_utc or ev.ts >= end_utc:
+                    continue
+                if ev.uuid is not None and ev.uuid in inherited:
                     continue
                 session_had_event = True
                 row.usage["cw"] += ev.cw

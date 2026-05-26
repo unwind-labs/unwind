@@ -6,8 +6,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
+import yaml
 
 import unwind.usage_report as ur
+from unwind.callstack import CallstackIndex
 from unwind.canvas_tree import CanvasTreeBuilder
 from unwind.usage_report import (
     EPHEMERAL_PATH_PREFIXES,
@@ -177,20 +179,28 @@ def _write_session(
     proj_dir: Path,
     sid: str,
     events: list[tuple[str, dict]],
+    *,
+    uuid_prefix: str | None = None,
 ) -> None:
     """Synthesize a JSONL with one assistant ``usage`` block per event.
 
     Each ``(timestamp, usage)`` becomes one assistant turn, which the
     scanner will surface as one :class:`UsageEvent`. That's the unit
     ``build_month_report`` filters on.
+
+    ``uuid_prefix`` lets fork tests share uuids between parent and
+    fork (``--fork-session`` copies the parent's transcript including
+    each record's uuid). Defaults to ``sid``-namespaced uuids so
+    independent sessions never collide.
     """
     proj_dir.mkdir(parents=True, exist_ok=True)
+    prefix = uuid_prefix if uuid_prefix is not None else f"{sid}-a"
     lines = []
     for i, (ts, usage) in enumerate(events):
         lines.append(
             json.dumps(
                 {
-                    "uuid": f"a-{i}",
+                    "uuid": f"{prefix}-{i}",
                     "type": "assistant",
                     "sessionId": sid,
                     "timestamp": ts,
@@ -206,10 +216,19 @@ def _write_session(
     (proj_dir / f"{sid}.jsonl").write_text("\n".join(lines) + "\n")
 
 
-def _stub_registry(monkeypatch: pytest.MonkeyPatch, projects: dict[str, Path]) -> None:
+def _stub_registry(
+    monkeypatch: pytest.MonkeyPatch,
+    projects: dict[str, Path],
+    callstack_log_dirs: dict[str, Path] | None = None,
+) -> None:
     """Redirect ``usage_report``'s registry hooks at an in-memory project
     set. Avoids the HOME-env / module-reload dance the other tests use,
     so this test stays hermetic without leaking into the registry cache.
+
+    ``callstack_log_dirs`` lets a test wire a real callstack log dir
+    per slug (the fork-inheritance filter needs the parent_chain).
+    Slugs without an entry get an empty (no-logs) CallstackIndex so
+    ``inherited_uuids_for`` reports nothing.
     """
     monkeypatch.setattr(
         ur, "list_known_projects", lambda: sorted(projects.items())
@@ -218,6 +237,14 @@ def _stub_registry(monkeypatch: pytest.MonkeyPatch, projects: dict[str, Path]) -
         ur,
         "canvas_tree_builder_for_slug",
         lambda slug: CanvasTreeBuilder(projects[slug]),
+    )
+    cs_dirs = callstack_log_dirs or {}
+    monkeypatch.setattr(
+        ur,
+        "callstack_for_slug",
+        lambda slug: CallstackIndex(
+            cs_dirs.get(slug, projects[slug] / ".no-callstack")
+        ),
     )
 
 
@@ -286,6 +313,122 @@ def test_build_month_report_no_double_counting_across_projects(
     per_project = {p.slug: p.usage["r"] for p in report.projects}
     assert per_project == {"slug-a": 7, "slug-b": 13}
     assert report.grand_usage["r"] == 20  # exactly once each
+
+
+def test_build_month_report_excludes_records_inherited_from_fork_parent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """``claude --fork-session`` mirrors the parent's JSONL into the
+    child, including every assistant ``message.usage`` block (same
+    uuid). Without filtering, the parent's prefix tokens get counted
+    once in the parent and again in every fork — N forks of one parent
+    inflate by N+1. Verify each token is counted exactly once.
+    """
+    proj = tmp_path / "proj"
+    # Parent has two assistant turns with usage.
+    _write_session(
+        proj,
+        "PARENT",
+        [
+            ("2026-05-10T00:00:00Z", {
+                "input_tokens": 1, "output_tokens": 2,
+                "cache_creation_input_tokens": 100, "cache_read_input_tokens": 50,
+            }),
+            ("2026-05-10T00:00:01Z", {
+                "input_tokens": 3, "output_tokens": 4,
+                "cache_creation_input_tokens": 200, "cache_read_input_tokens": 80,
+            }),
+        ],
+        uuid_prefix="p",
+    )
+    # Fork inherits the parent's two turns verbatim (same uuids), then
+    # adds one new post-fork turn. Splitting the JSONL by hand instead
+    # of via ``_write_session`` so the inherited records keep their
+    # ``p-…`` uuids and the new one has a distinct ``f-…`` uuid.
+    fork_records = [
+        {
+            "uuid": "p-0",
+            "type": "assistant",
+            "sessionId": "PARENT",
+            "timestamp": "2026-05-10T00:00:00Z",
+            "message": {
+                "role": "assistant",
+                "model": "claude-sonnet-4",
+                "content": [{"type": "text", "text": "ok"}],
+                "usage": {
+                    "input_tokens": 1, "output_tokens": 2,
+                    "cache_creation_input_tokens": 100, "cache_read_input_tokens": 50,
+                },
+            },
+        },
+        {
+            "uuid": "p-1",
+            "type": "assistant",
+            "sessionId": "PARENT",
+            "timestamp": "2026-05-10T00:00:01Z",
+            "message": {
+                "role": "assistant",
+                "model": "claude-sonnet-4",
+                "content": [{"type": "text", "text": "ok"}],
+                "usage": {
+                    "input_tokens": 3, "output_tokens": 4,
+                    "cache_creation_input_tokens": 200, "cache_read_input_tokens": 80,
+                },
+            },
+        },
+        {
+            "uuid": "f-0",
+            "type": "assistant",
+            "sessionId": "FORK",
+            "timestamp": "2026-05-10T00:00:10Z",
+            "message": {
+                "role": "assistant",
+                "model": "claude-sonnet-4",
+                "content": [{"type": "text", "text": "ok"}],
+                "usage": {
+                    "input_tokens": 7, "output_tokens": 9,
+                    "cache_creation_input_tokens": 11, "cache_read_input_tokens": 13,
+                },
+            },
+        },
+    ]
+    (proj / "FORK.jsonl").write_text("\n".join(json.dumps(r) for r in fork_records) + "\n")
+    # A callstack report tying FORK to PARENT — that's how
+    # ``inherited_uuids_for`` discovers the parent chain.
+    log = tmp_path / "log"
+    invoke_dir = log / "i0"
+    invoke_dir.mkdir(parents=True, exist_ok=True)
+    (invoke_dir / "report.yaml").write_text(
+        yaml.safe_dump({
+            "invoke_id": "i0",
+            "kind": "call",
+            "parent_session": "PARENT",
+            "started_at": "2026-05-10T00:00:05+00:00",
+            "ended_at": "2026-05-10T00:00:20+00:00",
+            "status": "complete",
+            "tasks": [{
+                "task": "/task-x",
+                "status": "complete",
+                "depth": 1,
+                "session_id": "FORK",
+            }],
+        })
+    )
+
+    _stub_registry(monkeypatch, {"slug": proj}, callstack_log_dirs={"slug": log})
+
+    report = build_month_report("2026-05", tz=timezone.utc)
+    # Parent's two turns + fork's one new turn, each counted once.
+    # Inherited (p-0, p-1) inside FORK.jsonl must NOT add to totals.
+    assert report.grand_usage == {
+        "cw": 100 + 200 + 11,
+        "cr": 50 + 80 + 13,
+        "r": 1 + 3 + 7,
+        "w": 2 + 4 + 9,
+    }
+    # Both sessions still register as "had an event" — the fork
+    # contributes its new turn, the parent contributes both turns.
+    assert report.session_count == 2
 
 
 def test_build_month_report_drops_projects_with_no_in_window_events(

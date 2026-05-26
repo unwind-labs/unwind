@@ -45,6 +45,12 @@ class UsageEvent(NamedTuple):
     produced them. Fields mirror Anthropic's wire format:
     ``cw=cache_creation_input_tokens``, ``cr=cache_read_input_tokens``,
     ``r=input_tokens``, ``w=output_tokens``.
+
+    ``uuid`` is the originating assistant record's uuid. Used to detect
+    events copied into a fork's JSONL from its parent (``claude
+    --fork-session`` mirrors the parent transcript verbatim, including
+    each assistant turn's usage block — so without this we'd count the
+    parent's tokens once per fork).
     """
 
     ts: Optional[datetime]
@@ -53,6 +59,7 @@ class UsageEvent(NamedTuple):
     cr: int
     r: int
     w: int
+    uuid: Optional[str] = None
 
 
 @dataclass
@@ -150,8 +157,12 @@ def scan_session(path: Path) -> SessionScan:
                     if cw or cr or r_in or w_out:
                         m = msg.get("model")
                         model = m if isinstance(m, str) else None
+                        rec_uuid = rec.get("uuid")
                         scan.usage_events.append(
-                            UsageEvent(ts, model, cw, cr, r_in, w_out)
+                            UsageEvent(
+                                ts, model, cw, cr, r_in, w_out,
+                                rec_uuid if isinstance(rec_uuid, str) else None,
+                            )
                         )
             text = _extract_assistant_text(rec)
             if text and _YIELD_RE.search(text):
