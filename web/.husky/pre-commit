@@ -1,0 +1,9 @@
+set -e
+
+# Hooks are invoked from the git repo root; the web/ tooling lives one
+# level down. lint-staged config (web/.lintstagedrc) scopes patterns to
+# web/** so Python-only commits flow through unchanged.
+cd web
+npx lint-staged
+npm run typecheck
+npm run test
