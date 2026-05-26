@@ -30,3 +30,5 @@ src/unwind/static/
 
 # Local Claude Code scratch (callstack logs, skills, worktrees)
 .claude/
+.playwright-mcp/
+.run-tasks/
