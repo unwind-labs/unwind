@@ -12,6 +12,30 @@ to see that the ancestor is live — a yielded sibling shouldn't outrank
 an actively-running descendant. This resolves the prior disagreement
 between ``aggregate_status_for_session`` (which preferred yielded) and
 ``_aggregate_subtree_status`` (which preferred live).
+
+**Terminal-ancestor wall.** The priority above governs how a subtree's
+statuses combine, but it does NOT mean a descendant's status always
+escalates upward. A separate invariant gates the merge: when an
+ancestor's OWN status is terminal (``failed`` or ``done``), its
+descendants do not contribute to its aggregate — the ancestor's
+terminal status is authoritative. A returned or failed invocation
+cannot have a genuinely live descendant: the runtime gates a call's
+return on its children returning first, so a child still marked
+``running`` under a terminal parent is a stale ``report.yaml`` left
+behind when the parent crashed (the runtime never wrote the child's
+terminal envelope) — not live work. Without the wall, that stale
+``running`` resurrects the parent to ``live`` and its CALL row pulses
+forever / its session-list dot stays amber. ``yield`` is deliberately
+NOT a wall: a yielded parent waiting on user input can legitimately sit
+above still-running descendants, so escalation still applies there.
+
+The wall is enforced in ``CallstackIndex.aggregate_status_for_session``
+(the pure-report path), not inside :func:`merge`, which stays a pure
+highest-priority-wins helper. ``canvas_tree._finalize_subtree`` does NOT
+apply the wall and deliberately so: it gates each window's status on real
+process liveness first, so a stale ``running`` report with no live process
+is already downgraded to ``done`` and never escalates, while a ``live``
+window there is genuinely live and SHOULD pulse its ancestors' rails.
 """
 from __future__ import annotations
 

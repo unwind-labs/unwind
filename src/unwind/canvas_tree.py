@@ -336,6 +336,14 @@ def _finalize_subtree(
     an otherwise-finished ancestor's rail back into ``live`` so the UI
     signals that work is still happening somewhere below.
 
+    Note this walk does NOT apply the terminal-ancestor wall that
+    :meth:`CallstackIndex.aggregate_status_for_session` uses. It doesn't
+    need to: each window's ``status`` was already gated on real process
+    liveness in ``_compute_windows`` (a ``running`` report with no live
+    process is downgraded to ``done``), so a ``live`` descendant here is
+    genuinely live and SHOULD escalate — even above a finished ancestor.
+    The wall guards the pure-report path, which has no process cross-check.
+
     Each parent's ``subtree_usage`` / ``subtree_cost`` are its own
     ``self_*`` plus every descendant's, summed element-wise.
 

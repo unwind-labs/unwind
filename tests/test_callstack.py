@@ -308,6 +308,185 @@ def test_aggregate_status_returns_terminal_for_main_when_chain_complete(tmp_path
     assert ci.is_callstack_task("MAIN") is False
 
 
+def _parent_with_child_report(
+    dir_: Path,
+    *,
+    parent_status: str,
+    child_status: str,
+    started_at: str = "2026-01-01T00:00:00+00:00",
+    invoke_id: str = "20260101T000000-root",
+) -> None:
+    """Write a report: MAIN → FORK-A(``parent_status``) → GRAND(``child_status``).
+
+    FORK-A is the session under test in the wall-rule cases; GRAND is its
+    descendant whose status would (without the wall) escalate upward.
+    """
+    _write_report(
+        dir_,
+        invoke_id,
+        {
+            "invoke_id": invoke_id,
+            "parent_session": "MAIN",
+            "started_at": started_at,
+            "status": "complete",
+            "tasks": [
+                {
+                    "task": "/fork-a",
+                    "status": parent_status,
+                    "depth": 1,
+                    "session_id": "FORK-A",
+                    "children": [
+                        {
+                            "task": "/grand",
+                            "status": child_status,
+                            "depth": 2,
+                            "session_id": "GRAND",
+                        }
+                    ],
+                }
+            ],
+        },
+    )
+
+
+def test_failed_parent_with_live_descendant_returns_failed(tmp_path: Path):
+    """The bug this fix targets: a failed invocation whose child is still
+    marked ``running`` in a stale report.yaml. The child's ``running`` is
+    debt left behind when the parent crashed — not live work — so the
+    terminal-ancestor wall pins FORK-A to ``failed`` instead of letting
+    the stale descendant resurrect it to ``live`` (which kept the CALL row
+    pulsing forever)."""
+    log = tmp_path / "log"
+    _parent_with_child_report(log, parent_status="error", child_status="running")
+    ci = CallstackIndex(log)
+    assert ci.aggregate_status_for_session("FORK-A") == "failed"
+
+
+def test_done_parent_with_live_descendant_returns_done(tmp_path: Path):
+    """Same wall, ``done`` arm: a completed invocation can't have a
+    genuinely live descendant (the runtime gates return on children
+    returning first), so a child still marked ``running`` is stale and
+    must not pull FORK-A back to ``live``."""
+    log = tmp_path / "log"
+    _parent_with_child_report(log, parent_status="complete", child_status="running")
+    ci = CallstackIndex(log)
+    assert ci.aggregate_status_for_session("FORK-A") == "done"
+
+
+def test_live_parent_with_done_descendant_returns_live(tmp_path: Path):
+    """Regression for the original escalation purpose: a live parent with a
+    finished child stays ``live``. The wall only fires on terminal OWN
+    status, so a non-terminal parent still merges its subtree as before."""
+    log = tmp_path / "log"
+    _parent_with_child_report(log, parent_status="running", child_status="complete")
+    ci = CallstackIndex(log)
+    assert ci.aggregate_status_for_session("FORK-A") == "live"
+
+
+def test_yield_parent_with_live_descendant_returns_live(tmp_path: Path):
+    """``yield`` is deliberately NOT a wall: a yielded parent waiting on
+    user input can legitimately sit above a still-running descendant, so
+    the live child still escalates the yielded parent to ``live``. This is
+    the case that distinguishes the wall from a blanket 'non-live is
+    terminal' rule."""
+    log = tmp_path / "log"
+    _parent_with_child_report(log, parent_status="yielded", child_status="running")
+    ci = CallstackIndex(log)
+    assert ci.aggregate_status_for_session("FORK-A") == "live"
+
+
+def test_resume_completed_returns_done_via_latest_view(tmp_path: Path):
+    """The original 'resume completed' fix must still hold under the wall,
+    and this test isolates the two mechanisms coexisting.
+
+    An older report records FORK-A as ``yielded``; a newer report records
+    FORK-A as ``complete`` but leaves its GRAND child frozen at ``running``
+    (stale debt). ``_latest_view`` dedupes by session_id keeping the newer
+    TaskNode, so FORK-A's own status is ``done``. WITHOUT the wall the
+    ``running`` GRAND would merge to ``live`` and the CALL row would keep
+    pulsing; the wall pins FORK-A to ``done`` once the resume lands. Both
+    the dedup and the wall are required for the assertion to hold — flip
+    either off and this returns ``live``."""
+    log = tmp_path / "log"
+    _parent_with_child_report(
+        log,
+        parent_status="yielded",
+        child_status="running",
+        started_at="2026-01-01T00:00:00+00:00",
+        invoke_id="20260101T000000-orig",
+    )
+    _parent_with_child_report(
+        log,
+        parent_status="complete",
+        child_status="running",
+        started_at="2026-01-01T01:00:00+00:00",
+        invoke_id="20260101T010000-resume",
+    )
+    ci = CallstackIndex(log)
+    assert ci.aggregate_status_for_session("FORK-A") == "done"
+
+
+def test_aggregate_status_wall_fires_for_orchestrator_with_stale_subcall(tmp_path: Path):
+    """The actual phase4 bug: an ORCHESTRATOR session that itself spawned
+    sub-``/call``s. ORCH is both a task (recorded ``failed`` by its caller
+    ROOT) AND a ``parent_session`` of its own sub-reports — the latest of
+    which is frozen at ``running`` because ORCH crashed before the sub-call
+    returned.
+
+    The wall must read ORCH's OWN verdict from ``canonical[ORCH]``
+    (``failed``) ONLY. If it also folded in ``root_status[ORCH]`` (the
+    ``running`` sub-call ORCH spawned), the own merge would resolve to
+    ``live`` and the wall would never fire — returning ``live`` and leaving
+    the CALL row pulsing forever. This is the regression the canonical-only
+    fix closes; the same-report topology of the other wall tests can't
+    reach it because there FORK-A is never a ``parent_session``."""
+    log = tmp_path / "log"
+    # Report 1: ROOT invoked ORCH; ORCH's task verdict is failed.
+    _write_report(
+        log,
+        "20260101T000000-root",
+        {
+            "invoke_id": "20260101T000000-root",
+            "parent_session": "ROOT",
+            "started_at": "2026-01-01T00:00:00+00:00",
+            "status": "complete",
+            "tasks": [
+                {"task": "/orch", "status": "error", "depth": 1, "session_id": "ORCH"}
+            ],
+        },
+    )
+    # Report 2: ORCH itself spawned a sub-/call, frozen at running.
+    _write_report(
+        log,
+        "20260101T000500-sub",
+        {
+            "invoke_id": "20260101T000500-sub",
+            "parent_session": "ORCH",
+            "started_at": "2026-01-01T00:05:00+00:00",
+            "status": "running",
+            "tasks": [
+                {"task": "/playbook", "status": "running", "depth": 1, "session_id": "PLAYBOOK"}
+            ],
+        },
+    )
+    ci = CallstackIndex(log)
+    # root_status[ORCH] == "running" (its sub-call), but ORCH's own verdict
+    # is failed — the wall must pin it.
+    assert ci.aggregate_status_for_session("ORCH") == "failed"
+
+
+def test_done_parent_with_yielded_child_returns_done(tmp_path: Path):
+    """When the wall fires it suppresses descendants of ANY status, not just
+    stale ``running``. A ``done`` parent with a ``yielded`` child returns
+    ``done`` — even though ``merge(["done", "yield"])`` would otherwise be
+    ``yield``. A returned parent pins the verdict regardless of what its
+    descendants report; this pins that documented behavior."""
+    log = tmp_path / "log"
+    _parent_with_child_report(log, parent_status="complete", child_status="yielded")
+    ci = CallstackIndex(log)
+    assert ci.aggregate_status_for_session("FORK-A") == "done"
+
+
 def test_latest_view_is_memoized_until_files_change(tmp_path: Path, monkeypatch):
     """A /sessions response calls aggregate_status + is_callstack_task per row.
     Each goes through _latest_view, which used to do a full O(reports × tree)

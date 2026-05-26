@@ -280,6 +280,32 @@ class CallstackIndex:
         an otherwise-yielded ancestor's status back to ``live`` so the
         UI signals that work is still happening.
 
+        **Terminal-ancestor wall**: if the session's OWN status is already
+        terminal (``failed`` or ``done``), we return it without walking
+        descendants. A returned/failed invocation cannot have a genuinely
+        live descendant — the runtime gates a call's return on its children
+        returning first. When a child's ``report.yaml`` is left frozen at
+        ``running`` (parent crashed, runtime died before writing the
+        terminal envelope), that entry is stale debt, not live work, and
+        must not resurrect the parent's status to ``live``. ``yield`` is
+        deliberately NOT a wall: a yielded parent waiting on user input can
+        legitimately sit above still-running descendants, so escalation
+        still applies there. When the wall fires, descendants of ANY status
+        — including ``yielded`` — are suppressed: a failed/done parent pins
+        the verdict regardless of what its descendants report. See
+        :mod:`unwind.status` for the invariant.
+
+        The wall reads the session's OWN status from ``canonical[sid]``
+        ONLY — the terminal verdict recorded by the caller that invoked
+        this session. It deliberately does NOT consult ``root_status[sid]``,
+        which carries the status of invocations this session itself
+        *spawned*: an orchestrator whose latest sub-``/call`` report is
+        still frozen at ``running`` would otherwise inject ``live`` into the
+        own-status merge and bypass the wall (the original phase4 bug). A
+        "main" session that only ever appears as a ``parent_session`` (never
+        as a task) has no ``canonical`` entry, so the wall can't fire — it
+        falls through to the descendant walk, as before.
+
         Returns ``None`` if this session doesn't appear in any report.
         Callers that need to distinguish "session is live (genuinely in
         flight)" from "session is waiting" should check the canonical
@@ -289,13 +315,22 @@ class CallstackIndex:
         if session_id not in canonical and session_id not in root_status:
             return None
 
+        # Terminal-ancestor wall: the session's OWN terminal verdict
+        # (canonical[sid], recorded by its caller) pins the result. See
+        # the docstring for why root_status[sid] is excluded here.
+        own_node = canonical.get(session_id)
+        if own_node is not None:
+            own = _from_raw_status(own_node.status)
+            if own in ("failed", "done"):
+                return own
+
+        # Fall-through: own status is live / yield / unknown, or the session
+        # only appears as a parent_session. Aggregate own + every descendant.
         statuses: list[Optional[Status]] = []
-        own = canonical.get(session_id)
-        if own is not None:
-            statuses.append(_from_raw_status(own.status))
+        if own_node is not None:
+            statuses.append(_from_raw_status(own_node.status))
         if session_id in root_status:
             statuses.append(_from_raw_status(root_status[session_id]))
-
         visited: set[str] = {session_id}
         queue: list[str] = list(children_sids.get(session_id, []))
         while queue:
