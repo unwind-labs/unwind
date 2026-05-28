@@ -11,6 +11,7 @@ import {
   XCircle,
   Info,
   GitFork,
+  Hourglass,
   Sparkles,
 } from "lucide-react";
 import { useMessages } from "@/api/client";
@@ -400,22 +401,35 @@ function SpawnCard({
   autoOpen: boolean;
 }) {
   const isCall = toolUse.spawn_kind === "call";
+  const isFollower = toolUse.spawn_is_follower === true;
   const children = toolUse.spawn_session_ids ?? [];
   const tasks = perChildTasks(toolUse, children.length);
-  const overallStatus: "pending" | "ok" | "error" = !toolResult
-    ? "pending"
-    : toolResult.is_error
-      ? "error"
-      : "ok";
+
+  // Per-child status. ``spawn_done`` (set server-side from the
+  // callstack report) is the authoritative per-child outcome and
+  // wins when known — it correctly reflects "the spawn finished"
+  // even when the parent's ``tool_result`` envelope isn't visible
+  // in the current window slice (the trace pane's window filter is
+  // exclusive on the end boundary, so a tool_result whose timestamp
+  // matches ``window_end`` exactly gets dropped; without this
+  // fallback, the row reads as ``live`` long after the child returned).
+  // Mirrors derive-rows.ts's per-child done resolution.
+  const statusFor = (i: number): "pending" | "ok" | "error" => {
+    const done = toolUse.spawn_done?.[i];
+    if (done === true) return "ok";
+    if (!toolResult) return "pending";
+    return toolResult.is_error ? "error" : "ok";
+  };
 
   if (children.length === 0) {
     // No children resolved — fall through to a single placeholder row.
     return (
       <SpawnRow
         isCall={isCall}
+        isFollower={isFollower}
         title={summarizeCallTarget(toolUse)}
         childId={null}
-        status={overallStatus}
+        status={statusFor(0)}
         timestamp={toolUse.timestamp}
         slug={slug}
         depth={depth}
@@ -432,9 +446,10 @@ function SpawnCard({
         <SpawnRow
           key={childId}
           isCall={isCall}
+          isFollower={isFollower}
           title={tasks[i] ?? summarizeCallTarget(toolUse)}
           childId={childId}
-          status={overallStatus}
+          status={statusFor(i)}
           timestamp={toolUse.timestamp}
           slug={slug}
           depth={depth}
@@ -499,6 +514,7 @@ function ExtraSpawnCard({
         <SpawnRow
           key={childId}
           isCall
+          isFollower={false}
           title={spawn.tasks[i] ?? `child ${i + 1}`}
           childId={childId}
           status={status}
@@ -518,6 +534,7 @@ function ExtraSpawnCard({
 
 function SpawnRow({
   isCall,
+  isFollower,
   title,
   childId,
   status,
@@ -529,6 +546,11 @@ function SpawnRow({
   autoOpen,
 }: {
   isCall: boolean;
+  /** ``await_call`` tool_use referencing an already-running invocation
+   *  instead of spawning a new one. Renders with the same sky color
+   *  family as the originating CALL row but transparent — the original
+   *  CALL stays visually dominant. Mirrors the canvas-card styling. */
+  isFollower: boolean;
   title: string;
   childId: string | null;
   status: "pending" | "ok" | "error";
@@ -540,29 +562,44 @@ function SpawnRow({
   autoOpen: boolean;
 }) {
   const [open, setOpen] = useState(autoOpen);
-  const accent = isCall
+  // ``isFollower`` checked first: an await_call has ``spawn_kind ==
+  // "call"``, so without this branch it would fall through to the
+  // CALL accent. Order: follower > call > subagent.
+  const accent = isFollower
     ? {
         leftBorder: "border-l-sky-500",
         ring: "ring-sky-500/30",
-        bg: "bg-sky-950/40",
-        bgHover: "hover:bg-sky-950/60",
+        bg: "bg-transparent",
+        bgHover: "hover:bg-sky-950/30",
         pillBorder: "border-sky-500/40",
         pillText: "text-sky-300",
         railBorder: "border-l-sky-500/60",
-        icon: <GitFork className="h-3.5 w-3.5 text-sky-300" />,
-        label: "call",
+        icon: <Hourglass className="h-3.5 w-3.5 text-sky-300" />,
+        label: "await",
       }
-    : {
-        leftBorder: "border-l-violet-500",
-        ring: "ring-violet-500/30",
-        bg: "bg-violet-950/40",
-        bgHover: "hover:bg-violet-950/60",
-        pillBorder: "border-violet-500/40",
-        pillText: "text-violet-300",
-        railBorder: "border-l-violet-500/60",
-        icon: <Sparkles className="h-3.5 w-3.5 text-violet-300" />,
-        label: "subagent",
-      };
+    : isCall
+      ? {
+          leftBorder: "border-l-sky-500",
+          ring: "ring-sky-500/30",
+          bg: "bg-sky-950/40",
+          bgHover: "hover:bg-sky-950/60",
+          pillBorder: "border-sky-500/40",
+          pillText: "text-sky-300",
+          railBorder: "border-l-sky-500/60",
+          icon: <GitFork className="h-3.5 w-3.5 text-sky-300" />,
+          label: "call",
+        }
+      : {
+          leftBorder: "border-l-violet-500",
+          ring: "ring-violet-500/30",
+          bg: "bg-violet-950/40",
+          bgHover: "hover:bg-violet-950/60",
+          pillBorder: "border-violet-500/40",
+          pillText: "text-violet-300",
+          railBorder: "border-l-violet-500/60",
+          icon: <Sparkles className="h-3.5 w-3.5 text-violet-300" />,
+          label: "subagent",
+        };
 
   const expandable = childId !== null;
   const shortChildId = childId
