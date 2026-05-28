@@ -682,6 +682,39 @@ function treeToReactFlow(args: {
     });
   }
 
+  // Follower edges: one per ``await_call`` tool_use in a parent's
+  // session. The standard parent→child edge above anchors only to the
+  // originating ``call`` row's handle; an await_call row keeps its own
+  // unique ReactFlow handle (id ``spawn-<tool_use_id>-0``) and needs a
+  // separate edge to the same child window, otherwise its right side
+  // renders with no connection at all. Server-side resolution (by
+  // ``invoke_id``) decides which window the edge targets — for the K=1
+  // case that's just the only window of the followed child; for
+  // yield/resume chains it's the specific window the await polls.
+  for (const w of allWindows) {
+    for (const fe of w.follower_edges ?? []) {
+      // Only emit when both endpoints actually rendered — a missing
+      // position means the target was filtered out (rare; defensive).
+      if (!positions[w.window_id] || !positions[fe.target_window_id]) continue;
+      edges.push({
+        id: `${w.window_id}::follower::${fe.parent_tool_use_id}`,
+        source: w.window_id,
+        target: fe.target_window_id,
+        // Mirrors derive-rows.ts: ``handleId: \`spawn-${tooluse}-${i}\```.
+        // await_call has exactly one followed child, so i is always 0.
+        sourceHandle: `spawn-${fe.parent_tool_use_id}-0`,
+        targetHandle: "in",
+        type: "elbow",
+        data: { offset: 0 },
+        // ``uw-edge-follower`` is a CSS hook (currently unstyled) so
+        // the await edge can be visually distinguished later without
+        // another data round-trip. ``uw-edge-call`` keeps the base
+        // call-edge appearance until that styling lands.
+        className: "uw-edge-call uw-edge-follower",
+      });
+    }
+  }
+
   // Build nodes.
   const nodes: Node<CompactCardData>[] = allWindows
     .filter((w) => positions[w.window_id])

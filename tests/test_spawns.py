@@ -1678,3 +1678,505 @@ def test_subagent_index_parent_sids_returns_only_dirs_with_subagents(tmp_path: P
     # Mtime-cached: re-call doesn't re-stat (no easy way to assert from
     # outside, but the second call must return the same set).
     assert idx.parent_sids() == {"A"}
+
+
+# --- Fix A: child JSONL terminal envelope overrides stale report.yaml ---
+
+
+def test_callstack_spawn_status_overridden_by_child_terminal_envelope(
+    tmp_path: Path,
+):
+    """``report.yaml`` is finalized when the parent reconciles via
+    ``await_call``. For ``run_in_background=True`` calls the parent may
+    not poll for a long time, leaving ``task.status: running`` while the
+    child has already emitted ``op: return``. The resolver must trust
+    the child JSONL's terminal envelope over the stale report status."""
+    log = tmp_path / "log"
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    inv = log / "i-bg"
+    inv.mkdir(parents=True)
+    (inv / "report.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "invoke_id": "i-bg",
+                "parent_session": "ROOT",
+                "started_at": "2026-05-04T10:00:00+00:00",
+                "ended_at": "2026-05-04T10:00:30+00:00",
+                "status": "mixed",
+                "tasks": [
+                    {
+                        "task": "/long-task",
+                        "status": "running",  # ← stale
+                        "depth": 1,
+                        "session_id": "CHILD",
+                    }
+                ],
+            }
+        )
+    )
+
+    # Child JSONL ends with an op:return envelope — the runtime saw it,
+    # but the parent hasn't called await_call yet so the report is frozen.
+    _write_jsonl(
+        proj / "CHILD.jsonl",
+        [
+            {
+                "uuid": "a1",
+                "type": "assistant",
+                "sessionId": "CHILD",
+                "timestamp": "2026-05-04T10:20:00.000Z",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": '```json\n{"op": "return", "result": "ok"}\n```',
+                        }
+                    ],
+                },
+            }
+        ],
+    )
+
+    res = _make_resolver(proj, log)
+    spawn = res.for_parent("ROOT")[0]
+    assert spawn.child_session_id == "CHILD"
+    # Overridden from "running" → "complete" via the child JSONL.
+    assert spawn.status == "complete"
+    # ended_at picked up from the envelope timestamp.
+    assert spawn.ended_at is not None
+    assert spawn.ended_at.isoformat().startswith("2026-05-04T10:20:00")
+
+
+def test_callstack_spawn_status_not_overridden_when_report_already_terminal(
+    tmp_path: Path,
+):
+    """The override is one-way: if the report.yaml already records a
+    terminal status (complete / failed / yielded), the resolver trusts
+    it — the callstack runtime wrote it after observing the envelope,
+    so it's authoritative. We don't second-guess it from the JSONL."""
+    log = tmp_path / "log"
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    inv = log / "i-done"
+    inv.mkdir(parents=True)
+    (inv / "report.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "invoke_id": "i-done",
+                "parent_session": "ROOT",
+                "started_at": "2026-05-04T10:00:00+00:00",
+                "ended_at": "2026-05-04T10:00:30+00:00",
+                "status": "complete",
+                "tasks": [
+                    {
+                        "task": "/t",
+                        "status": "failed",  # report wins
+                        "depth": 1,
+                        "session_id": "CHILD",
+                    }
+                ],
+            }
+        )
+    )
+    # Child JSONL says return — but the report's failed verdict stands.
+    _write_jsonl(
+        proj / "CHILD.jsonl",
+        [
+            {
+                "uuid": "a1",
+                "type": "assistant",
+                "sessionId": "CHILD",
+                "timestamp": "2026-05-04T10:00:25.000Z",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": '```json\n{"op": "return", "result": "x"}\n```',
+                        }
+                    ],
+                },
+            }
+        ],
+    )
+    res = _make_resolver(proj, log)
+    assert res.for_parent("ROOT")[0].status == "failed"
+
+
+# --- Fix B: await_call binds to the same spawn by invoke_id --------------
+
+
+def test_await_call_tool_use_decorated_with_existing_spawn(tmp_path: Path):
+    """An ``await_call`` tool_use refers to an already-running invocation
+    by invoke_id. It must NOT claim a new spawn (the originating ``call``
+    owns parent_tool_use_id), but its message row must surface the same
+    child session id so the UI can drill into it from either tool_use."""
+    log = tmp_path / "log"
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    inv = log / "i-bg2"
+    inv.mkdir(parents=True)
+    (inv / "report.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "invoke_id": "i-bg2",
+                "parent_session": "ROOT",
+                "started_at": "2026-05-04T10:00:00+00:00",
+                "ended_at": "2026-05-04T10:00:30+00:00",
+                "status": "mixed",
+                "tasks": [
+                    {
+                        "task": "/bg",
+                        "status": "running",
+                        "depth": 1,
+                        "session_id": "CHILD",
+                        "call_type": "fork",
+                    }
+                ],
+            }
+        )
+    )
+
+    parent = proj / "ROOT.jsonl"
+    parent.write_text(
+        "\n".join(
+            json.dumps(r)
+            for r in [
+                # 1. The originating background call.
+                {
+                    "type": "assistant",
+                    "uuid": "a1",
+                    "sessionId": "ROOT",
+                    "timestamp": "2026-05-04T10:00:01.000Z",
+                    "message": {
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "id": "tu-call",
+                                "name": "mcp__plugin_callstack_call__call",
+                                "input": {
+                                    "tasks": ["/bg"],
+                                    "run_in_background": True,
+                                },
+                            }
+                        ],
+                    },
+                },
+                {
+                    "type": "user",
+                    "uuid": "u1",
+                    "sessionId": "ROOT",
+                    "timestamp": "2026-05-04T10:00:02.000Z",
+                    "message": {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": "tu-call",
+                                "content": (
+                                    '{"invoke_id": "i-bg2",'
+                                    ' "report_path": "/tmp/r",'
+                                    ' "status": "started"}'
+                                ),
+                            }
+                        ],
+                    },
+                },
+                # 2. Later, an await_call polling the same invoke_id.
+                {
+                    "type": "assistant",
+                    "uuid": "a2",
+                    "sessionId": "ROOT",
+                    "timestamp": "2026-05-04T10:05:00.000Z",
+                    "message": {
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "id": "tu-await",
+                                "name": "mcp__plugin_callstack_call__await_call",
+                                "input": {"invoke_id": "i-bg2", "timeout": 60},
+                            }
+                        ],
+                    },
+                },
+                {
+                    "type": "user",
+                    "uuid": "u2",
+                    "sessionId": "ROOT",
+                    "timestamp": "2026-05-04T10:05:01.000Z",
+                    "message": {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": "tu-await",
+                                "content": (
+                                    '{"invoke_id": "i-bg2",'
+                                    ' "report_path": "/tmp/r",'
+                                    ' "status": "pending"}'
+                                ),
+                            }
+                        ],
+                    },
+                },
+            ]
+        )
+        + "\n"
+    )
+
+    page = read_messages(parent)
+    res = _make_resolver(proj, log)
+    annotate_spawns(
+        page.messages, current_session_id="ROOT", spawn_resolver=res
+    )
+
+    by_id = {m.tool_use_id: m for m in page.messages if m.role == "tool_use"}
+    call_row = by_id["tu-call"]
+    await_row = by_id["tu-await"]
+
+    # Original call binds the spawn — parent_tool_use_id sticks here.
+    assert call_row.spawn_kind == "call"
+    assert call_row.spawn_session_ids == ["CHILD"]
+
+    # await_call surfaces the SAME child id, without stealing the bind.
+    assert await_row.spawn_kind == "call"
+    assert await_row.spawn_session_ids == ["CHILD"]
+    assert await_row.spawn_tasks == ["/bg"]
+    # call_type propagates from the underlying CallSpawn.
+    assert await_row.spawn_call_types == ["fork"]
+
+
+def test_await_call_with_unknown_invoke_id_is_left_alone(tmp_path: Path):
+    """An ``await_call`` whose invoke_id doesn't match any known spawn
+    (e.g. log directory wiped, runtime restarted) renders as a plain
+    tool_use — no spawn_kind, no phantom child. We do NOT fall back to
+    'any unbound callstack spawn' here; await_call addresses one
+    specific invocation by id, and getting it wrong is worse than
+    showing nothing."""
+    log = tmp_path / "log"
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    log.mkdir()
+
+    parent = proj / "ROOT.jsonl"
+    parent.write_text(
+        "\n".join(
+            json.dumps(r)
+            for r in [
+                {
+                    "type": "assistant",
+                    "uuid": "a1",
+                    "sessionId": "ROOT",
+                    "timestamp": "2026-05-04T10:00:01.000Z",
+                    "message": {
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "id": "tu-await",
+                                "name": "mcp__plugin_callstack_call__await_call",
+                                "input": {
+                                    "invoke_id": "i-missing",
+                                    "timeout": 60,
+                                },
+                            }
+                        ],
+                    },
+                }
+            ]
+        )
+        + "\n"
+    )
+
+    page = read_messages(parent)
+    res = _make_resolver(proj, log)
+    annotate_spawns(
+        page.messages, current_session_id="ROOT", spawn_resolver=res
+    )
+
+    tu = next(m for m in page.messages if m.role == "tool_use")
+    # The parse-time classifier still tags any callstack tool with
+    # spawn_kind="call" (it's a name-only lookup, no resolution). What
+    # matters is that no phantom child is bound to it.
+    assert tu.spawn_session_ids == []
+    assert tu.spawn_tasks == []
+
+
+def test_done_for_spawn_does_not_downgrade_terminal_status(tmp_path: Path):
+    """When Fix A overrides a stale ``running`` task to ``complete`` from
+    the child JSONL, ``_done_for_spawn`` must not flip it back to live
+    via ``aggregate_status_for_session`` (which still reads the stale
+    ``report.yaml``). The spawn's own terminal verdict is authoritative
+    once known — same invariant as the terminal-ancestor wall."""
+    from unwind.messages import _done_for_spawn
+
+    log = tmp_path / "log"
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    inv = log / "i-bg3"
+    inv.mkdir(parents=True)
+    (inv / "report.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "invoke_id": "i-bg3",
+                "parent_session": "ROOT",
+                "started_at": "2026-05-04T10:00:00+00:00",
+                "ended_at": "2026-05-04T10:00:30+00:00",
+                "status": "mixed",
+                "tasks": [
+                    {
+                        "task": "/bg",
+                        "status": "running",  # stale: report not yet reconciled
+                        "depth": 1,
+                        "session_id": "CHILD",
+                    }
+                ],
+            }
+        )
+    )
+    # Child JSONL has emitted op:return — Fix A will overwrite the
+    # spawn.status to "complete" at resolver-construction time.
+    _write_jsonl(
+        proj / "CHILD.jsonl",
+        [
+            {
+                "uuid": "a1",
+                "type": "assistant",
+                "sessionId": "CHILD",
+                "timestamp": "2026-05-04T10:20:00.000Z",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": '```json\n{"op": "return", "result": "ok"}\n```',
+                        }
+                    ],
+                },
+            }
+        ],
+    )
+
+    res = _make_resolver(proj, log)
+    spawn = res.for_parent("ROOT")[0]
+    # Fix A established the terminal status:
+    assert spawn.status == "complete"
+    # CallstackIndex still reads report.yaml; aggregate says "live".
+    ci = CallstackIndex(log)
+    assert ci.aggregate_status_for_session("CHILD") == "live"
+    # But _done_for_spawn must NOT downgrade: trust the spawn's own
+    # terminal verdict over the stale aggregate.
+    assert _done_for_spawn(spawn, ci) is True
+
+
+def test_await_call_message_carries_follower_flag(tmp_path: Path):
+    """``annotate_spawns`` must set ``spawn_is_follower=True`` on
+    await_call rows so the frontend can peek (not pop) its canvas
+    child window — otherwise the originating ``call`` row drains the
+    queue and the await row renders unanchored."""
+    log = tmp_path / "log"
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    inv = log / "i-bg4"
+    inv.mkdir(parents=True)
+    (inv / "report.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "invoke_id": "i-bg4",
+                "parent_session": "ROOT",
+                "started_at": "2026-05-04T10:00:00+00:00",
+                "ended_at": "2026-05-04T10:00:30+00:00",
+                "status": "mixed",
+                "tasks": [
+                    {
+                        "task": "/bg",
+                        "status": "running",
+                        "depth": 1,
+                        "session_id": "CHILD",
+                    }
+                ],
+            }
+        )
+    )
+    parent = proj / "ROOT.jsonl"
+    parent.write_text(
+        "\n".join(
+            json.dumps(r)
+            for r in [
+                {
+                    "type": "assistant",
+                    "uuid": "a1",
+                    "sessionId": "ROOT",
+                    "timestamp": "2026-05-04T10:00:01.000Z",
+                    "message": {
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "id": "tu-call",
+                                "name": "mcp__plugin_callstack_call__call",
+                                "input": {
+                                    "tasks": ["/bg"],
+                                    "run_in_background": True,
+                                },
+                            }
+                        ],
+                    },
+                },
+                {
+                    "type": "user",
+                    "uuid": "u1",
+                    "sessionId": "ROOT",
+                    "timestamp": "2026-05-04T10:00:02.000Z",
+                    "message": {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": "tu-call",
+                                "content": (
+                                    '{"invoke_id": "i-bg4",'
+                                    ' "report_path": "/tmp/r",'
+                                    ' "status": "started"}'
+                                ),
+                            }
+                        ],
+                    },
+                },
+                {
+                    "type": "assistant",
+                    "uuid": "a2",
+                    "sessionId": "ROOT",
+                    "timestamp": "2026-05-04T10:05:00.000Z",
+                    "message": {
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "id": "tu-await",
+                                "name": "mcp__plugin_callstack_call__await_call",
+                                "input": {"invoke_id": "i-bg4", "timeout": 60},
+                            }
+                        ],
+                    },
+                },
+            ]
+        )
+        + "\n"
+    )
+
+    page = read_messages(parent)
+    res = _make_resolver(proj, log)
+    annotate_spawns(
+        page.messages, current_session_id="ROOT", spawn_resolver=res
+    )
+
+    by_id = {m.tool_use_id: m for m in page.messages if m.role == "tool_use"}
+    # The originating ``call`` is the canonical spawner — never a follower.
+    assert by_id["tu-call"].spawn_is_follower is False
+    # The await_call is a follower; its row must not pop a fresh window.
+    assert by_id["tu-await"].spawn_is_follower is True

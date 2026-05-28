@@ -34,6 +34,11 @@ export type Row =
       /** Optional ``user_reply`` from invoke_resume; surfaces as the row
        *  title and instance label when present. */
       userReply?: string;
+      /** True when this row references an existing invocation
+       *  (``await_call``) rather than spawning a fresh one. The card's
+       *  window assignment must PEEK the canvas child instead of
+       *  popping, so the original ``call`` row keeps its anchor. */
+      isFollower: boolean;
     };
 
 /** Build the rows for one window of a session.
@@ -108,6 +113,7 @@ export function deriveRows(
           parentToolUseTs: m.timestamp,
           isResume,
           userReply,
+          isFollower: m.spawn_is_follower === true,
         });
       });
       continue;
@@ -186,6 +192,10 @@ export function deriveRows(
         handleId: `extra-${stem}`,
         parentToolUseTs: s.started_at ?? null,
         isResume: false,
+        // Extras come from aggregate spawn cards (no originating
+        // tool_use to follow); they're always self-owned, never
+        // follower references.
+        isFollower: false,
       });
     });
   });

@@ -38,6 +38,7 @@ from .jsonl import (
     stringify_tool_result as _stringify_result,
 )
 from .session_scan import SessionScan
+from .status import from_raw as _from_raw_status
 from .subagents import SubagentIndex
 
 
@@ -47,8 +48,25 @@ from .subagents import SubagentIndex
 SessionScanner: TypeAlias = "Callable[[str], Optional[SessionScan]]"
 
 
-# Tool names whose tool_use spawns child sessions/agents we drill into.
-CALLSTACK_TOOL_NAMES = frozenset(
+# Tool names whose tool_use refers to a callstack invocation. The list
+# is split because the two groups bind differently:
+#
+#   * ``CALLSTACK_SPAWNING_TOOL_NAMES`` — tool_uses that *start* a call
+#     (``call``, ``resume``, legacy ``invoke*``). Each tool_use here is
+#     a fresh anchor: its tool_input lists requested tasks and its
+#     result envelope carries the freshly-minted ``invoke_id``.
+#
+#   * ``CALLSTACK_AWAITING_TOOL_NAMES`` — tool_uses that *refer back to*
+#     an already-running call without spawning anything new (``await_call``
+#     for ``run_in_background=True`` reconciliation). The tool_input
+#     carries an existing ``invoke_id``; binding is purely by that id
+#     onto the spawn the original spawning tool_use already claimed.
+#
+# ``CALLSTACK_TOOL_NAMES`` is the union — used everywhere the question
+# is "is this a callstack tool_use at all" (e.g. message classification,
+# invoke-index scanning). Sites that need to distinguish the two
+# behaviors check the narrower sets directly.
+CALLSTACK_SPAWNING_TOOL_NAMES = frozenset(
     {
         # Legacy (kept so historical sessions still resolve).
         "mcp__plugin_callstack_call__invoke",
@@ -58,6 +76,12 @@ CALLSTACK_TOOL_NAMES = frozenset(
         "mcp__plugin_callstack_call__resume",
     }
 )
+CALLSTACK_AWAITING_TOOL_NAMES = frozenset(
+    {
+        "mcp__plugin_callstack_call__await_call",
+    }
+)
+CALLSTACK_TOOL_NAMES = CALLSTACK_SPAWNING_TOOL_NAMES | CALLSTACK_AWAITING_TOOL_NAMES
 SUBAGENT_TOOL_NAMES = frozenset({"Agent", "Task"})
 
 # These regexes used to live in messages.py; centralised here so the
@@ -98,10 +122,16 @@ def compute_invoke_index_for_project(
                 continue
             if rtype == "assistant":
                 for block in content:
+                    # Spawning names only: this index answers "which
+                    # session originated the call with this invoke_id".
+                    # ``await_call`` echoes the invoke_id in its result
+                    # too, but it doesn't mint anything — including it
+                    # would let a session that merely polls a call get
+                    # mis-identified as the real parent.
                     if (
                         isinstance(block, dict)
                         and block.get("type") == "tool_use"
-                        and block.get("name") in CALLSTACK_TOOL_NAMES
+                        and block.get("name") in CALLSTACK_SPAWNING_TOOL_NAMES
                     ):
                         tu_id = block.get("id")
                         if isinstance(tu_id, str):
@@ -481,7 +511,17 @@ class SpawnResolver:
             name = m.tool_name or ""
             res = result_for.get(tu_id)
 
-            if name in CALLSTACK_TOOL_NAMES:
+            if name in CALLSTACK_AWAITING_TOOL_NAMES:
+                # ``await_call`` does NOT spawn — it polls an already-
+                # running invocation. The originating ``call`` tool_use
+                # already claimed the spawn (and owns parent_tool_use_id);
+                # we leave the spawn alone here. Decoration of the
+                # await_call message itself (so its row shows the same
+                # child node) happens in ``messages.annotate_spawns``,
+                # which doesn't need the spawn's parent_tool_use_id.
+                continue
+
+            if name in CALLSTACK_SPAWNING_TOOL_NAMES:
                 # Two-step bind:
                 #
                 #  1. Determine the candidate pool — spawns belonging to
@@ -559,15 +599,28 @@ class SpawnResolver:
 
         ``seen_pairs`` is populated as a side effect so the fork
         iterator can skip pairs already covered here.
+
+        Status override: when ``task.status`` is still non-terminal
+        (``running`` / ``pending``) but the child's JSONL has emitted a
+        terminal callstack envelope (``op: return`` / ``op: yield``),
+        prefer the JSONL signal. ``report.yaml`` is only finalized when
+        the parent reconciles via ``await_call`` — for backgrounded
+        calls the parent may go long stretches without polling, leaving
+        the report frozen at ``running`` while the child is in fact
+        done. The child JSONL is the authoritative liveness signal.
         """
         if task.session_id and parent_sid:
+            raw_status = (task.status or "complete").lower()
+            status, ended_at = self._override_status_from_scan(
+                task.session_id, raw_status, rep.ended_at
+            )
             yield CallSpawn(
                 parent_session_id=parent_sid,
                 child_session_id=task.session_id,
                 label=task.task or task.session_id[:8],
-                status=(task.status or "complete").lower(),
+                status=status,
                 started_at=rep.started_at,
-                ended_at=rep.ended_at,
+                ended_at=ended_at,
                 invoke_id=rep.invoke_id,
                 source="callstack",
                 call_type=task.call_type,
@@ -701,6 +754,39 @@ class SpawnResolver:
             # Higher-priority signals (callstack reports) usually cover
             # for it; return None and let the caller fall back.
             return None
+
+    def _override_status_from_scan(
+        self,
+        child_sid: str,
+        raw_status: str,
+        report_ended_at: Optional[datetime],
+    ) -> tuple[str, Optional[datetime]]:
+        """If the child JSONL has a terminal envelope, prefer it over a
+        non-terminal ``report.yaml`` status.
+
+        Returns ``(status, ended_at)``. Falls back to
+        ``(raw_status, report_ended_at)`` when:
+          * no session scanner is wired (test fixtures, ad-hoc use), or
+          * the child JSONL has no terminal envelope yet, or
+          * the report already records a terminal status (``complete`` /
+            ``failed`` / ``yielded``) — the report is authoritative once
+            it lands, since the callstack runtime wrote it after seeing
+            the same envelope.
+
+        The ``raw_status`` strings are the lowercased ``task.status``
+        values from ``report.yaml``; the canonical mapping in
+        :mod:`unwind.status` translates them downstream.
+        """
+        canonical = _from_raw_status(raw_status)
+        if canonical not in ("live", None):
+            return raw_status, report_ended_at
+        scan = self._scan_for(child_sid)
+        if scan is None or scan.last_envelope_kind is None:
+            return raw_status, report_ended_at
+        new_status = (
+            "complete" if scan.last_envelope_kind == "return" else "yielded"
+        )
+        return new_status, scan.last_envelope_ts or report_ended_at
 
     def _fork_birth(self, fork_sid: str) -> Optional[datetime]:
         """Birth timestamp of the fork's JSONL."""

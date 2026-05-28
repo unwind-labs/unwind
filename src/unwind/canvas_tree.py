@@ -123,6 +123,21 @@ class WindowNode:
     subtree_usage: dict[str, int] = field(default_factory=_zero_tokens)
     self_cost: dict[str, float] = field(default_factory=_zero_costs)
     subtree_cost: dict[str, float] = field(default_factory=_zero_costs)
+    # Extra parent → child edges sourced from ``await_call`` tool_uses in
+    # THIS window's session. An ``await_call`` references an already-
+    # running invocation by ``invoke_id`` instead of spawning a new
+    # child; the canvas still needs an edge from the await row's right-
+    # side handle to the original child window so the relationship is
+    # visible. The standard ``parent_window_id`` edge (one per child
+    # window) only anchors to the originating ``call`` row's handle —
+    # without these, the await row's handle has no incoming edge and
+    # the connection looks broken. Each entry:
+    #   ``parent_tool_use_id`` — the await_call tool_use's id; the
+    #     frontend assembles the source handle id from it.
+    #   ``target_window_id``  — the child window the await refers to
+    #     (resolved by matching the await's ``invoke_id`` against the
+    #     ``Invocation`` chain).
+    follower_edges: list[dict[str, str]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -142,6 +157,7 @@ class WindowNode:
             "subtree_usage": self.subtree_usage,
             "self_cost": self.self_cost,
             "subtree_cost": self.subtree_cost,
+            "follower_edges": list(self.follower_edges),
             "children": [c.to_dict() for c in self.children],
         }
 
@@ -516,30 +532,42 @@ def build_canvas_tree(
     # primary sort key. Fall back to ``window_start`` for parents
     # without a JSONL (subagent leaves) or when the resolver isn't
     # plumbed through.
-    display_order_cache: dict[str, dict[str, int]] = {}
+    # Per-parent cached read of the parent's annotated message stream.
+    # Two consumers below share the same read: ``child_display_order``
+    # (for child sort) and follower-edge extraction (for await_call →
+    # already-running-invocation edges that the standard parent_window
+    # wiring doesn't cover).
+    parent_msgs_cache: dict[str, Optional[list[Any]]] = {}
 
-    def _display_order_for(parent_sid: str) -> dict[str, int]:
-        if parent_sid in display_order_cache:
-            return display_order_cache[parent_sid]
-        order: dict[str, int] = {}
+    def _annotated_messages_for(parent_sid: str) -> Optional[list[Any]]:
+        if parent_sid in parent_msgs_cache:
+            return parent_msgs_cache[parent_sid]
         path = project_dir / f"{parent_sid}.jsonl"
+        msgs: Optional[list[Any]] = None
         if path.is_file():
-            from .messages import read_messages
+            from .messages import annotate_spawns, read_messages
 
-            # Narrow exception scope: the only realistic failure here is
-            # the filesystem read; if ``child_display_order`` raises,
-            # that's a bug we want to surface, not silently fall back to
-            # an empty order.
             try:
                 page = read_messages(path)
             except OSError:
                 page = None
             if page is not None:
-                order = spawn_resolver.child_display_order(
-                    parent_sid, page.messages
+                # Mutates each tool_use to set ``spawn_is_follower`` /
+                # ``spawn_session_ids``; we read those flags below.
+                annotate_spawns(
+                    page.messages,
+                    current_session_id=parent_sid,
+                    spawn_resolver=spawn_resolver,
                 )
-        display_order_cache[parent_sid] = order
-        return order
+                msgs = page.messages
+        parent_msgs_cache[parent_sid] = msgs
+        return msgs
+
+    def _display_order_for(parent_sid: str) -> dict[str, int]:
+        msgs = _annotated_messages_for(parent_sid)
+        if msgs is None:
+            return {}
+        return spawn_resolver.child_display_order(parent_sid, msgs)
 
     for w in all_windows:
         if not w.children:
@@ -551,6 +579,42 @@ def build_canvas_tree(
                 c.window_start or EPOCH,
             )
         )
+
+    # Follower-edge population: for every window whose session emits
+    # ``await_call`` tool_uses, resolve each await's invoke_id to the
+    # specific child window it polls (K-th invocation → K-th window of
+    # the target session) and attach a ``follower_edge`` so the
+    # frontend can draw an edge from the await row's handle to that
+    # window. Done after children are wired so we have a stable
+    # ``windows_by_session`` to look up targets in.
+    for w in all_windows:
+        msgs = _annotated_messages_for(w.session_id)
+        if not msgs:
+            continue
+        for m in msgs:
+            if getattr(m, "role", None) != "tool_use":
+                continue
+            if not getattr(m, "spawn_is_follower", False):
+                continue
+            tu_id = getattr(m, "tool_use_id", None)
+            child_sids = getattr(m, "spawn_session_ids", None) or []
+            if not tu_id or not child_sids:
+                continue
+            target_sid = child_sids[0]
+            # Pick the specific window: match by invoke_id when we can
+            # (yield/resume chains have multiple windows for one sid);
+            # fall back to the first window otherwise.
+            target_win = _resolve_follower_target_window(
+                m, target_sid, invocations_by_target, windows_by_session
+            )
+            if target_win is None:
+                continue
+            w.follower_edges.append(
+                {
+                    "parent_tool_use_id": tu_id,
+                    "target_window_id": target_win.window_id,
+                }
+            )
 
     # Root window is index 0 of root_session_id (root sessions always
     # get a single window — see _compute_windows). When the root session
@@ -578,6 +642,35 @@ def build_canvas_tree(
     # recursion sees the full descendant set.
     _finalize_subtree(root)
     return root, all_windows
+
+
+def _resolve_follower_target_window(
+    follower_msg: Any,
+    target_sid: str,
+    invocations_by_target: dict[str, list["Invocation"]],
+    windows_by_session: dict[str, list[WindowNode]],
+) -> Optional[WindowNode]:
+    """Pick the child window an ``await_call`` follower row points at.
+
+    A child session has K windows (one per invocation: initial + K-1
+    resumes). The await refers to the specific invocation matching its
+    ``invoke_id``. Match by invoke_id when possible; fall back to the
+    first window when the message doesn't carry a usable invoke_id
+    (the K=1 case, which is the overwhelming majority).
+    """
+    target_windows = windows_by_session.get(target_sid) or []
+    if not target_windows:
+        return None
+    # Prefer the exact invocation match when the message carries an
+    # invoke_id (tool_input.invoke_id or echoed in tool_result).
+    from .messages import _invoke_id_for_await
+    invoke_id = _invoke_id_for_await(follower_msg)
+    if invoke_id:
+        invs = invocations_by_target.get(target_sid) or []
+        for k, inv in enumerate(invs):
+            if inv.invoke_id == invoke_id and k < len(target_windows):
+                return target_windows[k]
+    return target_windows[0]
 
 
 def _short_session_label(sid: str) -> str:

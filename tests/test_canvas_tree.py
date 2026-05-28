@@ -967,3 +967,141 @@ def test_builder_caches_scans_until_mtime_changes(tmp_path: Path):
         )
     s3 = builder.get_scan(sid)
     assert s3 is not s1
+
+
+# --- follower edges (await_call) -----------------------------------------
+
+
+def test_await_call_emits_follower_edge_to_call_target_window(tmp_path: Path):
+    """``await_call`` rows in the parent must surface as a ``follower_edge``
+    on the parent window so the frontend can draw the connection.
+
+    Without this, only the originating ``call`` row's right-edge handle
+    has an incoming edge — the await row renders with no connection at
+    all (its handle id duplicates the call row's, so ReactFlow attaches
+    the single edge to whichever handle it finds first, leaving the
+    other orphaned).
+    """
+    proj = tmp_path / "proj"
+    # ROOT's JSONL: a backgrounded ``call`` + a later ``await_call``
+    # polling the same invoke_id.
+    parent_records = [
+        _user("ROOT", "2026-05-04T10:00:00Z"),
+        {
+            "type": "assistant",
+            "uuid": "a1",
+            "sessionId": "ROOT",
+            "timestamp": "2026-05-04T10:00:01.000Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "tu-call",
+                        "name": "mcp__plugin_callstack_call__call",
+                        "input": {
+                            "tasks": ["/bg"],
+                            "run_in_background": True,
+                        },
+                    }
+                ],
+            },
+        },
+        {
+            "type": "user",
+            "uuid": "u1",
+            "sessionId": "ROOT",
+            "timestamp": "2026-05-04T10:00:02.000Z",
+            "message": {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "tu-call",
+                        "content": (
+                            '{"invoke_id": "i-bg4",'
+                            ' "report_path": "/tmp/r",'
+                            ' "status": "started"}'
+                        ),
+                    }
+                ],
+            },
+        },
+        {
+            "type": "assistant",
+            "uuid": "a2",
+            "sessionId": "ROOT",
+            "timestamp": "2026-05-04T10:05:00.000Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "tu-await",
+                        "name": "mcp__plugin_callstack_call__await_call",
+                        "input": {"invoke_id": "i-bg4", "timeout": 60},
+                    }
+                ],
+            },
+        },
+    ]
+    _write_session(proj, "ROOT", parent_records)
+    _write_session(proj, "CHILD", [_user("CHILD", "2026-05-04T10:00:03Z")])
+    log = tmp_path / "log"
+    _write_report(
+        log,
+        "i-bg4",
+        parent_sid="ROOT",
+        started_at="2026-05-04T10:00:02+00:00",
+        ended_at="2026-05-04T10:00:30+00:00",
+        tasks=[
+            {
+                "task": "/bg",
+                "status": "complete",
+                "depth": 1,
+                "session_id": "CHILD",
+            }
+        ],
+    )
+    ci = CallstackIndex(log)
+    root, _all = build_canvas_tree(proj, "ROOT", spawn_resolver=_resolver(proj, ci))
+
+    # The originating ``call`` is still wired via parent_window_id —
+    # we don't move it into follower_edges. Only the await_call shows up.
+    assert len(root.children) == 1
+    child = root.children[0]
+    assert child.session_id == "CHILD"
+
+    # And the await_call is published as a follower edge pointing at
+    # that same child window.
+    assert root.follower_edges == [
+        {"parent_tool_use_id": "tu-await", "target_window_id": child.window_id}
+    ]
+
+
+def test_no_follower_edge_when_no_await_call(tmp_path: Path):
+    """A vanilla synchronous ``call`` (no await_call follower) must not
+    emit any follower_edge — that would over-draw the canvas.
+    """
+    proj = tmp_path / "proj"
+    _write_session(proj, "MAIN", [_user("MAIN", "2026-05-04T10:00:00Z")])
+    _write_session(proj, "CHILD", [_user("CHILD", "2026-05-04T10:00:01Z")])
+    log = tmp_path / "log"
+    _write_report(
+        log,
+        "i-sync",
+        parent_sid="MAIN",
+        started_at="2026-05-04T10:00:01+00:00",
+        ended_at="2026-05-04T10:00:05+00:00",
+        tasks=[
+            {
+                "task": "/task-x",
+                "status": "complete",
+                "depth": 1,
+                "session_id": "CHILD",
+            }
+        ],
+    )
+    ci = CallstackIndex(log)
+    root, _all = build_canvas_tree(proj, "MAIN", spawn_resolver=_resolver(proj, ci))
+    assert root.follower_edges == []

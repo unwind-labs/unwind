@@ -18,7 +18,10 @@ from pathlib import Path
 from typing import Any, Iterable, Literal, Optional
 
 from .jsonl import parse_ts as _parse_ts, read_records
+from .jsonl import stringify_tool_result as _stringify_result
 from .spawns import (
+    _INVOKE_ID_RE,
+    CALLSTACK_AWAITING_TOOL_NAMES,
     CALLSTACK_TOOL_NAMES,
     SUBAGENT_TOOL_NAMES,
     CallSpawn,
@@ -88,6 +91,14 @@ class Message:
     # renders per spawn row. Only meaningful when ``spawn_kind == "call"``;
     # subagent rows fill with "fork" by convention and ignore the field.
     spawn_call_types: list[str] = field(default_factory=list)
+    # True when this tool_use *references* an already-running invocation
+    # instead of *spawning* a new one — i.e. ``await_call`` polling a
+    # background ``call``'s invoke_id. The row still renders as a CALL
+    # row anchored to the same child, but the canvas-window assignment
+    # in the frontend must PEEK an existing window rather than POPPING
+    # (the originating ``call`` already claimed the only window for
+    # this child; popping again would leave the await row unanchored).
+    spawn_is_follower: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
@@ -149,31 +160,89 @@ def annotate_spawns(
 
     spawns = resolver.anchor_to_messages(current_session_id, messages)
     spawns_by_tu: dict[str, list[Spawn]] = {}
+    # Side-channel for ``await_call`` decoration: a CallSpawn appears here
+    # under EVERY invoke_id it carries (the originating ``call`` was
+    # already bound to its tool_use; ``await_call`` rows reference the
+    # SAME spawn by invoke_id without claiming it). Built once, reused
+    # per await_call message below.
+    callspawns_by_invoke: dict[str, list[CallSpawn]] = {}
     for s in spawns:
         if s.parent_tool_use_id:
             spawns_by_tu.setdefault(s.parent_tool_use_id, []).append(s)
+        if isinstance(s, CallSpawn) and s.invoke_id:
+            callspawns_by_invoke.setdefault(s.invoke_id, []).append(s)
 
     for m in messages:
         if m.role != "tool_use" or not m.tool_use_id:
             continue
         bound = spawns_by_tu.get(m.tool_use_id)
         if not bound:
+            # await_call doesn't claim a spawn (the originating `call`
+            # owns parent_tool_use_id), so it never appears in spawns_by_tu.
+            # Decorate it by invoke_id instead — same children, same
+            # status, so the row shows the running/done child node and
+            # the UI can drill into it from either tool_use.
+            if (m.tool_name or "") in CALLSTACK_AWAITING_TOOL_NAMES:
+                invoke_id = _invoke_id_for_await(m)
+                if invoke_id:
+                    follow = callspawns_by_invoke.get(invoke_id)
+                    if follow:
+                        # CallSpawn is a subtype of Spawn; widen for the
+                        # invariant list parameter.
+                        _decorate_with_spawns(
+                            m, list(follow), slug_callstack
+                        )
+                        # Flag so the frontend's window-assignment peeks
+                        # rather than popping (would steal the original
+                        # call row's canvas anchor and leave the await
+                        # row showing no node).
+                        m.spawn_is_follower = True
             continue
-        # All bound spawns for one tool_use share the same kind
-        # (callstack tool_uses bind to call-spawns; Agent tool_uses bind
-        # to subagent-spawns). Take the first.
-        m.spawn_kind = bound[0].kind
-        m.spawn_session_ids = [s.child_session_id for s in bound]
-        m.spawn_tasks = [s.label for s in bound]
-        # call_type is only meaningful for CallSpawn; subagent rows
-        # default to "fork" (UI ignores call_type for subagent kind).
-        m.spawn_call_types = [
-            s.call_type if isinstance(s, CallSpawn) else "fork" for s in bound
-        ]
-        # Prefer the LATEST known status across all reports for callstack
-        # spawns — covers the "original call yielded, later resume
-        # completed" case where the spawn's snapshot status is stale.
-        m.spawn_done = [_done_for_spawn(s, slug_callstack) for s in bound]
+        _decorate_with_spawns(m, bound, slug_callstack)
+
+
+def _decorate_with_spawns(
+    m: Message, bound: list[Spawn], slug_callstack
+) -> None:
+    """Populate a tool_use message's spawn_* fields from a list of Spawns.
+
+    Factored out so ``await_call`` rows (decorated via invoke_id without
+    claiming the spawn) share the same projection as ``call``/Agent rows
+    (bound via parent_tool_use_id).
+    """
+    # All bound spawns for one tool_use share the same kind
+    # (callstack tool_uses bind to call-spawns; Agent tool_uses bind
+    # to subagent-spawns). Take the first.
+    m.spawn_kind = bound[0].kind
+    m.spawn_session_ids = [s.child_session_id for s in bound]
+    m.spawn_tasks = [s.label for s in bound]
+    # call_type is only meaningful for CallSpawn; subagent rows
+    # default to "fork" (UI ignores call_type for subagent kind).
+    m.spawn_call_types = [
+        s.call_type if isinstance(s, CallSpawn) else "fork" for s in bound
+    ]
+    # Prefer the LATEST known status across all reports for callstack
+    # spawns — covers the "original call yielded, later resume
+    # completed" case where the spawn's snapshot status is stale.
+    m.spawn_done = [_done_for_spawn(s, slug_callstack) for s in bound]
+
+
+def _invoke_id_for_await(m: Message) -> Optional[str]:
+    """Extract the invoke_id an ``await_call`` tool_use refers to.
+
+    Read from tool_input first (always present — it's the required
+    parameter); fall back to the result envelope for paranoia /
+    historical envelopes where the input wasn't captured.
+    """
+    ti = m.tool_input
+    if isinstance(ti, dict):
+        v = ti.get("invoke_id")
+        if isinstance(v, str) and v:
+            return v
+    # tool_result envelope carries it too — same regex the invoke index uses.
+    text = _stringify_result(m.tool_result)
+    mt = _INVOKE_ID_RE.search(text)
+    return mt.group(1) if mt else None
 
 
 def _done_for_spawn(s: Spawn, slug_callstack) -> Optional[bool]:
@@ -182,10 +251,21 @@ def _done_for_spawn(s: Spawn, slug_callstack) -> Optional[bool]:
     For callstack spawns, prefer the LATEST aggregated status across
     all reports (handles the "original yielded → resume completed"
     case). Falls back to the spawn's snapshot status.
+
+    Asymmetry: we only escalate to ``aggregate_status_for_session``
+    when the spawn's OWN status is non-terminal. Once the spawn knows
+    its own terminal verdict (e.g. Fix A overrode ``running`` →
+    ``complete`` from the child JSONL's ``op:return``), trusting the
+    aggregate would flip it BACK to ``live`` for backgrounded calls
+    whose ``report.yaml`` is still frozen at ``running``. A returned
+    or failed callstack invocation cannot have a genuinely live
+    descendant — same invariant the terminal-ancestor wall enforces
+    in ``CallstackIndex.aggregate_status_for_session`` itself.
     """
     canonical = _from_raw_status(s.status)
     if (
-        isinstance(s, CallSpawn)
+        canonical not in ("done", "yield", "failed")
+        and isinstance(s, CallSpawn)
         and s.child_session_id
         and slug_callstack is not None
     ):

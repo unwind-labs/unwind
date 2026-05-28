@@ -1,6 +1,7 @@
 """Session endpoints: list sessions, get messages."""
 from __future__ import annotations
 
+import time
 from datetime import datetime
 from typing import Optional
 
@@ -13,7 +14,7 @@ import json as _json
 from ..canvas_tree import build_canvas_tree
 from ..jsonl import collect_uuids
 from ..messages import annotate_spawns, base_uuid, read_messages
-from ..processes import project_activity, session_status
+from ..processes import LIVE_MTIME_WINDOW_SEC, project_activity
 from ..registry import (
     callstack_for_slug,
     canvas_tree_builder_for_slug,
@@ -235,21 +236,50 @@ def _active_session_for_project(
     return most_recent.session_id
 
 
-def _fork_task_still_running(ci, builder, sid: str) -> bool:
+def _fork_task_still_running(
+    ci, builder, sid: str, project_path: Optional[str] = None
+) -> bool:
     """True iff ``sid`` is a callstack fork-task whose callstack status
     is ``running``/``in_progress`` AND whose JSONL doesn't yet end in a
-    RETURN envelope.
+    RETURN envelope AND the project still has a live claude process
+    (or the JSONL was touched within the live-mtime window).
 
-    The JSONL check guards against stale ``running`` entries in
-    ``report.yaml``: the callstack runtime sometimes fails to update the
-    report after the child returns, leaving the task perpetually marked
-    as running. The child's JSONL tail is the corrective signal.
+    Three independent guards against a perpetually-``running`` report:
+
+    1. **JSONL terminal envelope** — the callstack runtime sometimes
+       fails to update the report after the child returns, leaving the
+       task marked ``running`` even though its JSONL ends in
+       ``{"op":"return"}``. The tail check corrects that.
+    2. **Process liveness** — if every ``claude`` process for this
+       project has exited and the fork's JSONL hasn't been touched
+       within ``LIVE_MTIME_WINDOW_SEC``, the fork cannot still be
+       running, regardless of what its report says. Catches the case
+       where claude was killed mid-MCP-call (no return envelope ever
+       written) and the tree would otherwise stay amber forever.
+    3. ``project_path is None`` skips the process gate — happens when
+       we're scanning a Claude-Code project dir that no longer maps to
+       a real cwd; fall back to report+JSONL signals only.
+
+    Mirrors :func:`unwind.processes.session_status`'s main-session
+    bridge (process up OR mtime recent → live) so forks and main
+    sessions agree on what "alive" means.
     """
     if not ci.has_logs or not ci.is_callstack_task(sid):
         return False
     if ci.aggregate_status_for_session(sid) != "live":
         return False
-    return not builder.get_scan(sid).has_returned
+    scan = builder.get_scan(sid)
+    if scan.has_returned:
+        return False
+    if project_path is not None and not project_activity(
+        project_path
+    ).claude_running:
+        # No claude is running here — only call this fork live if its
+        # JSONL was just touched (bridges the race where the process
+        # appears moments after writing a record).
+        if scan.mtime <= 0 or (time.time() - scan.mtime) >= LIVE_MTIME_WINDOW_SEC:
+            return False
+    return True
 
 
 def _compute_session_status(
@@ -281,7 +311,11 @@ def _compute_session_status(
         if cs_status == "yield":
             return "yield"
         builder = _rs_builder(rs, slug)
-        return "live" if _fork_task_still_running(ci, builder, session_id) else "done"
+        return (
+            "live"
+            if _fork_task_still_running(ci, builder, session_id, project_path)
+            else "done"
+        )
 
     # Non-fork "main" session: alive only if it's THE active session
     # for this project. ``last_epoch`` is the timestamp from the last
@@ -534,7 +568,7 @@ def get_canvas_tree(
         # their own "still running" check — shared with
         # ``_compute_session_status`` so the two surfaces agree.
         return sid == active_session_id or _fork_task_still_running(
-            ci, builder, sid
+            ci, builder, sid, project_path
         )
 
     def title_for(sid: str) -> Optional[str]:

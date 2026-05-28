@@ -492,6 +492,92 @@ def test_canvas_returned_fork_child_window_is_done_despite_stale_report(app_clie
     assert child_windows[-1]["status"] == "done", child_windows[-1]
 
 
+def test_canvas_killed_fork_with_stale_running_report_is_done(app_client):
+    """Regression: a fork tree killed mid-MCP-call (no RETURN envelope
+    in any child's JSONL, every node in ``report.yaml`` still
+    ``running``) must NOT show as live forever.
+
+    The user's "I killed all claude processes but the tree is still
+    showing in progress" case: ``report.yaml`` is frozen at ``running``,
+    the JSONL tail is a ``tool_result`` error (no return envelope), but
+    no claude process is alive for this project's cwd. The fork-task
+    liveness check must consult ``project_activity`` and downgrade.
+    """
+    import yaml
+
+    client, home, projects_mod, _ = app_client
+
+    real_cwd = home.parent / "work" / "killed-fork-proj"
+    real_cwd.mkdir(parents=True)
+    slug = projects_mod.slug_for(real_cwd)
+
+    main_sid = "55555555-cccc-dddd-eeee-555555555555"
+    child_sid = "66666666-cccc-dddd-eeee-666666666666"
+
+    proj_dir = home / ".claude" / "projects" / slug
+    _write_session(
+        proj_dir,
+        main_sid,
+        [{
+            "uuid": "u-1",
+            "type": "user",
+            "sessionId": main_sid,
+            "timestamp": "2026-05-03T19:00:00.000Z",
+            "message": {"role": "user", "content": "hi"},
+            "cwd": str(real_cwd),
+        }],
+    )
+    # Child JSONL: no RETURN envelope — claude was killed mid-flight.
+    _write_session(
+        proj_dir,
+        child_sid,
+        [{
+            "uuid": "u-2",
+            "type": "user",
+            "sessionId": child_sid,
+            "timestamp": "2026-05-03T19:00:00.000Z",
+            "message": {"role": "user", "content": "go"},
+            "cwd": str(real_cwd),
+        }],
+    )
+    # Backdate the child's JSONL past the live-mtime window so the
+    # "process up OR mtime recent" bridge fails on both legs. No live
+    # claude for this cwd (none of the test processes claim it) + stale
+    # mtime → fork must be ``done``.
+    old = 1_700_000_000.0  # well past LIVE_MTIME_WINDOW_SEC ago
+    os.utime(proj_dir / f"{child_sid}.jsonl", (old, old))
+
+    cs_log = real_cwd / ".claude" / "callstack" / "log" / "20260503T190000-z"
+    cs_log.mkdir(parents=True)
+    (cs_log / "report.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "invoke_id": "20260503T190000-z",
+                "parent_session": main_sid,
+                "status": "mixed",
+                "tasks": [
+                    {
+                        "task": "Execute Phase 3",
+                        "status": "running",
+                        "depth": 1,
+                        "session_id": child_sid,
+                    }
+                ],
+            }
+        )
+    )
+
+    resp = client.get(f"/api/projects/{slug}/sessions/{main_sid}/canvas")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+
+    child_windows = [w for w in body["all_windows"] if w["session_id"] == child_sid]
+    assert child_windows, f"no window for child {child_sid} in {body}"
+    # Process-liveness gate forces the verdict to ``done`` despite the
+    # stale ``running`` report and absent RETURN envelope.
+    assert child_windows[-1]["status"] == "done", child_windows[-1]
+
+
 def test_messages_since_uuid_returns_only_delta(app_client):
     """``GET /messages?since_uuid=<u>`` returns messages that landed after
     the record with that uuid. ``file_offset`` and ``last_uuid`` continue

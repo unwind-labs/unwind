@@ -7,6 +7,7 @@ import {
   CheckCircle2,
   ChevronRight,
   CornerDownLeft,
+  Hourglass,
   Leaf,
   Telescope,
   Trees,
@@ -341,12 +342,30 @@ export function CompactCardNode({ data }: { data: CompactCardData }) {
             // override, every default-source edge would stack on the
             // first row. The popped window_id is also reused as the
             // focus target when the user clicks the row.
-            const targetWindowId = takeMatchingChild(rowChildAssign, r.childId);
+            //
+            // Follower rows (``await_call`` referencing an already-
+            // running invocation) do NOT claim a window here. The
+            // originating ``call`` row already drained the queue, and
+            // sharing its handle id would collapse two ReactFlow
+            // handles into one — the edge would attach to whichever
+            // the DOM renders first. Instead the follower keeps its
+            // OWN unique handle (``row.handleId``); the canvas tree
+            // publishes a separate ``follower_edges`` entry that
+            // CanvasPane uses to draw the connection. The click-focus
+            // target is still the matching child window so the row is
+            // navigable; we just peek without popping.
+            const targetWindowId = r.isFollower
+              ? peekFirstMatchingChild(data.canvasChildren ?? [], r.childId)
+              : takeMatchingChild(rowChildAssign, r.childId);
+            // The follower row keeps its own handle id so CanvasPane's
+            // separate follower edge can anchor to it. ``targetWindowId``
+            // is still used as the click-to-focus destination below.
+            const handleOverride = r.isFollower ? undefined : targetWindowId;
             return (
               <SpawnRowDisplay
                 key={i}
                 row={r}
-                handleIdOverride={targetWindowId}
+                handleIdOverride={handleOverride}
                 onFocus={
                   targetWindowId && data.onFocusChild
                     ? () => data.onFocusChild!(targetWindowId)
@@ -457,6 +476,19 @@ function takeMatchingChild(
   return queue.shift();
 }
 
+/** Non-destructive lookup for follower rows (``await_call``) — returns
+ *  the FIRST window_id in the canvas-children list whose session_id
+ *  matches ``childId``. Reads from the static snapshot, never the
+ *  pop-mutated pool, so it works even after the originating ``call``
+ *  row has already drained the queue. */
+function peekFirstMatchingChild(
+  canvasChildren: ReadonlyArray<{ window_id: string; session_id: string }>,
+  childId: string | null | undefined,
+): string | undefined {
+  if (!childId) return undefined;
+  return canvasChildren.find((c) => c.session_id === childId)?.window_id;
+}
+
 function SpawnRowDisplay({
   row,
   handleIdOverride,
@@ -473,45 +505,58 @@ function SpawnRowDisplay({
   // same project), fresh_cross_project (isolated, different project).
   const isFresh = isCall && row.callType === "fresh";
   const isFreshCross = isCall && row.callType === "fresh_cross_project";
-  // Resume rows ("CONTINUED") get the amber treatment — same yellow
-  // we use for yielded windows, since each resume line was waiting on
-  // the user before it ran.
-  const accentText = row.isResume
-    ? "text-amber-300"
-    : isFreshCross
-      ? "text-teal-300"
-      : isFresh
-        ? "text-emerald-300"
-        : isCall
-          ? "text-sky-300"
-          : "text-violet-300";
-  const accentBg = row.isResume
-    ? "bg-amber-500/5"
-    : isFreshCross
-      ? "bg-teal-950/40"
-      : isFresh
-        ? "bg-emerald-950/40"
-        : isCall
-          ? "bg-sky-950/40"
-          : "bg-violet-950/40";
-  const accentBorder = row.isResume
-    ? "border-amber-500/50"
-    : isFreshCross
-      ? "border-teal-500/50"
-      : isFresh
-        ? "border-emerald-500/50"
-        : isCall
-          ? "border-sky-500/50"
-          : "border-violet-500/50";
-  const badgeBorderText = row.isResume
-    ? "border-amber-500/40 text-amber-300"
-    : isFreshCross
-      ? "border-teal-500/40 text-teal-300"
-      : isFresh
-        ? "border-emerald-500/40 text-emerald-300"
-        : isCall
-          ? "border-sky-500/40 text-sky-300"
-          : "border-violet-500/40 text-violet-300";
+  // ``await_call`` rows reference an already-running invocation by
+  // invoke_id; visually they read as a lightweight pointer to the
+  // child rather than fresh work. We keep the sky color family (since
+  // they're paired with a CALL row) but drop the filled background
+  // and leave only the left border, so the original CALL row stays
+  // visually dominant. ``isFollower`` is checked BEFORE ``isResume``
+  // because a single tool_use can't be both, but the order keeps the
+  // condition tree readable: follower > resume > variant > default.
+  const accentText = row.isFollower
+    ? "text-sky-300"
+    : row.isResume
+      ? "text-amber-300"
+      : isFreshCross
+        ? "text-teal-300"
+        : isFresh
+          ? "text-emerald-300"
+          : isCall
+            ? "text-sky-300"
+            : "text-violet-300";
+  const accentBg = row.isFollower
+    ? "bg-transparent"
+    : row.isResume
+      ? "bg-amber-500/5"
+      : isFreshCross
+        ? "bg-teal-950/40"
+        : isFresh
+          ? "bg-emerald-950/40"
+          : isCall
+            ? "bg-sky-950/40"
+            : "bg-violet-950/40";
+  const accentBorder = row.isFollower
+    ? "border-sky-500/50"
+    : row.isResume
+      ? "border-amber-500/50"
+      : isFreshCross
+        ? "border-teal-500/50"
+        : isFresh
+          ? "border-emerald-500/50"
+          : isCall
+            ? "border-sky-500/50"
+            : "border-violet-500/50";
+  const badgeBorderText = row.isFollower
+    ? "border-sky-500/40 text-sky-300"
+    : row.isResume
+      ? "border-amber-500/40 text-amber-300"
+      : isFreshCross
+        ? "border-teal-500/40 text-teal-300"
+        : isFresh
+          ? "border-emerald-500/40 text-emerald-300"
+          : isCall
+            ? "border-sky-500/40 text-sky-300"
+            : "border-violet-500/40 text-violet-300";
 
   return (
     <li
@@ -526,15 +571,17 @@ function SpawnRowDisplay({
         // ``overflow-hidden`` (an outward ring would be clipped).
         onFocus && "cursor-pointer hover:ring-2 hover:ring-inset",
         onFocus &&
-          (row.isResume
-            ? "hover:bg-amber-500/15 hover:ring-amber-400/70"
-            : isFreshCross
-              ? "hover:bg-teal-900/60 hover:ring-teal-400/70"
-              : isFresh
-                ? "hover:bg-emerald-900/60 hover:ring-emerald-400/70"
-                : isCall
-                  ? "hover:bg-sky-900/60 hover:ring-sky-400/70"
-                  : "hover:bg-violet-900/60 hover:ring-violet-400/70"),
+          (row.isFollower
+            ? "hover:bg-sky-900/30 hover:ring-sky-400/70"
+            : row.isResume
+              ? "hover:bg-amber-500/15 hover:ring-amber-400/70"
+              : isFreshCross
+                ? "hover:bg-teal-900/60 hover:ring-teal-400/70"
+                : isFresh
+                  ? "hover:bg-emerald-900/60 hover:ring-emerald-400/70"
+                  : isCall
+                    ? "hover:bg-sky-900/60 hover:ring-sky-400/70"
+                    : "hover:bg-violet-900/60 hover:ring-violet-400/70"),
       )}
       style={{ height: SPAWN_HEIGHT - 4 }}
       onClick={
@@ -546,7 +593,9 @@ function SpawnRowDisplay({
           : undefined
       }
     >
-      {!isCall ? (
+      {row.isFollower ? (
+        <Hourglass className={cn("h-3 w-3", accentText)} />
+      ) : !isCall ? (
         <Sparkles className={cn("h-3 w-3", accentText)} />
       ) : isFreshCross ? (
         <Trees className={cn("h-3 w-3", accentText)} />
@@ -556,15 +605,17 @@ function SpawnRowDisplay({
         <GitFork className={cn("h-3 w-3", accentText)} />
       )}
       <Badge variant="outline" className={cn("border text-[9px] uppercase", badgeBorderText)}>
-        {row.isResume
-          ? "continued"
-          : !isCall
-            ? "subagent"
-            : isFreshCross
-              ? "fresh @ other"
-              : isFresh
-                ? "fresh"
-                : "call"}
+        {row.isFollower
+          ? "await"
+          : row.isResume
+            ? "continued"
+            : !isCall
+              ? "subagent"
+              : isFreshCross
+                ? "fresh @ other"
+                : isFresh
+                  ? "fresh"
+                  : "call"}
       </Badge>
       <span className="flex-1 truncate font-mono text-[11px] text-foreground" title={row.title}>
         {row.title}

@@ -78,6 +78,14 @@ export type Message = {
   // Unwind renders per spawn row. Older messages without this field fall
   // back to "fork" so the UI still renders.
   spawn_call_types?: CallType[];
+  // True when this tool_use *references* an already-running invocation
+  // (``await_call`` polling a background call's invoke_id) rather than
+  // spawning a new one. The window-assignment in CompactCard PEEKS the
+  // first matching canvas child for follower rows; the originating
+  // ``call`` row already popped the window, and a second pop would
+  // leave the await row anchored to nothing. Defaults to false on
+  // older messages so the existing single-row behaviour is unchanged.
+  spawn_is_follower?: boolean;
 };
 
 export type SpawnCardData = {
@@ -148,6 +156,14 @@ export type WindowNode = {
   /** USD cost for this window plus every descendant. The root card uses
    *  this for the ``$`` footer row + grand total. */
   subtree_cost: TokenCost;
+  /** Extra source → target window edges for ``await_call`` rows. The
+   *  standard ``parent_window_id`` edge anchors the originating
+   *  ``call`` row; a follower edge anchors the matching ``await_call``
+   *  row to the same child window so the connection is visible. The
+   *  frontend assembles the ReactFlow ``sourceHandle`` from
+   *  ``parent_tool_use_id``; ``target_window_id`` is the child window
+   *  the await polls (resolved server-side by ``invoke_id``). */
+  follower_edges: { parent_tool_use_id: string; target_window_id: string }[];
   children: WindowNode[];
 };
 
