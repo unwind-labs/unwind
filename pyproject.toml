@@ -4,7 +4,7 @@ build-backend = "poetry.core.masonry.api"
 
 [project]
 name = "unwind-labs"
-version = "0.4.0"
+version = "0.4.1"
 description = "Outside-in web observer for Claude Code sessions and callstack call trees"
 readme = "README.md"
 requires-python = ">=3.11"
