@@ -358,6 +358,38 @@ function CanvasInner({
       if (s.focusedPane !== "thread") return;
       if (s.detailOpen) return;
 
+      // Viewport controls: zoom (Cmd/Ctrl +/-/0, or bare =/-/0), fit (f),
+      // and pan (w/a/s/d). These drive the ReactFlow viewport directly and
+      // count as user interaction so AutoFit stops re-fitting afterward.
+      // `+`/`)`/`_` are the shifted forms of `=`/`0`/`-`, accepted so the
+      // shortcut works whether or not Shift is held alongside the modifier.
+      const isZoomIn = e.key === "=" || e.key === "+";
+      const isZoomOut = e.key === "-" || e.key === "_";
+      const isZoomReset = e.key === "0" || e.key === ")";
+      if (isZoomIn || isZoomOut || isZoomReset) {
+        e.preventDefault(); // stop the browser's own zoom when Cmd/Ctrl is held
+        userInteractedRef.current = true;
+        if (isZoomIn) reactFlow.zoomIn({ duration: 150 });
+        else if (isZoomOut) reactFlow.zoomOut({ duration: 150 });
+        else reactFlow.zoomTo(1, { duration: 150 });
+        return;
+      }
+      if (e.key === "f" && !e.metaKey && !e.ctrlKey) {
+        e.preventDefault();
+        userInteractedRef.current = true;
+        reactFlow.fitView({ padding: 0.2, maxZoom: 1.0, minZoom: 0.05, duration: 200 });
+        return;
+      }
+      const panX = e.key === "a" ? CANVAS_PAN_STEP : e.key === "d" ? -CANVAS_PAN_STEP : 0;
+      const panY = e.key === "w" ? CANVAS_PAN_STEP : e.key === "s" ? -CANVAS_PAN_STEP : 0;
+      if ((panX || panY) && !e.metaKey && !e.ctrlKey) {
+        e.preventDefault();
+        userInteractedRef.current = true;
+        const vp = reactFlow.getViewport();
+        reactFlow.setViewport({ x: vp.x + panX, y: vp.y + panY, zoom: vp.zoom }, { duration: 120 });
+        return;
+      }
+
       const isUp = e.key === "ArrowUp" || e.key === "k";
       const isDown = e.key === "ArrowDown" || e.key === "j";
       const isLeft = e.key === "ArrowLeft" || e.key === "h";
@@ -536,6 +568,8 @@ function AutoFit({
 // --- tree → ReactFlow nodes & edges ----------------------------------------
 
 const DEFAULT_NODE_HEIGHT = 220;
+// Screen-pixel step for w/a/s/d viewport panning.
+const CANVAS_PAN_STEP = 120;
 const MIN_COLUMN_GAP = 80;
 const SIBLING_GAP = 24;
 // Per-edge horizontal stripe spacing, mirrored in ``treeToReactFlow``.
