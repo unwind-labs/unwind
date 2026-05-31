@@ -15,7 +15,7 @@ from pydantic import BaseModel
 
 from ..jsonl import EPOCH
 from ..dialog import pick_folder
-from ..security import require_trusted_origin
+from ..security import require_same_or_missing_origin, require_trusted_origin
 from ..projects import claude_projects_root, slug_for
 from ..registry import (
     callstack_for_slug,
@@ -223,7 +223,7 @@ def get_default_project() -> DefaultProject:
 @router.get(
     "/projects/pick-folder-nonce",
     response_model=PickFolderNonce,
-    dependencies=[Depends(require_trusted_origin)],
+    dependencies=[Depends(require_same_or_missing_origin)],
 )
 def pick_folder_nonce() -> PickFolderNonce:
     """Issue a short-lived single-use token for the folder picker.

@@ -11,7 +11,7 @@ import ReactFlow, {
   useReactFlow,
 } from "reactflow";
 import "reactflow/dist/style.css";
-import { Download, X } from "lucide-react";
+import { Download, Keyboard, X } from "lucide-react";
 import { exportCanvasPng } from "@/panes/canvas-export";
 import { useUi } from "@/store/ui";
 import { isTypingTarget } from "@/lib/keyboard";
@@ -284,6 +284,23 @@ function CanvasInner({
     [reactFlow, rootSessionId],
   );
 
+  // Keyboard-shortcuts cheat sheet, toggled from the toolbar. Esc closes it —
+  // registered in the capture phase so it beats the canvas nav handler (which
+  // also acts on Esc) while the panel is open.
+  const [showShortcuts, setShowShortcuts] = useState(false);
+  useEffect(() => {
+    if (!showShortcuts) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        setShowShortcuts(false);
+      }
+    };
+    window.addEventListener("keydown", onKey, { capture: true });
+    return () => window.removeEventListener("keydown", onKey, { capture: true });
+  }, [showShortcuts]);
+
   // Pan + zoom helper, extracted so both the keydown handler and the
   // auto-focus effect (below) can reuse it.
   const FOCUS_ZOOM = 1;
@@ -463,7 +480,7 @@ function CanvasInner({
   }, [onOpenDetail, reactFlow, measuredHeights]);
 
   return (
-    <div className="h-full w-full">
+    <div className="relative h-full w-full">
       <ReactFlow
         // Force a fresh ReactFlow mount on every session switch. Without
         // this, the internal nodeInternals map carries over from the prior
@@ -497,6 +514,9 @@ function CanvasInner({
       >
         <Background variant={BackgroundVariant.Dots} gap={18} size={1} />
         <Controls showInteractive={false}>
+          <ControlButton onClick={() => setShowShortcuts((v) => !v)} title="Keyboard shortcuts">
+            <Keyboard />
+          </ControlButton>
           <ControlButton onClick={handleExportPng} title="Export canvas as PNG">
             <Download />
           </ControlButton>
@@ -509,6 +529,93 @@ function CanvasInner({
           programmaticMove={programmaticMoveRef}
         />
       </ReactFlow>
+      {showShortcuts ? <ShortcutsOverlay onClose={() => setShowShortcuts(false)} /> : null}
+    </div>
+  );
+}
+
+// --- keyboard shortcuts cheat sheet ----------------------------------------
+
+// Mirrors the bindings handled in CanvasInner's keydown effect (plus the
+// app-level ⌘/Ctrl+O). Update both together when adding a shortcut.
+const SHORTCUT_GROUPS: { title: string; rows: { keys: string[]; label: string }[] }[] = [
+  {
+    title: "Navigate",
+    rows: [
+      { keys: ["↑", "↓", "k", "j"], label: "Move between cards" },
+      { keys: ["←", "→", "h", "l"], label: "Parent / child card" },
+      { keys: ["Enter"], label: "Open card detail" },
+      { keys: ["Esc"], label: "Clear selection" },
+    ],
+  },
+  {
+    title: "View",
+    rows: [
+      { keys: ["=", "+"], label: "Zoom in" },
+      { keys: ["-"], label: "Zoom out" },
+      { keys: ["0"], label: "Reset zoom" },
+      { keys: ["f"], label: "Fit to view" },
+      { keys: ["w", "a", "s", "d"], label: "Pan" },
+    ],
+  },
+  {
+    title: "General",
+    rows: [
+      { keys: ["⌘/Ctrl", "O"], label: "Open folder" },
+      { keys: ["⇧", "⌘/Ctrl", "O"], label: "Browse projects" },
+    ],
+  },
+];
+
+function ShortcutsOverlay({ onClose }: { onClose: () => void }) {
+  return (
+    <div className="absolute inset-0 z-20 flex items-center justify-center" onClick={onClose}>
+      <div className="absolute inset-0 bg-background/40" />
+      <div
+        className="relative max-h-[85%] w-[320px] overflow-auto rounded-lg border border-border bg-card p-4 shadow-lg"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="mb-3 flex items-center justify-between">
+          <h2 className="flex items-center gap-1.5 text-xs font-medium text-foreground">
+            <Keyboard className="h-3.5 w-3.5" />
+            Keyboard shortcuts
+          </h2>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded p-0.5 text-muted-foreground hover:bg-accent/50 hover:text-foreground"
+            title="Close"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </div>
+        <div className="space-y-3">
+          {SHORTCUT_GROUPS.map((group) => (
+            <div key={group.title}>
+              <div className="mb-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                {group.title}
+              </div>
+              <div className="space-y-1">
+                {group.rows.map((row) => (
+                  <div key={row.label} className="flex items-center justify-between gap-2">
+                    <span className="text-[11px] text-foreground">{row.label}</span>
+                    <span className="flex flex-wrap justify-end gap-1">
+                      {row.keys.map((k) => (
+                        <kbd
+                          key={k}
+                          className="rounded border border-border bg-muted px-1 text-[10px] text-muted-foreground"
+                        >
+                          {k}
+                        </kbd>
+                      ))}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
     </div>
   );
 }

@@ -94,6 +94,17 @@ def is_origin_allowed(
     return origin in allowed_origins()
 
 
+def _enforce_origin(request: Request, *, allow_missing_origin: bool) -> None:
+    headers = request.headers
+    origin = headers.get("origin")
+    host = headers.get("host")
+    secure = request.url.scheme == "https"
+    if not is_origin_allowed(
+        origin, host, secure=secure, allow_missing_origin=allow_missing_origin
+    ):
+        raise HTTPException(status_code=403, detail="cross-origin request rejected")
+
+
 def require_trusted_origin(request: Request) -> None:
     """FastAPI dependency: 403 when a state-changing request is cross-origin.
 
@@ -102,14 +113,21 @@ def require_trusted_origin(request: Request) -> None:
     Missing Origin is treated as untrusted: a local non-browser process could
     otherwise bypass this guard.
     """
-    headers = request.headers
-    origin = headers.get("origin")
-    host = headers.get("host")
-    secure = request.url.scheme == "https"
-    if not is_origin_allowed(
-        origin, host, secure=secure, allow_missing_origin=False
-    ):
-        raise HTTPException(status_code=403, detail="cross-origin request rejected")
+    _enforce_origin(request, allow_missing_origin=False)
+
+
+def require_same_or_missing_origin(request: Request) -> None:
+    """FastAPI dependency for read-only endpoints that issue a CSRF token.
+
+    Browsers omit the Origin header on *same-origin* GET requests, so a
+    strict guard would 403 the very fetch that primes the folder picker
+    (this is exactly what broke ``GET /projects/pick-folder-nonce`` when the
+    UI is served same-origin). We therefore permit a missing Origin here but
+    still reject an *explicit* cross-origin one, so a foreign web page can't
+    grab a nonce. The actual state change (``POST /projects/pick-folder``)
+    stays strict and additionally requires the nonce.
+    """
+    _enforce_origin(request, allow_missing_origin=True)
 
 
 def auth_token() -> str | None:

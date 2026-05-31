@@ -40,8 +40,9 @@ export function App() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       // cmd/ctrl+O fires regardless of focus — matches the OS-wide convention
-      // for "Open…". We still skip it if a modifier-stacked variant (shift,
-      // alt) is active so we don't steal browser shortcuts like ⌘⇧O.
+      // for "Open…". Bare ⌘O opens the native folder picker; ⇧⌘O (handled
+      // just below) opens the known-projects browser. We require !altKey so
+      // alt-stacked variants still fall through to the browser.
       if (
         (e.metaKey || e.ctrlKey) &&
         !e.shiftKey &&
@@ -50,6 +51,15 @@ export function App() {
       ) {
         e.preventDefault();
         void openPicker();
+        return;
+      }
+      // Shift+cmd/ctrl+O opens the known-projects browser — mirrors the
+      // "open new folder" (⌘O) / "open from list" (⇧⌘O) convention. Only
+      // meaningful once a project is selected (the modal is gated on slug;
+      // with no slug the full-screen ProjectPicker is already shown).
+      if ((e.metaKey || e.ctrlKey) && e.shiftKey && !e.altKey && (e.key === "o" || e.key === "O")) {
+        e.preventDefault();
+        setShowBrowser(true);
         return;
       }
       if (isTypingTarget(e)) return;

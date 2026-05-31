@@ -56,12 +56,24 @@ def _pick_with_osascript(initial: Optional[str]) -> Optional[str]:
     osa = shutil.which("osascript")
     if not osa:
         return None
-    parts = ['choose folder with prompt "Pick a project folder"']
+    choose = 'choose folder with prompt "Pick a project folder"'
     if initial:
         safe = _escape_applescript_string(initial)
         # AppleScript needs a POSIX path coerced to an alias.
-        parts.append(f'default location (POSIX file "{safe}")')
-    script = f'POSIX path of ({" ".join(parts)})'
+        choose += f' default location (POSIX file "{safe}")'
+    # Present the dialog *inside* a System Events tell-block and ``activate``
+    # it. ``unwind serve`` runs as a background process with no UI activation
+    # policy, so a dialog it spawns directly opens without focus — behind the
+    # browser or on another Space — and looks to the user like nothing
+    # happened. System Events is a faceless app that can host the picker and
+    # be brought to the foreground, so the dialog reliably appears in front.
+    script = (
+        'tell application "System Events"\n'
+        "    activate\n"
+        f"    set chosenFolder to {choose}\n"
+        "end tell\n"
+        "POSIX path of chosenFolder"
+    )
     proc = subprocess.run(
         [osa, "-e", script],
         capture_output=True,
