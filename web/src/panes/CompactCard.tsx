@@ -230,6 +230,20 @@ export function CompactCardNode({ data }: { data: CompactCardData }) {
     ? data.sessionId.slice(6, 14)
     : shortId(data.sessionId);
 
+  // Model id off the most recent assistant message in THIS window — a
+  // window can mix models (a subagent dropping to haiku, a mid-session
+  // switch), so the current/last one is the most representative single
+  // value. ``null`` until messages resolve or for windows with no
+  // assistant turn (e.g. a pure-tool slice).
+  const modelId = useMemo(() => {
+    if (!windowed) return null;
+    for (let i = windowed.messages.length - 1; i >= 0; i--) {
+      if (windowed.messages[i].model) return windowed.messages[i].model;
+    }
+    return null;
+  }, [windowed]);
+  const modelShort = shortModelName(modelId);
+
   return (
     <div
       ref={cardRef}
@@ -334,7 +348,18 @@ export function CompactCardNode({ data }: { data: CompactCardData }) {
             ) : null}
             <div className="truncate text-[12px] font-medium text-foreground">{data.label}</div>
           </div>
-          <span className="font-mono text-[10px] text-muted-foreground/70">{shortSessionId}</span>
+          <div className="flex shrink-0 items-center gap-1.5">
+            <span className="font-mono text-[10px] text-muted-foreground/70">{shortSessionId}</span>
+            {modelShort ? (
+              <Badge
+                variant="outline"
+                className="border-border/60 px-1.5 py-0 text-[9px] font-medium normal-case tracking-normal text-muted-foreground/80"
+                title={modelId ?? undefined}
+              >
+                {modelShort}
+              </Badge>
+            ) : null}
+          </div>
         </header>
         <ul className="flex flex-col gap-1 p-3">
           {!messages && (
@@ -666,6 +691,21 @@ function SpawnRowStatusIcon({ status }: { status: Status | null }) {
   if (status === "yield") return <Hourglass className="h-4 w-4 text-amber-300" />;
   // live or null → still in flight.
   return <DotPulse />;
+}
+
+/** Condense a full model id to a glanceable ``family version`` label,
+ *  e.g. ``claude-opus-4-8`` → ``opus 4.8``, ``claude-3-5-sonnet-20241022``
+ *  → ``sonnet 3.5``. The first ``<major>-<minor>`` digit pair is the
+ *  version (works for both the new ``claude-<family>-<maj>-<min>`` scheme
+ *  and the older ``claude-<maj>-<min>-<family>`` one; a trailing date or
+ *  ``[1m]`` suffix is ignored). Returns ``null`` for unrecognised ids so
+ *  the badge simply doesn't render. */
+function shortModelName(model: string | null): string | null {
+  if (!model) return null;
+  const family = (["opus", "sonnet", "haiku"] as const).find((f) => model.includes(f));
+  if (!family) return null;
+  const version = model.match(/(\d+)-(\d+)/);
+  return version ? `${family} ${version[1]}.${version[2]}` : family;
 }
 
 function formatSpan(s: number): string {

@@ -75,6 +75,17 @@ export function TracePane({
 
   const scrollRef = useRef<HTMLDivElement>(null);
 
+  // Full model id for the header summary, read off the most recent
+  // assistant turn. Same useMessages cache key as the depth-0
+  // SessionTrace below, so this is a cache read, not a second fetch.
+  const { data: traceData } = useMessages(slug, sessionId, includeMeta);
+  const headerModel = useMemo(() => {
+    const msgs = traceData?.messages;
+    if (!msgs) return null;
+    for (let i = msgs.length - 1; i >= 0; i--) if (msgs[i].model) return msgs[i].model;
+    return null;
+  }, [traceData]);
+
   useEffect(() => {
     if (focusedPane !== "thread") return;
     const onKey = (e: KeyboardEvent) => {
@@ -124,6 +135,14 @@ export function TracePane({
           <div className="text-[11px] uppercase tracking-wider text-muted-foreground">trace</div>
           <div className="flex items-center gap-2 text-xs text-muted-foreground">
             <span className="font-mono">{sessionId}</span>
+            {headerModel ? (
+              <Badge
+                variant="outline"
+                className="border-border/60 font-mono text-[9px] normal-case text-muted-foreground"
+              >
+                {headerModel}
+              </Badge>
+            ) : null}
             {windowed ? (
               <Badge
                 variant="outline"
