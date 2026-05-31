@@ -442,6 +442,77 @@ def test_usage_self_and_subtree_aggregate_post_order(tmp_path: Path):
     assert root.subtree_usage == {"cw": 33, "cr": 44, "r": 11, "w": 22}
 
 
+def test_subagent_usage_attributed_to_its_window_and_rolls_up(tmp_path: Path):
+    """A standard Claude subagent (Agent/Task tool) logs to
+    ``<parent>/subagents/agent-<id>.jsonl`` — NOT a top-level
+    ``<sid>.jsonl``. Its ``message.usage`` must land on the subagent's own
+    window and roll up into the parent's subtree.
+
+    Regression: the synthetic ``agent-<id>`` session used to scan a
+    non-existent flat ``project_dir/agent-<id>.jsonl``, so every
+    subagent's tokens were dropped from the canvas (zero self_usage, zero
+    contribution to the root's subtree total).
+    """
+    proj = tmp_path / "proj"
+    _write_session(
+        proj,
+        "MAIN",
+        [
+            _user("MAIN", "2026-05-04T10:00:00Z"),
+            _assistant(
+                "MAIN",
+                "2026-05-04T10:00:02Z",
+                text="m1",
+                uuid="m-a-1",
+                usage={
+                    "input_tokens": 1,
+                    "output_tokens": 2,
+                    "cache_creation_input_tokens": 3,
+                    "cache_read_input_tokens": 4,
+                },
+            ),
+        ],
+    )
+    sub_dir = proj / "MAIN" / "subagents"
+    sub_dir.mkdir(parents=True, exist_ok=True)
+    (sub_dir / "agent-abc123.meta.json").write_text(
+        json.dumps({"agentType": "explorer", "description": "Explore stuff"})
+    )
+    (sub_dir / "agent-abc123.jsonl").write_text(
+        "\n".join(
+            json.dumps(l)
+            for l in [
+                _user("agent-abc123", "2026-05-04T10:00:03Z"),
+                _assistant(
+                    "agent-abc123",
+                    "2026-05-04T10:00:04Z",
+                    text="s1",
+                    uuid="s-a-1",
+                    usage={
+                        "input_tokens": 10,
+                        "output_tokens": 20,
+                        "cache_creation_input_tokens": 30,
+                        "cache_read_input_tokens": 40,
+                    },
+                ),
+            ]
+        )
+        + "\n"
+    )
+    # Subagents are discovered from the subagents/ dir, not callstack
+    # reports — an empty log dir is enough.
+    (tmp_path / "log").mkdir()
+    ci = CallstackIndex(tmp_path / "log")
+    root, all_w = build_canvas_tree(proj, "MAIN", spawn_resolver=_resolver(proj, ci))
+
+    sub = next(w for w in all_w if w.session_id == "agent-abc123")
+    # The subagent's own window now carries its tokens (was all-zero).
+    assert sub.self_usage == {"cw": 30, "cr": 40, "r": 10, "w": 20}
+    # Root's own usage is unchanged; its subtree now includes the subagent.
+    assert root.self_usage == {"cw": 3, "cr": 4, "r": 1, "w": 2}
+    assert root.subtree_usage == {"cw": 33, "cr": 44, "r": 11, "w": 22}
+
+
 def _split_turn(sid: str, mid: str, usage: dict, ts: str, blocks: int) -> list[dict]:
     """One assistant turn the way Claude Code actually writes it: ``blocks``
     separate JSONL records (thinking / text / tool_use / …), each with its

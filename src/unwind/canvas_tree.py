@@ -40,6 +40,7 @@ from .session_scan import (
     scan_session,
 )
 from .status import Status, from_raw as _from_raw_status, merge as _merge_status
+from .subagents import SUBAGENT_PREFIX
 
 
 # --- Data classes -------------------------------------------------------
@@ -455,27 +456,39 @@ def build_canvas_tree(
         for child in calls_from.get(sid, ()):
             queue.append(child)
 
-    # Scan every real session (subagents skip the scan — they have no
-    # ``<session_id>.jsonl`` in project_dir).
+    def _scan_for(sid: str) -> SessionScan:
+        """Scan ``sid``'s transcript. Subagent synthetic ids
+        (``agent-<id>``) live at ``<parent>/subagents/agent-<id>.jsonl``,
+        resolved via the spawn resolver, so their ``message.usage`` is
+        counted — a flat ``project_dir/<sid>.jsonl`` would not exist and
+        the subagent's tokens would go uncounted."""
+        if sid.startswith(SUBAGENT_PREFIX):
+            sub_path = spawn_resolver.subagent_jsonl_path(sid)
+            if sub_path is not None:
+                return (
+                    builder.get_scan_at(sub_path)
+                    if builder is not None
+                    else scan_session(sub_path)
+                )
+            return SessionScan(session_id=sid, path=project_dir / f"{sid}.jsonl")
+        if builder is not None:
+            return builder.get_scan(sid)
+        path = project_dir / f"{sid}.jsonl"
+        return scan_session(path) if path.is_file() else SessionScan(
+            session_id=sid, path=path
+        )
+
+    # Scan every reachable session, plus any orphan invocation targets
+    # whose caller isn't reachable from the root.
     scans: dict[str, SessionScan] = {}
     for sid in real_sessions:
-        if builder is not None:
-            scans[sid] = builder.get_scan(sid)
-        else:
-            path = project_dir / f"{sid}.jsonl"
-            scans[sid] = (
-                scan_session(path) if path.is_file() else SessionScan(session_id=sid, path=path)
-            )
-    # Add empty scans for subagent targets so windows_by_session has
-    # entries to iterate over below.
+        scans[sid] = _scan_for(sid)
     visited = set(real_sessions)
     for target_sid in invocations_by_target:
         if target_sid in visited:
             continue
         visited.add(target_sid)
-        scans[target_sid] = SessionScan(
-            session_id=target_sid, path=project_dir / f"{target_sid}.jsonl"
-        )
+        scans[target_sid] = _scan_for(target_sid)
 
     # Build windows per session.
     windows_by_session: dict[str, list[WindowNode]] = {}

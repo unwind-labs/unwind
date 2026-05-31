@@ -421,6 +421,19 @@ class SpawnResolver:
         self._inherited_uuids_cache[session_id] = out
         return out
 
+    def subagent_jsonl_path(self, synthetic_id: str) -> Optional[Path]:
+        """Resolve an ``agent-<id>`` synthetic session id to its real
+        transcript at ``<parent>/subagents/agent-<id>.jsonl``.
+
+        Subagents (Agent/Task tool spawns) log to their own file under the
+        parent session's ``subagents/`` dir, NOT to a top-level
+        ``<sid>.jsonl``. The canvas builder needs this real path to scan a
+        subagent's ``message.usage`` — without it the synthetic session
+        scans an empty file and the subagent's tokens go uncounted.
+        Returns ``None`` for non-subagent ids or when no file exists.
+        """
+        return self._sa.resolve(synthetic_id)
+
     def child_display_order(
         self, parent_sid: str, messages: list[Any]
     ) -> dict[str, int]:

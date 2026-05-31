@@ -237,3 +237,14 @@ class CanvasTreeBuilder:
     def get_scan(self, session_id: str) -> SessionScan:
         path = self._project_dir / f"{session_id}.jsonl"
         return self._cache.get(path)
+
+    def get_scan_at(self, path: Path) -> SessionScan:
+        """Scan an arbitrary JSONL through the same mtime cache.
+
+        Used for subagent transcripts, which live at
+        ``<sid>/subagents/agent-<id>.jsonl`` rather than at the top-level
+        ``<sid>.jsonl`` ``get_scan`` assumes. The resulting scan's
+        ``session_id`` is the path stem (``agent-<id>``), matching the
+        synthetic id the canvas tree keys windows on.
+        """
+        return self._cache.get(path)
