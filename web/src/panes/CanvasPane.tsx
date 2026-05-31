@@ -732,9 +732,22 @@ function treeToReactFlow(args: {
         onOpenDetail,
         onFocusChild,
         onMeasure,
-        status: w.status === "yield" ? "yield" : w.status === "live" ? "live" : "done",
+        status:
+          w.status === "yield"
+            ? "yield"
+            : w.status === "live"
+              ? "live"
+              : w.status === "failed"
+                ? "failed"
+                : "done",
         subtreeStatus:
-          w.subtree_status === "yield" ? "yield" : w.subtree_status === "live" ? "live" : "done",
+          w.subtree_status === "yield"
+            ? "yield"
+            : w.subtree_status === "live"
+              ? "live"
+              : w.subtree_status === "failed"
+                ? "failed"
+                : "done",
         nodeId: w.window_id,
         windowStart: w.window_start,
         windowEnd: w.window_end,

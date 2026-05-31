@@ -16,8 +16,14 @@ import {
 } from "lucide-react";
 import { useMessages } from "@/api/client";
 import type { Message, SpawnCardData } from "@/api/types";
+import type { Status } from "@/lib/status";
 import { useUi } from "@/store/ui";
-import { filterExtrasByWindow, filterMessagesByWindow } from "@/panes/instances";
+import {
+  filterExtrasByWindow,
+  filterMessagesByWindow,
+  groupMessages,
+  type RenderGroup,
+} from "@/panes/instances";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Badge } from "@/components/ui/badge";
@@ -219,7 +225,15 @@ function SessionTrace({
     };
   }, [data, traceWindow]);
 
-  const groups = useMemo(() => (windowed ? groupMessages(windowed.messages) : []), [windowed]);
+  // Pass the FULL unwindowed stream (data.messages) as the second arg so a
+  // tool_use whose tool_result fell into the next window (boundary collision
+  // on the half-open ``[start, end)`` filter) still pairs up here. Without
+  // this, expanding the SpawnCard / ToolCard would show ``awaiting result…``
+  // even after the call returned. See ``groupMessages`` JSDoc.
+  const groups = useMemo<RenderGroup[]>(
+    () => (windowed ? groupMessages(windowed.messages, data?.messages) : []),
+    [windowed, data],
+  );
 
   // Place extra spawn cards immediately after the last assistant message in
   // this session — that's where the JSON envelope was emitted that callstack
@@ -274,8 +288,31 @@ function SessionTrace({
   }
   if (!data) return null;
 
+  // The parent's call runtime classifies a child's outcome AFTER the
+  // child exits — so the failure verdict (e.g. "child emitted no
+  // parseable envelope") never appears in the child's own JSONL.
+  // Surface it here as a banner so the detail view matches the card's
+  // red-X terminator on the canvas. ``terminal_status`` is canonical
+  // (``done|live|yield|failed``); a single equality check is enough.
+  const isFailedTerminal = data.terminal_status === "failed";
+
   return (
     <div className="space-y-3">
+      {isFailedTerminal && depth === 0 && (
+        <div className="flex items-start gap-2 rounded border border-red-500/40 bg-red-500/10 px-3 py-2 text-[12px] text-red-200">
+          <XCircle className="mt-0.5 h-4 w-4 shrink-0 text-red-400" />
+          <div className="min-w-0 flex-1">
+            <div className="text-[10px] font-bold uppercase tracking-[0.18em] text-red-300">
+              session ended with error
+            </div>
+            {data.terminal_error && (
+              <div className="mt-0.5 break-words font-mono text-[11px] text-red-100/90">
+                {data.terminal_error}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
       {visibleItems.map((it, i) =>
         it.kind === "group" ? (
           <Group
@@ -310,40 +347,9 @@ function SessionTrace({
 
 // --- grouping ----------------------------------------------------------------
 
-type RenderGroup =
-  | { kind: "msg"; msg: Message }
-  | { kind: "tool"; toolUse: Message; toolResult?: Message };
-
 type OrderedItem =
   | { kind: "group"; group: RenderGroup; ts: number }
   | { kind: "extra"; spawn: SpawnCardData; ts: number };
-
-function groupMessages(messages: Message[]): RenderGroup[] {
-  const out: RenderGroup[] = [];
-  const pending = new Map<string, number>();
-  for (const m of messages) {
-    if (m.role === "tool_use") {
-      const g: RenderGroup = { kind: "tool", toolUse: m };
-      out.push(g);
-      if (m.tool_use_id) pending.set(m.tool_use_id, out.length - 1);
-    } else if (m.role === "tool_result") {
-      const id = m.tool_result_for;
-      if (id && pending.has(id)) {
-        const idx = pending.get(id)!;
-        const g = out[idx];
-        if (g.kind === "tool") {
-          g.toolResult = m;
-          pending.delete(id);
-        }
-      } else {
-        out.push({ kind: "msg", msg: m });
-      }
-    } else {
-      out.push({ kind: "msg", msg: m });
-    }
-  }
-  return out;
-}
 
 // --- group renderer ----------------------------------------------------------
 
@@ -405,20 +411,21 @@ function SpawnCard({
   const children = toolUse.spawn_session_ids ?? [];
   const tasks = perChildTasks(toolUse, children.length);
 
-  // Per-child status. ``spawn_done`` (set server-side from the
-  // callstack report) is the authoritative per-child outcome and
-  // wins when known — it correctly reflects "the spawn finished"
-  // even when the parent's ``tool_result`` envelope isn't visible
-  // in the current window slice (the trace pane's window filter is
-  // exclusive on the end boundary, so a tool_result whose timestamp
-  // matches ``window_end`` exactly gets dropped; without this
-  // fallback, the row reads as ``live`` long after the child returned).
-  // Mirrors derive-rows.ts's per-child done resolution.
-  const statusFor = (i: number): "pending" | "ok" | "error" => {
-    const done = toolUse.spawn_done?.[i];
-    if (done === true) return "ok";
-    if (!toolResult) return "pending";
-    return toolResult.is_error ? "error" : "ok";
+  // Per-child canonical status. ``spawn_status`` (set server-side from
+  // the callstack report via ``status_for_spawn``) is the authoritative
+  // per-child outcome and wins when known — it correctly reflects "the
+  // spawn finished" even when the parent's ``tool_result`` envelope
+  // isn't visible in the current window slice (the trace pane's window
+  // filter is exclusive on the end boundary, so a tool_result whose
+  // timestamp matches ``window_end`` exactly gets dropped; without
+  // this fallback, the row reads as ``live`` long after the child
+  // returned). Falls back to the tool_result-arrival heuristic, which
+  // can only distinguish ok vs error vs pending.
+  const statusFor = (i: number): Status | null => {
+    const s = toolUse.spawn_status?.[i];
+    if (s != null) return s;
+    if (!toolResult) return null;
+    return toolResult.is_error ? "failed" : "done";
   };
 
   if (children.length === 0) {
@@ -499,12 +506,12 @@ function ExtraSpawnCard({
   callsOnly: boolean;
   autoOpen: boolean;
 }) {
-  const status: "pending" | "ok" | "error" =
-    spawn.status === "running" || spawn.status === "in_progress"
-      ? "pending"
-      : spawn.status === "failed" || spawn.status === "error"
-        ? "error"
-        : "ok";
+  // ``spawn.status`` is already canonical (set server-side via
+  // ``status_for_spawn``). The frontend doesn't translate raw
+  // report.yaml strings anymore — that was the bug that let extras
+  // and anchored CALL rows show different verdicts for the same
+  // child. Same vocabulary, same renderer.
+  const status: Status | null = spawn.status;
 
   if (spawn.children.length === 0) return null;
 
@@ -553,7 +560,7 @@ function SpawnRow({
   isFollower: boolean;
   title: string;
   childId: string | null;
-  status: "pending" | "ok" | "error";
+  status: Status | null;
   timestamp: string | null;
   slug: string;
   depth: number;
@@ -638,14 +645,20 @@ function SpawnRow({
         <span className="min-w-0 flex-1 truncate font-mono text-[12px] text-foreground">
           {title}
         </span>
-        {status === "pending" && <Badge variant="warn">live</Badge>}
-        {status === "error" && (
+        {(status === "live" || status == null) && <Badge variant="warn">live</Badge>}
+        {status === "yield" && (
+          <span className="inline-flex items-center gap-1 text-[11px] text-amber-300">
+            <Hourglass className="h-3 w-3" />
+            yield
+          </span>
+        )}
+        {status === "failed" && (
           <span className="inline-flex items-center gap-1 text-[11px] text-red-400">
             <XCircle className="h-3 w-3" />
             error
           </span>
         )}
-        {status === "ok" && <CheckCircle2 className="h-3 w-3 text-emerald-400" />}
+        {status === "done" && <CheckCircle2 className="h-3 w-3 text-emerald-400" />}
         {shortChildId ? (
           <span className="font-mono text-[10px] text-muted-foreground">{shortChildId}</span>
         ) : (

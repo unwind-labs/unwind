@@ -13,7 +13,8 @@ import json as _json
 
 from ..canvas_tree import build_canvas_tree
 from ..jsonl import collect_uuids
-from ..messages import annotate_spawns, base_uuid, read_messages
+from ..messages import annotate_spawns, base_uuid, read_messages, status_for_spawn
+from .. import status as _status
 from ..processes import LIVE_MTIME_WINDOW_SEC, project_activity
 from ..registry import (
     callstack_for_slug,
@@ -354,7 +355,12 @@ class SpawnCard(BaseModel):
     invoke_id: str
     started_at: Optional[datetime]
     ended_at: Optional[datetime]
-    status: str
+    # Canonical status (``done|live|yield|failed``) or ``None`` when
+    # unresolved. The wire used to send the raw report.yaml string here,
+    # forcing every consumer (web/derive-rows, TracePane extras) to
+    # re-translate against ``"running"|"in_progress"`` literals. Now
+    # there's exactly one translator: ``messages.status_for_spawn``.
+    status: Optional[str]
     children: list[str]
     tasks: list[str]  # task labels like "/task-e"
 
@@ -365,6 +371,13 @@ class MessagesResponse(BaseModel):
     last_uuid: Optional[str]
     file_offset: int
     extra_spawns: list[SpawnCard] = []
+    # The parent's verdict on this session, translated to canonical
+    # (``done|live|yield|failed`` or ``None`` when this session isn't a
+    # callstack task). Source: the parent's ``report.yaml`` TaskNode,
+    # pulled through ``status.from_raw`` so the wire format matches
+    # WindowNode.status / spawn_status everywhere else.
+    terminal_status: Optional[str] = None
+    terminal_error: Optional[str] = None
 
 
 @router.get(
@@ -452,20 +465,34 @@ def get_messages(
     for s in spawns:
         if s.parent_tool_use_id or s.kind != "call":
             continue
-        status_lc = (s.status or "").lower()
-        actually_running = s.ended_at is None and status_lc in (
-            "running", "in_progress", "pending", "",
-        )
+        # Single source of truth for "what's this spawn's status?" —
+        # same function the per-tool_use spawn_status decoration uses,
+        # so an extras CALL row and an anchored CALL row for the same
+        # child can never disagree.
+        canonical = status_for_spawn(s, ci)
         extra.append(
             SpawnCard(
                 invoke_id=s.invoke_id or "",
                 started_at=s.started_at,
                 ended_at=s.ended_at,
-                status="running" if actually_running else "complete",
+                status=canonical,
                 children=[s.child_session_id],
                 tasks=[s.label] if s.label else [],
             )
         )
+
+    # Pull the parent's verdict on this session straight from its
+    # report.yaml TaskNode, then canonicalise so every consumer compares
+    # against the same vocabulary as WindowNode.status / spawn_status.
+    # The child's own JSONL never records this — the call runtime
+    # classifies the result (e.g. "child emitted no parseable envelope")
+    # after the child exits.
+    terminal_status: Optional[str] = None
+    terminal_error: Optional[str] = None
+    task_node = ci.task_node_for_session(session_id)
+    if task_node is not None:
+        terminal_status = _status.from_raw(task_node.status)
+        terminal_error = task_node.error
 
     tail = _slice_after_uuid(page.messages, since_uuid)
     return MessagesResponse(
@@ -474,6 +501,8 @@ def get_messages(
         last_uuid=page.last_uuid,
         file_offset=page.file_offset,
         extra_spawns=extra,
+        terminal_status=terminal_status,
+        terminal_error=terminal_error,
     )
 
 

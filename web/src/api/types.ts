@@ -1,3 +1,5 @@
+import type { Status } from "@/lib/status";
+
 export type SessionStatus = "live" | "yield" | "idle" | "done";
 
 export type SessionRow = {
@@ -69,11 +71,12 @@ export type Message = {
   spawn_kind: "call" | "subagent" | null;
   spawn_session_ids: string[];
   spawn_tasks: string[];
-  // Per-child completion derived from the callstack task status. Lets the
-  // caller card check off finished children individually before the parent
-  // ``invoke_parallel`` tool_result lands. ``null`` means unknown (fall
-  // back to the parent's tool_result).
-  spawn_done?: (boolean | null)[];
+  // Per-child canonical status (parallel to spawn_session_ids). Lets the
+  // caller card render each child's outcome distinctly
+  // (done/live/yield/failed) before the parent ``invoke_parallel``
+  // tool_result lands. ``null`` means unknown (fall back to the
+  // parent's tool_result arrival).
+  spawn_status?: (Status | null)[];
   // Per-child call type (parallel to spawn_session_ids). Drives the icon
   // Unwind renders per spawn row. Older messages without this field fall
   // back to "fork" so the UI still renders.
@@ -92,7 +95,12 @@ export type SpawnCardData = {
   invoke_id: string;
   started_at: string | null;
   ended_at: string | null;
-  status: string;
+  /** Canonical status (``done|live|yield|failed``) or ``null`` when
+   *  unresolved. Used to be a raw report.yaml string ("running" /
+   *  "complete") that every consumer re-translated against literal
+   *  ``"running" | "in_progress"`` compares — now there's one
+   *  translator on the server, one ``Status`` vocabulary on the wire. */
+  status: Status | null;
   children: string[];
   tasks: string[];
 };
@@ -103,6 +111,15 @@ export type MessagesResponse = {
   last_uuid: string | null;
   file_offset: number;
   extra_spawns: SpawnCardData[];
+  /** Terminal verdict the *parent's* callstack runtime recorded for this
+   *  session, translated to canonical ``Status``. ``null`` when this
+   *  session isn't a callstack task (e.g. the root). The detail-view
+   *  banner renders an error chrome when this is ``"failed"``. */
+  terminal_status?: Status | null;
+  /** Error message the parent recorded alongside ``terminal_status``
+   *  (e.g. "child emitted no parseable envelope"). Only meaningful when
+   *  the status indicates failure; rendered as the banner body. */
+  terminal_error?: string | null;
 };
 
 /** Token usage counters mirroring Anthropic's ``message.usage`` shape:

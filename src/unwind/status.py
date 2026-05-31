@@ -62,6 +62,16 @@ _CALLSTACK_MAP: dict[str, Status] = {
     "live": "live",
     "failed": "failed",
     "error": "failed",
+    # ``abandoned`` = the child process was killed mid-flight (e.g.
+    # parent crashed before the child finished its turn — the runtime
+    # writes this status with an "abandoned at shutdown (pid=…)" error).
+    # The session never returned a result; treating it as ``done`` would
+    # show a misleading green check on a clearly-broken run.
+    "abandoned": "failed",
+    # ``mixed`` = top-level report rollup where at least one child failed
+    # while others completed. The overall invocation didn't fully
+    # succeed, so canonicalise to ``failed`` rather than ``done``.
+    "mixed": "failed",
 }
 
 

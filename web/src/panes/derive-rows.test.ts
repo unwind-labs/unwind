@@ -38,7 +38,7 @@ describe("deriveRows — invoke_resume", () => {
       spawn_kind: "call",
       spawn_session_ids: ["151ee68c"],
       spawn_tasks: ["/authenticate-customer cust_7829"],
-      spawn_done: [true],
+      spawn_status: ["done"],
     }),
     baseMsg({
       uuid: "u2",
@@ -59,7 +59,7 @@ describe("deriveRows — invoke_resume", () => {
       spawn_kind: "call",
       spawn_session_ids: ["151ee68c"],
       spawn_tasks: ["151ee68c"],
-      spawn_done: [true],
+      spawn_status: ["done"],
     }),
     baseMsg({
       uuid: "u4",
@@ -80,7 +80,7 @@ describe("deriveRows — invoke_resume", () => {
       spawn_kind: "call",
       spawn_session_ids: ["151ee68c"],
       spawn_tasks: ["151ee68c"],
-      spawn_done: [false],
+      spawn_status: ["live"],
     }),
   ];
 
@@ -126,12 +126,17 @@ describe("deriveRows — invoke_resume", () => {
     expect(titles[2]).toBe("yes please");
   });
 
-  it("propagates per-handle done state from spawn_done", () => {
+  it("propagates per-handle canonical status from spawn_status", () => {
     const rows = deriveRows(messages);
-    const done = rows
+    const status = rows
       .filter((r) => r.kind === "spawn")
-      .map((r) => (r.kind === "spawn" ? r.done : null));
-    expect(done).toEqual([true, true, false]);
+      .map((r) => (r.kind === "spawn" ? r.status : null));
+    // First two invocations completed (``done``); the in-flight resume
+    // stays ``live`` so the CALL row keeps pulsing instead of flashing
+    // to a green check. This is the regression the wire-format change
+    // prevents: a bool projection would have collapsed live → false
+    // and indistinguishable from failed/yield.
+    expect(status).toEqual(["done", "done", "live"]);
   });
 });
 
@@ -146,7 +151,7 @@ describe("deriveRows — extras handleId uniqueness", () => {
         invoke_id: "",
         started_at: null,
         ended_at: null,
-        status: "complete",
+        status: "done" as const,
         children: ["dbe31b33-aaaa-bbbb-cccc-111111111111"],
         tasks: ["/check-code-expiry"],
       },
@@ -170,7 +175,7 @@ describe("deriveRows — extras handleId uniqueness", () => {
           invoke_id: "",
           started_at: null,
           ended_at: null,
-          status: "complete",
+          status: "done" as const,
           children: ["aaaa1111-aaaa-aaaa-aaaa-aaaaaaaaaaaa"],
           tasks: ["task-a"],
         },
@@ -183,7 +188,7 @@ describe("deriveRows — extras handleId uniqueness", () => {
           invoke_id: "",
           started_at: null,
           ended_at: null,
-          status: "complete",
+          status: "done" as const,
           children: ["bbbb2222-bbbb-bbbb-bbbb-bbbbbbbbbbbb"],
           tasks: ["task-b"],
         },

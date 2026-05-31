@@ -250,6 +250,19 @@ class CallstackIndex:
             self._view_sig = sig
         return result
 
+    def task_node_for_session(self, session_id: str) -> Optional[TaskNode]:
+        """Return the latest-report TaskNode whose ``session_id`` matches.
+
+        Differs from :meth:`aggregate_status_for_session` in two ways:
+        (1) it returns the raw TaskNode rather than a merged status, so
+        callers can access ``error`` / ``summary`` / ``duration_seconds``;
+        (2) it never escalates to descendants — only this session's own
+        verdict. Used by the messages endpoint to surface the failure
+        reason recorded by the *parent's* report on this child.
+        """
+        canonical, _, _ = self._latest_view()
+        return canonical.get(session_id)
+
     def is_callstack_task(self, session_id: str) -> bool:
         """Whether ``session_id`` appears as a TaskNode in any report.
 

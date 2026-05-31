@@ -2006,13 +2006,13 @@ def test_await_call_with_unknown_invoke_id_is_left_alone(tmp_path: Path):
     assert tu.spawn_tasks == []
 
 
-def test_done_for_spawn_does_not_downgrade_terminal_status(tmp_path: Path):
+def test_status_for_spawn_does_not_downgrade_terminal_status(tmp_path: Path):
     """When Fix A overrides a stale ``running`` task to ``complete`` from
-    the child JSONL, ``_done_for_spawn`` must not flip it back to live
+    the child JSONL, ``status_for_spawn`` must not flip it back to live
     via ``aggregate_status_for_session`` (which still reads the stale
     ``report.yaml``). The spawn's own terminal verdict is authoritative
     once known — same invariant as the terminal-ancestor wall."""
-    from unwind.messages import _done_for_spawn
+    from unwind.messages import status_for_spawn
 
     log = tmp_path / "log"
     proj = tmp_path / "proj"
@@ -2068,9 +2068,10 @@ def test_done_for_spawn_does_not_downgrade_terminal_status(tmp_path: Path):
     # CallstackIndex still reads report.yaml; aggregate says "live".
     ci = CallstackIndex(log)
     assert ci.aggregate_status_for_session("CHILD") == "live"
-    # But _done_for_spawn must NOT downgrade: trust the spawn's own
-    # terminal verdict over the stale aggregate.
-    assert _done_for_spawn(spawn, ci) is True
+    # But status_for_spawn must NOT downgrade: trust the spawn's own
+    # terminal verdict over the stale aggregate. ``done`` is the canonical
+    # form of ``complete``; the bool-projection lives client-side now.
+    assert status_for_spawn(spawn, ci) == "done"
 
 
 def test_await_call_message_carries_follower_flag(tmp_path: Path):

@@ -493,7 +493,7 @@ def test_partial_completion_marks_done_per_child(tmp_path: Path):
     """When 4 of 5 ``invoke_parallel`` children have completed but the 5th
     is still running, the parent tool_use has no tool_result yet — but the
     4 completed children should already show as done in the caller card.
-    Drives the spawn_done field from the callstack report's per-task status.
+    Drives the spawn_status field from the callstack report's per-task status.
     """
     session_id = "sess-partial"
     log_dir = tmp_path / "callstack-log"
@@ -558,4 +558,5 @@ def test_partial_completion_marks_done_per_child(tmp_path: Path):
     spec = next(m for m in page.messages if m.role == "tool_use")
     assert spec.spawn_session_ids == [f"sp-sess-{i}" for i in range(5)]
     # First 4 individually marked done despite parent tool_result being absent.
-    assert spec.spawn_done == [True, True, True, True, False]
+    # ``running`` canonicalises to ``live``; ``complete`` to ``done``.
+    assert spec.spawn_status == ["done", "done", "done", "done", "live"]

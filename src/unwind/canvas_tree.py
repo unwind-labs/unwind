@@ -214,7 +214,13 @@ def _compute_windows(
     window per invocation in chronological order.
     """
     if is_root or not invocations:
-        end = None if is_live else scan.end_ts
+        # Single-window case: no successor window to tile against, so the
+        # half-open ``[start, end)`` filter has no job to do — but it can
+        # still drop a message whose timestamp equals ``scan.end_ts``
+        # (notably the last tool_use, which is the spawning anchor for a
+        # still-running child). Leave the window open-ended so the closing
+        # message lands inside and the child's edge has a handle to anchor.
+        end = None
         # ``yield`` is gated on ``is_live`` (process up + recent
         # activity). Sessions that ended their turn long ago are
         # technically "resumable via ``claude --resume``", but the

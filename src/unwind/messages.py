@@ -28,7 +28,7 @@ from .spawns import (
     Spawn,
     SpawnResolver,
 )
-from .status import from_raw as _from_raw_status, is_done as _is_done
+from .status import Status, from_raw as _from_raw_status
 
 
 Role = Literal["user", "assistant", "thinking", "tool_use", "tool_result", "system"]
@@ -81,11 +81,12 @@ class Message:
     # entries whose session_id hasn't been resolved yet have an empty string
     # in spawn_session_ids but a real task name here.
     spawn_tasks: list[str] = field(default_factory=list)
-    # Per-child completion status (parallel to spawn_session_ids). Lets the
-    # caller card check off finished children individually, even when the
-    # parent ``invoke_parallel`` tool_use is still in flight waiting on
-    # slow siblings. ``None`` = unknown (fall back to parent tool_result).
-    spawn_done: list[Optional[bool]] = field(default_factory=list)
+    # Per-child canonical status (parallel to spawn_session_ids). Lets the
+    # caller card render each child's outcome distinctly (done/live/yield/
+    # failed) even when the parent ``invoke_parallel`` tool_use is still
+    # in flight waiting on slow siblings. ``None`` = unknown (fall back to
+    # parent tool_result arrival).
+    spawn_status: list[Optional[Status]] = field(default_factory=list)
     # Per-child call type (parallel to spawn_session_ids). Values:
     # "fork" | "fresh" | "fresh_cross_project". Drives the icon Unwind
     # renders per spawn row. Only meaningful when ``spawn_kind == "call"``;
@@ -149,7 +150,7 @@ def annotate_spawns(
     fork detector, and the subagent index in one place (see
     :mod:`unwind.spawns`). ``slug_callstack`` stays optional because
     only one downstream step (the latest-aggregated-status override in
-    ``_done_for_spawn``) needs it directly.
+    ``status_for_spawn``) needs it directly.
     """
     if not current_session_id:
         # Without the parent's session id we can't anchor anything.
@@ -224,7 +225,7 @@ def _decorate_with_spawns(
     # Prefer the LATEST known status across all reports for callstack
     # spawns — covers the "original call yielded, later resume
     # completed" case where the spawn's snapshot status is stale.
-    m.spawn_done = [_done_for_spawn(s, slug_callstack) for s in bound]
+    m.spawn_status = [status_for_spawn(s, slug_callstack) for s in bound]
 
 
 def _invoke_id_for_await(m: Message) -> Optional[str]:
@@ -245,10 +246,16 @@ def _invoke_id_for_await(m: Message) -> Optional[str]:
     return mt.group(1) if mt else None
 
 
-def _done_for_spawn(s: Spawn, slug_callstack) -> Optional[bool]:
-    """Map a Spawn's status to the spawn-row done flag.
+def status_for_spawn(s: Spawn, slug_callstack) -> Optional[Status]:
+    """Return a Spawn's canonical status (``done|live|yield|failed`` or ``None``).
 
-    For callstack spawns, prefer the LATEST aggregated status across
+    Single source of truth used by both per-tool_use ``spawn_status``
+    decoration (this module) and the unanchored ``SpawnCard`` builder
+    (``api/sessions_api.py``). Anywhere else that wants "what is this
+    spawn's status?" should call this function — never re-derive from
+    raw fields.
+
+    For callstack spawns, prefers the LATEST aggregated status across
     all reports (handles the "original yielded → resume completed"
     case). Falls back to the spawn's snapshot status.
 
@@ -272,7 +279,7 @@ def _done_for_spawn(s: Spawn, slug_callstack) -> Optional[bool]:
         latest = slug_callstack.aggregate_status_for_session(s.child_session_id)
         if latest is not None:
             canonical = latest
-    return _is_done(canonical)
+    return canonical
 
 
 def read_messages(

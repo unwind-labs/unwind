@@ -3,6 +3,7 @@
  *  without spinning up a DOM environment. */
 
 import type { Message, SpawnCardData as ExtraSpawn } from "@/api/types";
+import type { Status } from "@/lib/status";
 import { labelForResume } from "./instances";
 
 export const INVOKE_RESUME_TOOL = "mcp__plugin_callstack_call__invoke_resume";
@@ -22,7 +23,13 @@ export type Row =
       title: string;
       /** Underlying Claude session id of the child. Empty while resolving. */
       childId: string;
-      done: boolean;
+      /** Canonical status of the spawned child (``done|live|yield|failed``
+       *  or ``null`` while still resolving). The card picks the per-row
+       *  icon from this; a stale ``"running"`` here would show pulse
+       *  dots forever, so callers must use the server-derived
+       *  ``Message.spawn_status`` / ``SpawnCardData.status`` rather
+       *  than re-deriving from raw report.yaml strings. */
+      status: Status | null;
       handleId: string;
       /** Parent-side ``tool_use`` timestamp. Used by the canvas to order
        *  multiple invocations of the same child session and partition the
@@ -92,11 +99,20 @@ export function deriveRows(
           ? m.spawn_tasks
           : m.spawn_session_ids.map((_, i) => labelFromInput(m, i));
       m.spawn_session_ids.forEach((childId, i) => {
-        // Prefer per-child status from the callstack report (set by the
-        // server via spawn_done). Falls back to the parent tool_result's
-        // arrival when the report doesn't know yet.
-        const perChild = m.spawn_done?.[i];
-        const done = perChild != null ? perChild && childId !== "" : callDone && childId !== "";
+        // Prefer per-child canonical status from the callstack report
+        // (set by the server via ``status_for_spawn`` → spawn_status).
+        // Falls back to the parent tool_result's arrival when the report
+        // doesn't know yet — in that case we can only signal done vs
+        // pending; the four-state distinction has to wait for the report.
+        const perChild = m.spawn_status?.[i] ?? null;
+        const status: Status | null =
+          perChild != null
+            ? childId !== ""
+              ? perChild
+              : null
+            : callDone && childId !== ""
+              ? "done"
+              : null;
         const rawLabel = labels[i] || "";
         const title = isResume
           ? labelForResume(userReply ?? rawLabel)
@@ -108,7 +124,7 @@ export function deriveRows(
           callType,
           title,
           childId,
-          done,
+          status,
           handleId: `spawn-${tooluse}-${i}`,
           parentToolUseTs: m.timestamp,
           isResume,
@@ -126,37 +142,39 @@ export function deriveRows(
   }
   flushBucket();
 
-  // Re-check spawn ``done``: a tool_use's done state depends on whether a
+  // Re-check spawn status: a tool_use's done state depends on whether a
   // tool_result for it exists ANYWHERE in the session. We walk the FULL
   // message stream (``allMessages``) here, not the windowed slice, so a
   // tool_use that fired in window 1 still flips to done if its
-  // tool_result lands in window 2 after a yield/resume. The
-  // per-child callstack report status (``spawn_done``) wins when present.
+  // tool_result lands in window 2 after a yield/resume. The per-child
+  // canonical status from the callstack report (``spawn_status``) wins
+  // when present — its four-state vocabulary distinguishes failed/yield
+  // from done, which the tool_result-arrival fallback cannot.
   const allResultIds = new Set(
     allMessages
       .filter((m) => m.role === "tool_result" && m.tool_result_for)
       .map((m) => m.tool_result_for!),
   );
-  const perChildByHandle: Record<string, boolean | null | undefined> = {};
+  const perChildByHandle: Record<string, Status | null | undefined> = {};
   for (const m of allMessages) {
     if (m.role !== "tool_use" || !m.spawn_kind) continue;
-    if (!m.spawn_done) continue;
+    if (!m.spawn_status) continue;
     const tooluse = m.tool_use_id ?? m.uuid;
-    m.spawn_done.forEach((d, i) => {
-      perChildByHandle[`spawn-${tooluse}-${i}`] = d;
+    m.spawn_status.forEach((s, i) => {
+      perChildByHandle[`spawn-${tooluse}-${i}`] = s;
     });
   }
   for (const r of out) {
     if (r.kind === "spawn") {
       const perChild = perChildByHandle[r.handleId];
       if (perChild != null) {
-        r.done = perChild && r.childId !== "";
+        r.status = r.childId !== "" ? perChild : null;
         continue;
       }
       const m = r.handleId.match(/^spawn-(.+)-\d+$/);
       const toolUseId = m ? m[1] : "";
       const callDone = allResultIds.has(toolUseId);
-      r.done = callDone && r.childId !== "";
+      r.status = callDone && r.childId !== "" ? "done" : null;
     }
   }
 
@@ -175,7 +193,11 @@ export function deriveRows(
   // form for aggregate cards (no invoke_id).
   extras.forEach((s, ei) => {
     s.children.forEach((childId, i) => {
-      const callDone = s.status !== "running" && s.status !== "in_progress";
+      // ``s.status`` is already canonical (set server-side via
+      // ``status_for_spawn``). No raw-string translation needed —
+      // a stale ``"running" === "in_progress"`` compare here used to
+      // disagree with the same spawn's anchored-tool_use row, which
+      // was already pulling its status from spawn_status.
       const taskName = s.tasks[i] ?? `child ${i + 1}`;
       const stem = s.invoke_id ? `${s.invoke_id}-${childId || i}` : childId || `${ei}-${i}`;
       out.push({
@@ -188,7 +210,7 @@ export function deriveRows(
         callType: "fork",
         title: taskName || childId.slice(0, 8) || "(call)",
         childId,
-        done: callDone && childId !== "",
+        status: childId !== "" ? s.status : null,
         handleId: `extra-${stem}`,
         parentToolUseTs: s.started_at ?? null,
         isResume: false,

@@ -12,11 +12,13 @@ import {
   Telescope,
   Trees,
   Loader2,
+  XCircle,
 } from "lucide-react";
 import { useMessages } from "@/api/client";
 import { cn, shortId } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import type { TokenCost, TokenUsage } from "@/api/types";
+import type { Status } from "@/lib/status";
 import { filterExtrasByWindow, filterMessagesByWindow } from "./instances";
 import { deriveRows, type Row } from "./derive-rows";
 import { UsageFooter } from "./UsageFooter";
@@ -49,13 +51,13 @@ export type CompactCardData = {
   /** Called when the rendered card height changes (for re-layout). Keyed by
    *  node id so two cards for the same session don't trample. */
   onMeasure: (cardNodeId: string, height: number) => void;
-  status: "live" | "yield" | "done";
+  status: "live" | "yield" | "done" | "failed";
   /** Max status across this window AND every descendant (``live`` >
-   *  ``yield`` > ``done``). Drives the rail indicator + yield wash so
-   *  an ancestor visibly reflects work still happening below. The
-   *  in-card terminator row (COMPLETE / YIELD) keeps using ``status``
-   *  because it's a strictly self-only signal. */
-  subtreeStatus: "live" | "yield" | "done";
+   *  ``yield`` > ``failed`` > ``done``). Drives the rail indicator + yield
+   *  wash so an ancestor visibly reflects work still happening below. The
+   *  in-card terminator row (COMPLETE / YIELD / ERROR) keeps using
+   *  ``status`` because it's a strictly self-only signal. */
+  subtreeStatus: "live" | "yield" | "done" | "failed";
   /** True when the keyboard cursor is on this card (arrow-key navigation
    *  with the right pane focused). Distinct from `selected`, which means
    *  the detail overlay is currently open for this session. */
@@ -162,12 +164,12 @@ export function CompactCardNode({ data }: { data: CompactCardData }) {
   // status was ``yielded``; done otherwise). Earlier logic forced
   // ``done`` for any non-latest window, which masked yields on
   // historically-paused-then-resumed slices.
-  const selfStatus: "live" | "yield" | "done" = data.status;
+  const selfStatus: "live" | "yield" | "done" | "failed" = data.status;
   // Visual rail/wash reflects the subtree: a root whose children are
   // still working should pulse live even though its own turn ended.
   // ``selfStatus`` remains the source of truth for the in-card
   // terminator row.
-  const railStatus: "live" | "yield" | "done" = data.subtreeStatus;
+  const railStatus: "live" | "yield" | "done" | "failed" = data.subtreeStatus;
 
   // Report measured height up so dagre can re-layout.
   useEffect(() => {
@@ -304,7 +306,13 @@ export function CompactCardNode({ data }: { data: CompactCardData }) {
           className="text-[8.5px] font-bold uppercase tracking-[0.32em] text-foreground/70"
           style={{ writingMode: "vertical-rl", transform: "rotate(180deg)" }}
         >
-          {railStatus === "yield" ? "waiting" : kind === "resume" ? "continued" : kind}
+          {railStatus === "yield"
+            ? "waiting"
+            : railStatus === "failed"
+              ? "error"
+              : kind === "resume"
+                ? "continued"
+                : kind}
         </span>
       </div>
       <div className="min-w-0 flex-1">
@@ -391,6 +399,10 @@ export function CompactCardNode({ data }: { data: CompactCardData }) {
               actively waiting for user input. */}
           {selfStatus === "done" && !data.isRoot && <TerminatorRow kind="complete" />}
           {selfStatus === "yield" && <TerminatorRow kind="yield" />}
+          {/* "failed" overrides the root-card COMPLETE suppression: an
+              errored root is unambiguously bad and worth surfacing,
+              unlike a "done" root which is just stale. */}
+          {selfStatus === "failed" && <TerminatorRow kind="error" />}
         </ul>
         <UsageFooter
           self={data.selfUsage}
@@ -404,20 +416,17 @@ export function CompactCardNode({ data }: { data: CompactCardData }) {
   );
 }
 
-function TerminatorRow({ kind }: { kind: "complete" | "yield" }) {
-  const isYield = kind === "yield";
-  const accentText = isYield ? "text-amber-300" : "text-emerald-400";
-  const label = isYield ? "waiting for user" : "complete";
+function TerminatorRow({ kind }: { kind: "complete" | "yield" | "error" }) {
+  const accentText =
+    kind === "yield" ? "text-amber-300" : kind === "error" ? "text-red-400" : "text-emerald-400";
+  const label = kind === "yield" ? "waiting for user" : kind === "error" ? "error" : "complete";
+  const Icon = kind === "yield" ? Loader2 : kind === "error" ? XCircle : CornerDownLeft;
   return (
     <li
       className="flex items-center gap-2 rounded px-2 text-[11px] font-mono"
       style={{ height: ACTIVITY_HEIGHT - 4 }}
     >
-      {isYield ? (
-        <Loader2 className={cn("h-3.5 w-3.5 animate-spin", accentText)} />
-      ) : (
-        <CornerDownLeft className={cn("h-3.5 w-3.5", accentText)} />
-      )}
+      <Icon className={cn("h-3.5 w-3.5", accentText, kind === "yield" && "animate-spin")} />
       <span className={cn("text-[9px] font-bold uppercase tracking-[0.18em]", accentText)}>
         {label}
       </span>
@@ -427,7 +436,7 @@ function TerminatorRow({ kind }: { kind: "complete" | "yield" }) {
 
 /** Small status indicator at the top of the rail. Replaces the
  *  pre-rail top-border-color trick (border-t-emerald, border-t-amber). */
-function RailStatus({ status }: { status: "live" | "yield" | "done" }) {
+function RailStatus({ status }: { status: "live" | "yield" | "done" | "failed" }) {
   if (status === "live") {
     return (
       <span className="relative inline-flex h-3 w-3">
@@ -438,6 +447,9 @@ function RailStatus({ status }: { status: "live" | "yield" | "done" }) {
   }
   if (status === "yield") {
     return <span className="inline-block h-3 w-3 rounded-full bg-amber-400" />;
+  }
+  if (status === "failed") {
+    return <XCircle className="h-5 w-5 text-red-400" />;
   }
   return <CheckCircle2 className="h-5 w-5 text-emerald-400" />;
 }
@@ -620,7 +632,7 @@ function SpawnRowDisplay({
       <span className="flex-1 truncate font-mono text-[11px] text-foreground" title={row.title}>
         {row.title}
       </span>
-      {row.done ? <CheckCircle2 className="h-4 w-4 text-emerald-400" /> : <DotPulse />}
+      <SpawnRowStatusIcon status={row.status} />
       <Handle
         type="source"
         position={Position.Right}
@@ -640,6 +652,20 @@ function DotPulse() {
       <span className="dot-pulse-3 h-1.5 w-1.5 rounded-full bg-amber-400" />
     </span>
   );
+}
+
+/** Per-row status indicator on a CALL/SUBAGENT spawn row. The icon
+ *  mirrors the four-state vocabulary used by the rest of the canvas
+ *  (rail dot, terminator chip), so a CALL row to a failed child shows
+ *  a red X — not a green check that disagrees with the child card's
+ *  ``failed`` terminator. ``null`` (status not yet known) renders the
+ *  in-flight pulse, same as ``live``. */
+function SpawnRowStatusIcon({ status }: { status: Status | null }) {
+  if (status === "done") return <CheckCircle2 className="h-4 w-4 text-emerald-400" />;
+  if (status === "failed") return <XCircle className="h-4 w-4 text-red-400" />;
+  if (status === "yield") return <Hourglass className="h-4 w-4 text-amber-300" />;
+  // live or null → still in flight.
+  return <DotPulse />;
 }
 
 function formatSpan(s: number): string {
