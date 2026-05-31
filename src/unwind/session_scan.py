@@ -18,7 +18,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, NamedTuple, Optional
+from typing import NamedTuple, Optional
 
 from ._cache import PathCache
 from .jsonl import (
@@ -26,6 +26,7 @@ from .jsonl import (
     YIELD_RE as _YIELD_RE,
     _text_blocks,
     extract_assistant_text as _extract_assistant_text,
+    is_tool_result_record as _is_tool_result_record,
     iter_lines,
     parse_ts as _parse_ts,
 )
@@ -138,6 +139,13 @@ def scan_session(path: Path) -> SessionScan:
     # system subtypes don't count as events — they leave state alone.
     at_user_prompt = False
     has_returned = False
+    # A single assistant turn is written to the JSONL as several records —
+    # one per content block (thinking / text / each tool_use) — and every
+    # one of those records repeats the SAME ``message.usage``. Count each
+    # turn once, keyed on the stable assistant message id (``requestId`` as
+    # a fallback), or a turn with N tool calls gets its tokens summed N+1
+    # times over.
+    seen_turn_ids: set[str] = set()
     for rec in iter_lines(path):
         ts = _parse_ts(rec.get("timestamp"))
         if ts is not None:
@@ -154,7 +162,13 @@ def scan_session(path: Path) -> SessionScan:
                     cr = int(u.get("cache_read_input_tokens") or 0)
                     r_in = int(u.get("input_tokens") or 0)
                     w_out = int(u.get("output_tokens") or 0)
-                    if cw or cr or r_in or w_out:
+                    turn_id = msg.get("id") or rec.get("requestId")
+                    already_seen = (
+                        isinstance(turn_id, str) and turn_id in seen_turn_ids
+                    )
+                    if (cw or cr or r_in or w_out) and not already_seen:
+                        if isinstance(turn_id, str):
+                            seen_turn_ids.add(turn_id)
                         m = msg.get("model")
                         model = m if isinstance(m, str) else None
                         rec_uuid = rec.get("uuid")
@@ -204,19 +218,6 @@ def scan_session(path: Path) -> SessionScan:
     scan.at_user_prompt = at_user_prompt
     scan.has_returned = has_returned
     return scan
-
-
-def _is_tool_result_record(rec: dict[str, Any]) -> bool:
-    msg = rec.get("message")
-    if not isinstance(msg, dict):
-        return False
-    content = msg.get("content")
-    if not isinstance(content, list):
-        return False
-    for block in content:
-        if isinstance(block, dict) and block.get("type") == "tool_result":
-            return True
-    return False
 
 
 class CanvasTreeBuilder:

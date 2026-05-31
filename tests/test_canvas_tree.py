@@ -194,6 +194,64 @@ def test_scan_session_extracts_usage_events(tmp_path: Path):
     assert ev2.uuid == "a-3"
 
 
+def test_scan_session_counts_each_turn_once_despite_block_split(tmp_path: Path):
+    """A single assistant turn is written to the JSONL as one record per
+    content block (thinking / text / each tool_use), and EVERY one of
+    those records repeats the same ``message.usage``. The scan must book
+    that turn's tokens once — keyed on ``message.id`` — or a turn with N
+    tool calls inflates its usage (N+1)×. This is the bug that made a
+    10-minute window report millions of phantom output tokens.
+    """
+    proj = tmp_path / "proj"
+    sid = "s1"
+    usage = {
+        "input_tokens": 12,
+        "output_tokens": 800,
+        "cache_creation_input_tokens": 5000,
+        "cache_read_input_tokens": 9000,
+    }
+
+    def _block(uuid: str, msg_id: str, kind: str) -> dict:
+        return {
+            "uuid": uuid,
+            "type": "assistant",
+            "sessionId": sid,
+            "timestamp": "2026-05-04T10:00:05Z",
+            "requestId": "req_" + msg_id,
+            "message": {
+                "id": msg_id,
+                "role": "assistant",
+                "content": [{"type": kind}],
+                "usage": usage,
+            },
+        }
+
+    _write_session(
+        proj,
+        sid,
+        [
+            _user(sid, "2026-05-04T10:00:00Z"),
+            # One turn, three content blocks, all carrying the same usage.
+            _block("a-1", "msg_A", "thinking"),
+            _block("a-2", "msg_A", "text"),
+            _block("a-3", "msg_A", "tool_use"),
+            # A genuinely separate turn must still be counted.
+            _block("b-1", "msg_B", "text"),
+        ],
+    )
+    scan = scan_session(proj / f"{sid}.jsonl")
+    # Two turns, not four records.
+    assert len(scan.usage_events) == 2
+    # The kept event is the FIRST block of the turn — its uuid is what the
+    # fork-inheritance dedup matches against ``collect_uuids`` (which unions
+    # every ancestor block's uuid, so the first is always present).
+    assert scan.usage_events[0].uuid == "a-1"
+    assert scan.usage_events[1].uuid == "b-1"
+    # Tokens booked once per turn, not once per block.
+    assert sum(ev.w for ev in scan.usage_events) == 1600
+    assert sum(ev.cw for ev in scan.usage_events) == 10000
+
+
 # --- collect_invocations ------------------------------------------------
 
 
@@ -382,6 +440,129 @@ def test_usage_self_and_subtree_aggregate_post_order(tmp_path: Path):
     # Parent: self counts only its own tokens; subtree adds the child's.
     assert root.self_usage == {"cw": 3, "cr": 4, "r": 1, "w": 2}
     assert root.subtree_usage == {"cw": 33, "cr": 44, "r": 11, "w": 22}
+
+
+def _split_turn(sid: str, mid: str, usage: dict, ts: str, blocks: int) -> list[dict]:
+    """One assistant turn the way Claude Code actually writes it: ``blocks``
+    separate JSONL records (thinking / text / tool_use / …), each with its
+    OWN uuid but all sharing one ``message.id`` and repeating the SAME
+    ``message.usage``. A correct scan books this turn's usage exactly once;
+    a regression that sums per-record would inflate it ``blocks``×.
+    """
+    kinds = ["thinking", "text", "tool_use", "tool_use", "text"]
+    return [
+        {
+            "uuid": f"{mid}-b{i}",
+            "type": "assistant",
+            "sessionId": sid,
+            "timestamp": ts,
+            "requestId": f"req-{mid}",
+            "message": {
+                "id": mid,
+                "role": "assistant",
+                "model": "sonnet",
+                "content": [{"type": kinds[i % len(kinds)]}],
+                "usage": usage,
+            },
+        }
+        for i in range(blocks)
+    ]
+
+
+def test_three_level_nesting_known_token_counts(tmp_path: Path):
+    """End-to-end regression guard with fixed, hand-checkable token counts.
+
+    A 4-node chain MAIN → L1 → L2 → L3 (three levels of nesting), where each
+    session's single turn is BLOCK-SPLIT across several records sharing one
+    ``message.id``. Asserts two invariants that together pin both bugs we
+    care about:
+
+      * ``self_usage`` per node == that node's per-turn usage, NOT the
+        block-split-inflated sum (dedup-by-message.id works at every depth).
+      * ``subtree_usage`` == self + every descendant, summed (post-order
+        rollup is correct through three levels).
+
+    Token values use distinct decimal places per level so any double-count or
+    mis-rollup is obvious from the failing number alone.
+    """
+    proj = tmp_path / "proj"
+    # (usage, block-count) per level — block counts vary to make sure the
+    # collapse isn't accidentally a no-op.
+    levels = {
+        "MAIN": ({"input_tokens": 1, "output_tokens": 2,
+                  "cache_creation_input_tokens": 3, "cache_read_input_tokens": 4}, 3),
+        "L1": ({"input_tokens": 10, "output_tokens": 20,
+                "cache_creation_input_tokens": 30, "cache_read_input_tokens": 40}, 4),
+        "L2": ({"input_tokens": 100, "output_tokens": 200,
+                "cache_creation_input_tokens": 300, "cache_read_input_tokens": 400}, 2),
+        "L3": ({"input_tokens": 1000, "output_tokens": 2000,
+                "cache_creation_input_tokens": 3000, "cache_read_input_tokens": 4000}, 5),
+    }
+    for sid, (usage, blocks) in levels.items():
+        _write_session(
+            proj,
+            sid,
+            [
+                _user(sid, "2026-05-04T10:00:00Z"),
+                *_split_turn(sid, f"msg-{sid}", usage, "2026-05-04T10:00:02Z", blocks),
+            ],
+        )
+
+    # One report wiring the full depth-3 chain off MAIN.
+    log = tmp_path / "log"
+    _write_report(
+        log,
+        "i0",
+        parent_sid="MAIN",
+        started_at="2026-05-04T10:00:00+00:00",
+        ended_at="2026-05-04T10:00:30+00:00",
+        tasks=[
+            {
+                "task": "/l1", "status": "complete", "depth": 1, "session_id": "L1",
+                "children": [
+                    {
+                        "task": "/l2", "status": "complete", "depth": 2, "session_id": "L2",
+                        "children": [
+                            {
+                                "task": "/l3", "status": "complete",
+                                "depth": 3, "session_id": "L3",
+                            }
+                        ],
+                    }
+                ],
+            }
+        ],
+    )
+    ci = CallstackIndex(log)
+    root, all_w = build_canvas_tree(proj, "MAIN", spawn_resolver=_resolver(proj, ci))
+
+    def node(sid: str):
+        return next(w for w in all_w if w.session_id == sid and w.window_index == 0)
+
+    def turn(sid: str) -> dict:
+        u = levels[sid][0]
+        return {
+            "cw": u["cache_creation_input_tokens"], "cr": u["cache_read_input_tokens"],
+            "r": u["input_tokens"], "w": u["output_tokens"],
+        }
+
+    def add(*ds: dict) -> dict:
+        return {k: sum(d[k] for d in ds) for k in ("cw", "cr", "r", "w")}
+
+    # self_usage == the single turn, regardless of how many block records.
+    for sid in levels:
+        assert node(sid).self_usage == turn(sid), f"{sid} self_usage inflated by block-split"
+
+    # subtree_usage rolls up post-order through all three levels.
+    assert node("L3").subtree_usage == turn("L3")
+    assert node("L2").subtree_usage == add(turn("L2"), turn("L3"))
+    assert node("L1").subtree_usage == add(turn("L1"), turn("L2"), turn("L3"))
+    assert root.subtree_usage == add(
+        turn("MAIN"), turn("L1"), turn("L2"), turn("L3")
+    )
+    # Sanity: the rolled-up output total is the four levels' turns, not the
+    # 14 block records (which would sum to far more).
+    assert root.subtree_usage["w"] == 2 + 20 + 200 + 2000
 
 
 def test_fork_window_skips_usage_inherited_from_parent(tmp_path: Path):

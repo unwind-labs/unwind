@@ -164,6 +164,57 @@ class SessionSummary:
     cwd: Optional[str]
     git_branch: Optional[str]
     custom_title: Optional[str] = None
+    # The ``message.id`` of the last assistant turn folded into
+    # ``message_count``. Internal continuity token so ``apply_increment`` can
+    # keep collapsing block-split records across an append boundary (a turn's
+    # blocks can straddle the boundary). Not part of the display contract.
+    last_assistant_id: Optional[str] = None
+
+
+def is_tool_result_record(rec: dict) -> bool:
+    """True if this ``user`` record is a tool_result envelope (mid-turn tool
+    output) rather than a real user prompt. Canonical home; ``session_scan``
+    imports this."""
+    msg = rec.get("message")
+    if not isinstance(msg, dict):
+        return False
+    content = msg.get("content")
+    if not isinstance(content, list):
+        return False
+    return any(
+        isinstance(b, dict) and b.get("type") == "tool_result" for b in content
+    )
+
+
+def turn_delta(rec: dict, prev_assistant_id: Optional[str]) -> tuple[int, Optional[str]]:
+    """Whether ``rec`` adds a conversation turn to the message count, plus the
+    updated 'last assistant message id' to thread into the next call.
+
+    Claude Code writes one assistant turn as several JSONL records — one per
+    content block (thinking / text / each tool_use), all sharing a single
+    ``message.id`` — and writes a tool-bearing user turn as one record per
+    ``tool_result``. Counting raw records therefore inflates the turn count
+    (measured ~2.3x on real sessions). To report the same turn count Claude
+    itself shows, collapse those: an ``assistant`` record counts only when its
+    ``message.id`` differs from the previous assistant record's; a ``user``
+    record counts only when it carries a real prompt (no ``tool_result``).
+
+    Returns ``(0 or 1, prev_assistant_id_after)``.
+    """
+    rtype = rec.get("type")
+    if rtype == "assistant":
+        msg = rec.get("message")
+        mid = msg.get("id") if isinstance(msg, dict) else None
+        turn_id = mid or rec.get("requestId")
+        if isinstance(turn_id, str):
+            if turn_id == prev_assistant_id:
+                return 0, prev_assistant_id
+            return 1, turn_id
+        # No id to dedup on — count it (can't tell blocks apart).
+        return 1, prev_assistant_id
+    if rtype == "user":
+        return (0, prev_assistant_id) if is_tool_result_record(rec) else (1, prev_assistant_id)
+    return 0, prev_assistant_id
 
 
 _META_TYPES = {
@@ -178,9 +229,10 @@ _META_TYPES = {
 def extract_session_summary(path: Path, session_id: str) -> Optional[SessionSummary]:
     """Read enough lines to build a ``SessionSummary`` cheaply.
 
-    We scan every line because line count *is* the message count we want to
-    show. Individual lines are tiny (~1KB avg), so even 10MB files parse in
-    <100ms and this is cached by the sessions layer.
+    We scan every line to count conversation turns (see :func:`turn_delta` —
+    one assistant turn is block-split across many records, so a raw line count
+    over-reports). Individual lines are tiny (~1KB avg), so even 10MB files
+    parse in <100ms and this is cached by the sessions layer.
     """
     first_user_text: Optional[str] = None
     first_ts: Optional[datetime] = None
@@ -189,6 +241,7 @@ def extract_session_summary(path: Path, session_id: str) -> Optional[SessionSumm
     git_branch: Optional[str] = None
     custom_title: Optional[str] = None
     message_count = 0
+    last_assistant_id: Optional[str] = None
 
     for rec in iter_lines(path):
         rtype = rec.get("type")
@@ -218,10 +271,10 @@ def extract_session_summary(path: Path, session_id: str) -> Optional[SessionSumm
             if isinstance(branch_val, str):
                 git_branch = branch_val
 
-        if rtype in ("user", "assistant"):
-            message_count += 1
-            if first_user_text is None and rtype == "user":
-                first_user_text = _extract_user_text(rec)
+        delta, last_assistant_id = turn_delta(rec, last_assistant_id)
+        message_count += delta
+        if first_user_text is None and rtype == "user":
+            first_user_text = _extract_user_text(rec)
 
     try:
         st = path.stat()
@@ -254,6 +307,7 @@ def extract_session_summary(path: Path, session_id: str) -> Optional[SessionSumm
         cwd=cwd,
         git_branch=git_branch,
         custom_title=custom_title,
+        last_assistant_id=last_assistant_id,
     )
 
 

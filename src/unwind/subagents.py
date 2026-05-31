@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Optional
 
 from ._cache import PathCache
-from .jsonl import EPOCH
+from .jsonl import EPOCH, turn_delta
 
 
 SUBAGENT_PREFIX = "agent-"
@@ -161,8 +161,11 @@ class SubagentIndex:
             except (OSError, json.JSONDecodeError):
                 pass
 
-        # Cheap walk of the JSONL: count user/assistant lines, capture first ts.
+        # Cheap walk of the JSONL: count conversation turns (collapsing the
+        # block-split records of each turn — see ``turn_delta``), capture
+        # first ts.
         msg_count = 0
+        last_assistant_id: Optional[str] = None
         first_ts: Optional[datetime] = None
         try:
             with jsonl.open("r", encoding="utf-8", errors="replace") as fh:
@@ -174,9 +177,8 @@ class SubagentIndex:
                         rec = json.loads(raw)
                     except json.JSONDecodeError:
                         continue
-                    rtype = rec.get("type")
-                    if rtype in ("user", "assistant"):
-                        msg_count += 1
+                    delta, last_assistant_id = turn_delta(rec, last_assistant_id)
+                    msg_count += delta
                     if first_ts is None:
                         ts_raw = rec.get("timestamp")
                         if isinstance(ts_raw, str):

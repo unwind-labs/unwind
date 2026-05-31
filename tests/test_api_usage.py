@@ -64,11 +64,23 @@ def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
                                    "cache_creation_input_tokens": 1,
                                    "cache_read_input_tokens": 1}),
     ])
-    paths = {"slug-real": real, "-private-tmp-it-x": eph}
-    monkeypatch.setattr(ur, "list_known_projects", lambda: sorted(paths.items()))
+    # Decouple the registered ``source_path`` (which drives ephemeral
+    # classification) from the on-disk scan dir (which holds the JSONLs).
+    # ``tmp_path`` itself can land under ``/tmp`` — an EPHEMERAL_PATH_PREFIX —
+    # when ``TMPDIR`` is rooted there (e.g. sandboxed CI), which would
+    # misclassify the "real" project as ephemeral and empty the top bucket.
+    # Pin source_paths explicitly: one plainly real, one plainly ephemeral.
+    source_paths = {
+        "slug-real": "/Users/dev/projects/real",
+        "-private-tmp-it-x": "/private/tmp/it-x",
+    }
+    builder_dirs = {"slug-real": real, "-private-tmp-it-x": eph}
+    monkeypatch.setattr(
+        ur, "list_known_projects", lambda: sorted(source_paths.items())
+    )
     monkeypatch.setattr(
         ur, "canvas_tree_builder_for_slug",
-        lambda slug: CanvasTreeBuilder(paths[slug]),
+        lambda slug: CanvasTreeBuilder(builder_dirs[slug]),
     )
 
     # Force the report's local-TZ defaulting onto UTC so the test is

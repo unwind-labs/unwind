@@ -11,6 +11,7 @@ from .jsonl import (
     SessionSummary,
     extract_session_summary,
     parse_ts,
+    turn_delta,
 )
 from .projects import ProjectPaths, project_jsonl_listing
 
@@ -96,6 +97,9 @@ class SessionIndex:
         added = 0
         last_ts = summary.last_timestamp
         custom_title = summary.custom_title
+        # Thread the prior turn's assistant id so a turn whose block-split
+        # records straddle the append boundary isn't counted twice.
+        last_assistant_id = summary.last_assistant_id
         for rec in new_records:
             rtype = rec.get("type")
             if rtype == "custom-title":
@@ -106,8 +110,8 @@ class SessionIndex:
             ts = parse_ts(rec.get("timestamp"))
             if ts is not None and (last_ts is None or ts > last_ts):
                 last_ts = ts
-            if rtype in ("user", "assistant"):
-                added += 1
+            delta, last_assistant_id = turn_delta(rec, last_assistant_id)
+            added += delta
 
         title = custom_title or summary.title
         updated = replace(
@@ -117,6 +121,7 @@ class SessionIndex:
             custom_title=custom_title,
             title=title,
             file_size_bytes=new_size,
+            last_assistant_id=last_assistant_id,
         )
         with self._lock:
             self._cache[session_id] = _CacheEntry(

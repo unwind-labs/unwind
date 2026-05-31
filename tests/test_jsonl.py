@@ -61,6 +61,50 @@ def test_extract_summary_counts_messages(tmp_path: Path):
     assert summary.last_timestamp is not None
 
 
+def _asst_block(mid: str, kind: str, ts: str) -> dict:
+    """One assistant content-block record. Claude Code writes a multi-block
+    turn as several such records, all sharing one ``message.id``."""
+    return {
+        "type": "assistant",
+        "sessionId": "s",
+        "timestamp": ts,
+        "requestId": "req_" + mid,
+        "message": {"id": mid, "role": "assistant", "content": [{"type": kind}]},
+    }
+
+
+def test_extract_summary_counts_turns_not_block_split_records(tmp_path: Path):
+    """``message_count`` is conversation turns, not raw records. One assistant
+    turn split across thinking/text/tool_use records (same ``message.id``)
+    counts once; tool_result ``user`` records (mid-turn tool output) don't
+    count at all. This is what makes unwind agree with Claude's own count."""
+    lines = [
+        {"type": "user", "timestamp": "2026-04-24T08:00:00Z",
+         "message": {"role": "user", "content": "do the thing"}},
+        # One assistant turn, four content blocks → counts as 1.
+        _asst_block("msg_A", "thinking", "2026-04-24T08:00:01Z"),
+        _asst_block("msg_A", "text", "2026-04-24T08:00:01Z"),
+        _asst_block("msg_A", "tool_use", "2026-04-24T08:00:02Z"),
+        _asst_block("msg_A", "tool_use", "2026-04-24T08:00:02Z"),
+        # Tool outputs come back as user/tool_result records → don't count.
+        {"type": "user", "timestamp": "2026-04-24T08:00:03Z",
+         "message": {"role": "user",
+                     "content": [{"type": "tool_result", "content": "ok"}]}},
+        {"type": "user", "timestamp": "2026-04-24T08:00:03Z",
+         "message": {"role": "user",
+                     "content": [{"type": "tool_result", "content": "ok"}]}},
+        # A second, distinct assistant turn → counts as 1.
+        _asst_block("msg_B", "text", "2026-04-24T08:00:04Z"),
+    ]
+    p = _write_jsonl(tmp_path, lines)
+    summary = extract_session_summary(p, "s")
+    assert summary is not None
+    # 1 user prompt + 2 assistant turns = 3 (not the 7 user/assistant records).
+    assert summary.message_count == 3
+    # Continuity token for the incremental path = last turn's id.
+    assert summary.last_assistant_id == "msg_B"
+
+
 def test_iter_lines_from_tail(tmp_path: Path):
     p = tmp_path / "grow.jsonl"
     p.write_text('{"n":1}\n{"n":2}\n')
