@@ -222,6 +222,42 @@ def test_include_meta_toggles_attachments(tmp_path: Path):
     assert roles == ["system", "user"]
 
 
+def test_attachment_subtype_surfaces_as_raw_type(tmp_path: Path):
+    """The attachment's specific subtype (skill_listing, hook_success, …)
+    is exposed via ``raw_type`` so the UI can dispatch a per-type renderer.
+    skill_listing's body is the listing itself, with no ``[name]`` prefix."""
+    lines = [
+        {
+            "type": "attachment",
+            "uuid": "att1",
+            "sessionId": "s",
+            "timestamp": "2026-04-24T08:00:00.000Z",
+            "attachment": {
+                "type": "skill_listing",
+                "content": "- alpha: do a\n- beta: do b",
+                "skillCount": 2,
+            },
+        },
+        {
+            "type": "attachment",
+            "uuid": "att2",
+            "sessionId": "s",
+            "timestamp": "2026-04-24T08:00:01.000Z",
+            "attachment": {
+                "type": "deferred_tools_delta",
+                "addedNames": ["CronCreate", "CronList"],
+            },
+        },
+    ]
+    p = _write(tmp_path, lines)
+    msgs = read_messages(p, include_meta=True).messages
+    by_type = {m.raw_type: m for m in msgs}
+    assert "skill_listing" in by_type
+    assert by_type["skill_listing"].text == "- alpha: do a\n- beta: do b"
+    assert "deferred_tools_delta" in by_type
+    assert by_type["deferred_tools_delta"].text == "added: CronCreate, CronList"
+
+
 def test_in_flight_agent_matches_pending_subagent(tmp_path: Path):
     """While an Agent tool_use is pending (no tool_result yet), unwind should
     still link it to the on-disk subagent trace so the UI can show the live

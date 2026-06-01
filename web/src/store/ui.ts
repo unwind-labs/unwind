@@ -2,6 +2,14 @@ import { create } from "zustand";
 
 export type PaneKey = "sessions" | "thread";
 
+/** How the node-detail trace renders:
+ *  - ``compact``: call structure only, with intermediate "N msgs" activity
+ *    lines between spawns (mirrors the canvas node card).
+ *  - ``normal``: full message trace (the default).
+ *  - ``detailed``: full trace including metadata messages.
+ *  - ``raw``: the underlying records, pretty-printed but copyable as JSONL. */
+export type TraceMode = "compact" | "normal" | "detailed" | "raw";
+
 export type UrlSyncedState = {
   slug: string | null;
   rootSessionId: string | null;
@@ -16,10 +24,10 @@ interface UiState {
   slug: string | null;
   rootSessionId: string | null;
   threadSessionId: string | null;
-  includeMeta: boolean;
+  /** Node-detail trace view mode (compact / normal / detailed / raw). */
+  traceMode: TraceMode;
   sessionFilter: string;
   showForks: boolean;
-  callsOnly: boolean;
   focusedPane: PaneKey;
   /** When set, the right pane shows the linear TracePane for this session
    *  as a takeover overlay, with a back-to-canvas link. */
@@ -50,10 +58,9 @@ interface UiState {
   setSlug: (slug: string | null) => void;
   selectRootSession: (id: string | null) => void;
   selectThreadSession: (id: string | null) => void;
-  setIncludeMeta: (v: boolean) => void;
+  setTraceMode: (v: TraceMode) => void;
   setSessionFilter: (v: string) => void;
   setShowForks: (v: boolean) => void;
-  setCallsOnly: (v: boolean) => void;
   openDetail: (id: string, window?: { start: string | null; end: string | null } | null) => void;
   closeDetail: () => void;
   setCanvasFocusedNodeId: (id: string | null) => void;
@@ -76,10 +83,9 @@ export const useUi = create<UiState>((set, get) => ({
   slug: null,
   rootSessionId: null,
   threadSessionId: null,
-  includeMeta: false,
+  traceMode: "normal",
   sessionFilter: "",
   showForks: false,
-  callsOnly: false,
   detailSessionId: null,
   detailWindow: null,
   canvasFocusedNodeId: null,
@@ -106,10 +112,9 @@ export const useUi = create<UiState>((set, get) => ({
       canvasFocusedNodeId: null,
     }),
   selectThreadSession: (id) => set({ threadSessionId: id }),
-  setIncludeMeta: (v) => set({ includeMeta: v }),
+  setTraceMode: (v) => set({ traceMode: v }),
   setSessionFilter: (v) => set({ sessionFilter: v }),
   setShowForks: (v) => set({ showForks: v }),
-  setCallsOnly: (v) => set({ callsOnly: v }),
   openDetail: (id, window) => set({ detailSessionId: id, detailWindow: window ?? null }),
   closeDetail: () => set({ detailSessionId: null, detailWindow: null }),
   setCanvasFocusedNodeId: (id) => set({ canvasFocusedNodeId: id }),

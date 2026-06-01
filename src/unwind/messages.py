@@ -361,11 +361,25 @@ def _normalize_record(
         return [
             Message(
                 uuid=uuid, session_id=session_id, role="system", timestamp=ts,
-                text=_stringify_meta(rec), raw_type=rtype,
+                text=_stringify_meta(rec), raw_type=_meta_subtype(rec, rtype),
             )
         ]
 
     return []
+
+
+def _meta_subtype(rec: dict[str, Any], rtype: str) -> str:
+    """Surface an attachment's specific subtype (``skill_listing``,
+    ``hook_success``, ``mcp_instructions_delta``, …) as ``raw_type`` so the
+    UI can dispatch a per-type renderer. Non-attachment meta records keep
+    their record type."""
+    if rtype == "attachment":
+        a = rec.get("attachment")
+        if isinstance(a, dict):
+            sub = a.get("type")
+            if isinstance(sub, str) and sub:
+                return sub
+    return rtype
 
 
 def _normalize_user(
@@ -510,7 +524,25 @@ def _normalize_assistant(
 def _stringify_meta(rec: dict[str, Any]) -> str:
     a = rec.get("attachment")
     if isinstance(a, dict):
-        name = a.get("hookName") or a.get("type") or ""
+        sub = a.get("type")
+        # skill_listing's body IS the listing; drop the redundant prefix so
+        # the UI can show / count it directly.
+        if sub == "skill_listing":
+            return str(a.get("content") or "")
+        # Tool/instruction deltas carry their payload as name lists, not a
+        # ``content`` string — summarise them so the row is skimmable.
+        if sub in ("mcp_instructions_delta", "deferred_tools_delta"):
+            added = a.get("addedNames")
+            if not added and isinstance(a.get("tools"), list):
+                added = [t.get("name") for t in a["tools"] if isinstance(t, dict) and t.get("name")]
+            removed = a.get("removedNames")
+            parts = []
+            if added:
+                parts.append("added: " + ", ".join(str(x) for x in added))
+            if removed:
+                parts.append("removed: " + ", ".join(str(x) for x in removed))
+            return "\n".join(parts) or str(a.get("content") or "")
+        name = a.get("hookName") or sub or ""
         body = a.get("content") or a.get("stdout") or a.get("stderr") or ""
         return f"[{name}] {body}" if name else str(body)
     return str(rec.get("type", ""))

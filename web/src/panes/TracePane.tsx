@@ -13,11 +13,14 @@ import {
   GitFork,
   Hourglass,
   Sparkles,
+  Activity,
+  Copy,
+  Check,
 } from "lucide-react";
 import { useMessages } from "@/api/client";
 import type { Message, SpawnCardData } from "@/api/types";
 import type { Status } from "@/lib/status";
-import { useUi } from "@/store/ui";
+import { useUi, type TraceMode } from "@/store/ui";
 import {
   filterExtrasByWindow,
   filterMessagesByWindow,
@@ -29,6 +32,7 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/component
 import { Badge } from "@/components/ui/badge";
 import { cn, shortId } from "@/lib/utils";
 import { isTypingTarget } from "@/lib/keyboard";
+import { describeSystem, describeTool, lineDiff, type DiffRow } from "@/panes/message-renderers";
 
 /** Strip dangerous link schemes from markdown content.
  *
@@ -67,11 +71,14 @@ export function TracePane({
   const slug = useUi((s) => s.slug);
   const rootSessionId = useUi((s) => s.rootSessionId);
   const sessionId = sessionIdOverride ?? rootSessionId;
-  const includeMeta = useUi((s) => s.includeMeta);
-  const setIncludeMeta = useUi((s) => s.setIncludeMeta);
-  const callsOnly = useUi((s) => s.callsOnly);
-  const setCallsOnly = useUi((s) => s.setCallsOnly);
+  const traceMode = useUi((s) => s.traceMode);
+  const setTraceMode = useUi((s) => s.setTraceMode);
   const focusedPane = useUi((s) => s.focusedPane);
+
+  // ``detailed`` and ``raw`` both want the complete record set (metadata
+  // included); ``compact`` collapses non-call turns into activity lines.
+  const includeMeta = traceMode === "detailed" || traceMode === "raw";
+  const compact = traceMode === "compact";
 
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -154,40 +161,22 @@ export function TracePane({
             ) : null}
           </div>
         </div>
-        <div className="flex items-center gap-3">
-          <label
-            className="flex items-center gap-1.5 text-[11px] text-muted-foreground"
-            title="hide messages and tool use, show only call structure"
-          >
-            <input
-              type="checkbox"
-              checked={callsOnly}
-              onChange={(e) => setCallsOnly(e.target.checked)}
-              className="h-3 w-3"
-            />
-            calls only
-          </label>
-          <label className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
-            <input
-              type="checkbox"
-              checked={includeMeta}
-              onChange={(e) => setIncludeMeta(e.target.checked)}
-              className="h-3 w-3"
-            />
-            details
-          </label>
-        </div>
+        <ViewModeToolbar mode={traceMode} onChange={setTraceMode} />
       </header>
       <ScrollArea ref={scrollRef} className="flex-1">
         <div className="min-w-0 px-4 py-3">
-          <SessionTrace
-            slug={slug!}
-            sessionId={sessionId}
-            depth={0}
-            includeMeta={includeMeta}
-            callsOnly={callsOnly}
-            window={windowed}
-          />
+          {traceMode === "raw" ? (
+            <RawTrace slug={slug!} sessionId={sessionId} window={windowed} />
+          ) : (
+            <SessionTrace
+              slug={slug!}
+              sessionId={sessionId}
+              depth={0}
+              includeMeta={includeMeta}
+              compact={compact}
+              window={windowed}
+            />
+          )}
         </div>
       </ScrollArea>
     </Shell>
@@ -204,6 +193,110 @@ function Shell({ children }: { children: React.ReactNode }) {
   return <div className="flex h-full flex-col">{children}</div>;
 }
 
+const VIEW_MODES: { value: TraceMode; label: string; title: string }[] = [
+  { value: "compact", label: "compact", title: "call structure with intermediate message counts" },
+  { value: "normal", label: "normal", title: "full message trace" },
+  { value: "detailed", label: "detailed", title: "full message trace including metadata" },
+  { value: "raw", label: "raw", title: "underlying records as copyable JSONL" },
+];
+
+/** Segmented control selecting how the trace below renders. */
+function ViewModeToolbar({
+  mode,
+  onChange,
+}: {
+  mode: TraceMode;
+  onChange: (m: TraceMode) => void;
+}) {
+  return (
+    <div className="flex items-center gap-0.5 rounded-md border border-border bg-muted/30 p-0.5">
+      {VIEW_MODES.map((m) => (
+        <button
+          key={m.value}
+          type="button"
+          title={m.title}
+          aria-pressed={mode === m.value}
+          onClick={() => onChange(m.value)}
+          className={cn(
+            "rounded px-2 py-1 text-[11px] lowercase transition-colors",
+            mode === m.value
+              ? "bg-background text-foreground shadow-sm"
+              : "text-muted-foreground hover:text-foreground",
+          )}
+        >
+          {m.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+/** Raw view: every record in the (windowed) session shown as pretty-printed
+ *  JSON for readability, with a one-click copy that yields newline-delimited
+ *  JSONL — one compact object per line — so it round-trips back into tooling. */
+function RawTrace({
+  slug,
+  sessionId,
+  window: traceWindow,
+}: {
+  slug: string;
+  sessionId: string;
+  window?: TraceWindow | null;
+}) {
+  const { data, isLoading, error } = useMessages(slug, sessionId, true);
+  const [copied, setCopied] = useState(false);
+
+  const messages = useMemo(() => {
+    if (!data) return [];
+    if (!traceWindow || (!traceWindow.start && !traceWindow.end)) return data.messages;
+    return filterMessagesByWindow(data.messages, traceWindow.start, traceWindow.end);
+  }, [data, traceWindow]);
+
+  const jsonl = useMemo(() => messages.map((m) => JSON.stringify(m)).join("\n"), [messages]);
+  const pretty = useMemo(
+    () => messages.map((m) => JSON.stringify(m, null, 2)).join("\n"),
+    [messages],
+  );
+
+  const onCopy = () => {
+    void navigator.clipboard.writeText(jsonl).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    });
+  };
+
+  if (isLoading) {
+    return <div className="text-xs text-muted-foreground">loading {shortId(sessionId)}…</div>;
+  }
+  if (error) {
+    return <div className="text-xs text-destructive">{(error as Error).message}</div>;
+  }
+  if (messages.length === 0) {
+    return <div className="text-xs italic text-muted-foreground">no records.</div>;
+  }
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center justify-between">
+        <span className="text-[10px] uppercase tracking-wider text-muted-foreground">
+          {messages.length} records · jsonl
+        </span>
+        <button
+          type="button"
+          onClick={onCopy}
+          className="inline-flex items-center gap-1.5 rounded-md border border-border bg-card px-2 py-1 text-[11px] text-muted-foreground transition-colors hover:bg-accent/40 hover:text-foreground"
+        >
+          {copied ? <Check className="h-3 w-3 text-emerald-400" /> : <Copy className="h-3 w-3" />}
+          {copied ? "copied" : "copy as jsonl"}
+        </button>
+      </div>
+      <pre className="overflow-x-auto whitespace-pre rounded-lg border border-border bg-card px-3 py-2 text-[11px] font-mono leading-relaxed">
+        {pretty}
+      </pre>
+    </div>
+  );
+}
+
 /**
  * Render a session's trace: messages + inline spawn cards (anchored on
  * tool_use) + extra spawn cards (callstack-spawned children that don't
@@ -214,7 +307,7 @@ function SessionTrace({
   sessionId,
   depth,
   includeMeta,
-  callsOnly,
+  compact,
   autoOpen = false,
   window: traceWindow = null,
 }: {
@@ -222,7 +315,10 @@ function SessionTrace({
   sessionId: string;
   depth: number;
   includeMeta: boolean;
-  callsOnly: boolean;
+  /** Compact view: drop regular messages/tool cards and collapse each run
+   *  of them into a single "N msgs" activity line between the call rows
+   *  (mirrors the canvas node card). */
+  compact: boolean;
   /** If true, default-expand any spawn cards so the user sees the whole sub-tree. */
   autoOpen?: boolean;
   /** When set, filter this session's messages to ``[start, end)``. Only
@@ -290,14 +386,47 @@ function SessionTrace({
     return result;
   }, [windowed, groups]);
 
+  // Compact: keep spawn rows (anchored tool_use + extras) and collapse each
+  // maximal run of the remaining messages/tool cards into one activity line
+  // carrying the count and time span — the same summary the canvas card shows.
   const visibleItems = useMemo(() => {
-    if (!callsOnly) return items;
-    return items.filter(
-      (it) =>
+    if (!compact) return items;
+    const out: OrderedItem[] = [];
+    let count = 0;
+    let firstTs: string | null = null;
+    let lastTs: string | null = null;
+    const flush = () => {
+      if (count === 0) return;
+      const span =
+        firstTs && lastTs ? Math.max(0, (Date.parse(lastTs) - Date.parse(firstTs)) / 1000) : 0;
+      out.push({ kind: "activity", count, spanSeconds: span, ts: 0 });
+      count = 0;
+      firstTs = null;
+      lastTs = null;
+    };
+    for (const it of items) {
+      const isSpawn =
         it.kind === "extra" ||
-        (it.kind === "group" && it.group.kind === "tool" && it.group.toolUse.spawn_kind != null),
-    );
-  }, [items, callsOnly]);
+        (it.kind === "group" && it.group.kind === "tool" && it.group.toolUse.spawn_kind != null);
+      if (isSpawn) {
+        flush();
+        out.push(it);
+        continue;
+      }
+      // it.kind === "group" non-spawn: one logical event (tool_use+result
+      // already paired into a single group), so count it as one.
+      count += 1;
+      if (it.kind === "group") {
+        const ts = it.group.kind === "msg" ? it.group.msg.timestamp : it.group.toolUse.timestamp;
+        if (ts) {
+          if (!firstTs) firstTs = ts;
+          lastTs = ts;
+        }
+      }
+    }
+    flush();
+    return out;
+  }, [items, compact]);
 
   if (isLoading) {
     return <div className="text-xs text-muted-foreground">loading {shortId(sessionId)}…</div>;
@@ -340,24 +469,26 @@ function SessionTrace({
             slug={slug}
             depth={depth}
             includeMeta={includeMeta}
-            callsOnly={callsOnly}
+            compact={compact}
             autoOpen={autoOpen}
           />
-        ) : (
+        ) : it.kind === "extra" ? (
           <ExtraSpawnCard
             key={i}
             spawn={it.spawn}
             slug={slug}
             depth={depth}
             includeMeta={includeMeta}
-            callsOnly={callsOnly}
+            compact={compact}
             autoOpen={autoOpen}
           />
+        ) : (
+          <ActivityRow key={i} count={it.count} spanSeconds={it.spanSeconds} />
         ),
       )}
       {visibleItems.length === 0 && (
         <div className="text-xs italic text-muted-foreground">
-          {callsOnly ? "no callstack/subagent calls in this session." : "no messages."}
+          {compact ? "no activity in this session." : "no messages."}
         </div>
       )}
     </div>
@@ -368,7 +499,37 @@ function SessionTrace({
 
 type OrderedItem =
   | { kind: "group"; group: RenderGroup; ts: number }
-  | { kind: "extra"; spawn: SpawnCardData; ts: number };
+  | { kind: "extra"; spawn: SpawnCardData; ts: number }
+  | { kind: "activity"; count: number; spanSeconds: number; ts: number };
+
+/** Intermediate "N msgs" line shown between call rows in compact view —
+ *  the trace-pane analogue of the canvas card's activity row. */
+function ActivityRow({ count, spanSeconds }: { count: number; spanSeconds: number }) {
+  return (
+    <div className="flex items-center gap-2 pl-1 text-[11px] text-muted-foreground">
+      <Activity className="h-3 w-3 opacity-60" />
+      <span>activity</span>
+      <span className="opacity-60">·</span>
+      <span>
+        {count} msg{count === 1 ? "" : "s"}
+      </span>
+      {spanSeconds > 0 ? (
+        <>
+          <span className="opacity-60">·</span>
+          <span className="tabular-nums">{formatSpan(spanSeconds)}</span>
+        </>
+      ) : null}
+    </div>
+  );
+}
+
+function formatSpan(s: number): string {
+  if (s < 1) return `${Math.round(s * 1000)}ms`;
+  if (s < 60) return `${s.toFixed(1)}s`;
+  const m = Math.floor(s / 60);
+  const sec = Math.floor(s % 60);
+  return `${m}m ${sec}s`;
+}
 
 // --- group renderer ----------------------------------------------------------
 
@@ -377,16 +538,19 @@ function Group({
   slug,
   depth,
   includeMeta,
-  callsOnly,
+  compact,
   autoOpen,
 }: {
   group: RenderGroup;
   slug: string;
   depth: number;
   includeMeta: boolean;
-  callsOnly: boolean;
+  compact: boolean;
   autoOpen: boolean;
 }) {
+  // Tool/system cards always render their rich, type-aware chrome (normal
+  // and detailed alike). ``includeMeta`` only governs whether metadata/system
+  // records are fetched in the first place, not how they're drawn.
   if (group.kind === "msg") {
     return <MessageBubble msg={group.msg} />;
   }
@@ -398,7 +562,7 @@ function Group({
         slug={slug}
         depth={depth}
         includeMeta={includeMeta}
-        callsOnly={callsOnly}
+        compact={compact}
         autoOpen={autoOpen}
       />
     );
@@ -414,7 +578,7 @@ function SpawnCard({
   slug,
   depth,
   includeMeta,
-  callsOnly,
+  compact,
   autoOpen,
 }: {
   toolUse: Message;
@@ -422,7 +586,7 @@ function SpawnCard({
   slug: string;
   depth: number;
   includeMeta: boolean;
-  callsOnly: boolean;
+  compact: boolean;
   autoOpen: boolean;
 }) {
   const isCall = toolUse.spawn_kind === "call";
@@ -460,7 +624,7 @@ function SpawnCard({
         slug={slug}
         depth={depth}
         includeMeta={includeMeta}
-        callsOnly={callsOnly}
+        compact={compact}
         autoOpen={autoOpen}
       />
     );
@@ -480,7 +644,7 @@ function SpawnCard({
           slug={slug}
           depth={depth}
           includeMeta={includeMeta}
-          callsOnly={callsOnly}
+          compact={compact}
           autoOpen={autoOpen}
         />
       ))}
@@ -515,14 +679,14 @@ function ExtraSpawnCard({
   slug,
   depth,
   includeMeta,
-  callsOnly,
+  compact,
   autoOpen,
 }: {
   spawn: SpawnCardData;
   slug: string;
   depth: number;
   includeMeta: boolean;
-  callsOnly: boolean;
+  compact: boolean;
   autoOpen: boolean;
 }) {
   // ``spawn.status`` is already canonical (set server-side via
@@ -548,7 +712,7 @@ function ExtraSpawnCard({
           slug={slug}
           depth={depth}
           includeMeta={includeMeta}
-          callsOnly={callsOnly}
+          compact={compact}
           autoOpen={autoOpen}
         />
       ))}
@@ -568,7 +732,7 @@ function SpawnRow({
   slug,
   depth,
   includeMeta,
-  callsOnly,
+  compact,
   autoOpen,
 }: {
   isCall: boolean;
@@ -584,7 +748,7 @@ function SpawnRow({
   slug: string;
   depth: number;
   includeMeta: boolean;
-  callsOnly: boolean;
+  compact: boolean;
   autoOpen: boolean;
 }) {
   const [open, setOpen] = useState(autoOpen);
@@ -697,8 +861,8 @@ function SpawnRow({
               sessionId={childId!}
               depth={depth + 1}
               includeMeta={includeMeta}
-              callsOnly={callsOnly}
-              autoOpen={callsOnly}
+              compact={compact}
+              autoOpen={compact}
             />
           </div>
         </CollapsibleContent>
@@ -754,6 +918,25 @@ const BUBBLE_VARIANT: Record<Message["role"], BubbleVariant> = {
 };
 
 function MessageBubble({ msg }: { msg: Message }) {
+  // System/attachment records (skill listings, hook output, tool/instruction
+  // deltas) get a type-aware card instead of a generic muted bubble. These
+  // only appear in the detailed view (where metadata is fetched), but the
+  // rendering itself isn't gated on the mode.
+  if (msg.role === "system") {
+    return <SystemCard msg={msg} />;
+  }
+
+  // Extended-thinking placeholders ("[redacted thinking]" / "[encrypted
+  // thinking]") have no body worth disclosing — render a single dim line.
+  if (msg.role === "thinking" && /^\[(redacted|encrypted) thinking\]$/.test(msg.text ?? "")) {
+    return (
+      <div className="flex items-center gap-2 pl-1 text-[11px] italic text-muted-foreground">
+        <Sparkles className="h-3 w-3 opacity-60" />
+        {msg.text}
+      </div>
+    );
+  }
+
   const { Icon, iconClass, bubbleClass, collapsible } = BUBBLE_VARIANT[msg.role];
 
   const header = (
@@ -813,6 +996,117 @@ function MessageBubble({ msg }: { msg: Message }) {
   );
 }
 
+/** Type-aware card for ``role: "system"`` attachment records in the detailed
+ *  view — skill listings, hook output, MCP instruction/tool deltas, etc. The
+ *  ``raw_type`` (attachment subtype) drives the icon, label and trailing
+ *  detail; the body collapses closed since these are usually long. */
+function SystemCard({ msg }: { msg: Message }) {
+  const { Icon, label, detail, body, tone, markdown } = describeSystem(msg);
+  const accent = tone === "error" ? "text-red-400" : "text-muted-foreground";
+  return (
+    <div className="flex gap-3">
+      <div className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full border border-border bg-muted">
+        <Icon className={cn("h-3.5 w-3.5", accent)} />
+      </div>
+      <div className="min-w-0 flex-1">
+        <Collapsible defaultOpen={false}>
+          <CollapsibleTrigger className="group flex w-full items-center gap-2 rounded-lg border border-border bg-muted/40 px-3 py-2 text-left hover:bg-accent/40">
+            <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground transition-transform group-data-[state=open]:rotate-90" />
+            <span
+              className={cn(
+                "text-[10px] font-bold uppercase tracking-[0.16em]",
+                tone === "error" ? "text-red-300" : "text-foreground/80",
+              )}
+            >
+              {label}
+            </span>
+            {detail ? (
+              <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-muted-foreground">
+                {detail}
+              </span>
+            ) : (
+              <span className="flex-1" />
+            )}
+            {msg.timestamp ? (
+              <span className="text-[10px] tabular-nums text-muted-foreground">
+                {new Date(msg.timestamp).toLocaleTimeString()}
+              </span>
+            ) : null}
+          </CollapsibleTrigger>
+          <CollapsibleContent>
+            <div className="mt-1 rounded-lg border border-border bg-card/70 px-3 py-2">
+              {!body ? (
+                <span className="text-xs italic text-muted-foreground">(empty)</span>
+              ) : markdown ? (
+                <div className="uw-markdown text-xs">
+                  <ReactMarkdown remarkPlugins={[remarkGfm]} urlTransform={safeUrlTransform}>
+                    {body}
+                  </ReactMarkdown>
+                </div>
+              ) : (
+                <pre className="overflow-x-auto whitespace-pre-wrap break-words text-xs font-mono text-muted-foreground">
+                  {body}
+                </pre>
+              )}
+            </div>
+          </CollapsibleContent>
+        </Collapsible>
+      </div>
+    </div>
+  );
+}
+
+/** Extract the before/after line diffs for an Edit (one) or MultiEdit (one
+ *  per edit). Returns ``null`` for any other tool so ToolCard falls back to
+ *  the raw input JSON. */
+function editDiffs(toolUse: Message): DiffRow[][] | null {
+  const input = toolUse.tool_input as Record<string, unknown> | null;
+  if (!input || typeof input !== "object") return null;
+  const diffOf = (e: Record<string, unknown>): DiffRow[] | null =>
+    typeof e.old_string === "string" && typeof e.new_string === "string"
+      ? lineDiff(e.old_string, e.new_string)
+      : null;
+  if (toolUse.tool_name === "Edit") {
+    const d = diffOf(input);
+    return d ? [d] : null;
+  }
+  if (toolUse.tool_name === "MultiEdit" && Array.isArray(input.edits)) {
+    const out: DiffRow[][] = [];
+    for (const e of input.edits) {
+      if (e && typeof e === "object") {
+        const d = diffOf(e as Record<string, unknown>);
+        if (d) out.push(d);
+      }
+    }
+    return out.length ? out : null;
+  }
+  return null;
+}
+
+/** Render one before/after diff as +/− lines with green/red accents. */
+function EditDiff({ rows }: { rows: DiffRow[] }) {
+  return (
+    <pre className="overflow-x-auto rounded border border-border bg-background/40 text-xs font-mono leading-relaxed">
+      {rows.map((r, i) => (
+        <div
+          key={i}
+          className={cn(
+            "whitespace-pre-wrap break-words px-2",
+            r.type === "add" && "bg-emerald-950/40 text-emerald-200",
+            r.type === "del" && "bg-red-950/40 text-red-200",
+            r.type === "ctx" && "text-muted-foreground",
+          )}
+        >
+          <span className="select-none opacity-50">
+            {r.type === "add" ? "+ " : r.type === "del" ? "- " : "  "}
+          </span>
+          {r.text || " "}
+        </div>
+      ))}
+    </pre>
+  );
+}
+
 function ToolCard({ toolUse, toolResult }: { toolUse: Message; toolResult?: Message }) {
   const status: "pending" | "ok" | "error" = !toolResult
     ? "pending"
@@ -820,15 +1114,22 @@ function ToolCard({ toolUse, toolResult }: { toolUse: Message; toolResult?: Mess
       ? "error"
       : "ok";
 
+  // Type-aware icon, label and skim line (e.g. "Read TracePane.tsx · 935
+  // lines · 28 KB"), shown in every non-compact view.
+  const view = describeTool(toolUse, toolResult ? stringifyResult(toolResult.tool_result) : null);
+  const HeaderIcon = view.Icon;
+  // Edit/MultiEdit get a rendered before/after diff in the body instead of
+  // the raw old_string/new_string JSON blob.
+  const edits = editDiffs(toolUse);
+
   return (
     <div className="flex gap-3">
       <div className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full border border-border bg-muted">
-        <Wrench className="h-3.5 w-3.5" />
+        <HeaderIcon className="h-3.5 w-3.5" />
       </div>
       <div className="min-w-0 flex-1">
         <div className="mb-1 flex items-center gap-2 text-[10px] uppercase tracking-wider text-muted-foreground">
-          <span>tool</span>
-          <span className="font-mono text-foreground normal-case">{toolUse.tool_name ?? "?"}</span>
+          <span>{view.label}</span>
           {status === "pending" && <Badge variant="warn">pending</Badge>}
           {status === "ok" && (
             <span className="inline-flex items-center gap-1 text-emerald-400 normal-case">
@@ -851,19 +1152,25 @@ function ToolCard({ toolUse, toolResult }: { toolUse: Message; toolResult?: Mess
         <Collapsible defaultOpen={false}>
           <CollapsibleTrigger className="group flex w-full items-center gap-2 rounded-lg border border-border bg-card px-3 py-2 text-left hover:bg-accent/40">
             <ChevronRight className="h-3.5 w-3.5 text-muted-foreground transition-transform group-data-[state=open]:rotate-90" />
-            <span className="flex-1 truncate text-xs font-mono">
-              {summarizeInput(toolUse.tool_input)}
-            </span>
+            <span className="flex-1 truncate text-xs font-mono">{view.summary}</span>
           </CollapsibleTrigger>
           <CollapsibleContent>
             <div className="mt-1 space-y-2 rounded-lg border border-border bg-card/70 px-3 py-2">
               <section>
                 <div className="mb-1 text-[10px] uppercase tracking-wider text-muted-foreground">
-                  input
+                  {edits ? "changes" : "input"}
                 </div>
-                <pre className="overflow-x-auto whitespace-pre-wrap break-words text-xs font-mono">
-                  {JSON.stringify(toolUse.tool_input, null, 2)}
-                </pre>
+                {edits ? (
+                  <div className="space-y-2">
+                    {edits.map((e, i) => (
+                      <EditDiff key={i} rows={e} />
+                    ))}
+                  </div>
+                ) : (
+                  <pre className="overflow-x-auto whitespace-pre-wrap break-words text-xs font-mono">
+                    {JSON.stringify(toolUse.tool_input, null, 2)}
+                  </pre>
+                )}
               </section>
               {toolResult ? (
                 <section>
@@ -890,27 +1197,6 @@ function ToolCard({ toolUse, toolResult }: { toolUse: Message; toolResult?: Mess
 
 // --- helpers -----------------------------------------------------------------
 
-function summarizeInput(input: unknown): string {
-  if (input == null) return "(no input)";
-  if (typeof input === "string") return input;
-  if (typeof input === "object") {
-    const obj = input as Record<string, unknown>;
-    const parts: string[] = [];
-    for (const k of Object.keys(obj).slice(0, 3)) {
-      const v = obj[k];
-      const s =
-        typeof v === "string"
-          ? v
-          : typeof v === "number" || typeof v === "boolean"
-            ? String(v)
-            : JSON.stringify(v);
-      parts.push(`${k}=${truncate(s, 80)}`);
-    }
-    return parts.join(" · ");
-  }
-  return String(input);
-}
-
 function stringifyResult(r: unknown): string {
   if (r == null) return "";
   if (typeof r === "string") return r;
@@ -925,10 +1211,6 @@ function stringifyResult(r: unknown): string {
     return parts.join("\n");
   }
   return JSON.stringify(r, null, 2);
-}
-
-function truncate(s: string, n: number) {
-  return s.length > n ? s.slice(0, n - 1) + "…" : s;
 }
 
 export { ChevronDown };
