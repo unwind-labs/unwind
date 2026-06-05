@@ -55,16 +55,40 @@ export function FolderTreePane({
 
   // Collapse state is local and ephemeral; ``hovered`` drives the overlay for
   // mouse users (keyboard users get the overlay off the persistent focus).
-  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  // ``collapsed === null`` is the fresh per-root state: it means "use the
+  // one-level default" (root's children shown, deeper subtrees folded) so a
+  // big tree opens scannable instead of fully exploded. The first
+  // expand/collapse replaces null with the user's explicit set.
+  const [collapsed, setCollapsed] = useState<Set<string> | null>(null);
   const [hovered, setHovered] = useState<string | null>(null);
   useEffect(() => {
-    setCollapsed(new Set());
+    setCollapsed(null);
     setHovered(null);
   }, [rootSessionId]);
 
+  // Non-root parents — the set that "one level" / "collapse all" folds. Walks
+  // the REACHABLE tree (not ``all_windows``, which carries orphan windows).
+  const collapsibleIds = useMemo(() => {
+    if (!canvasTree) return [];
+    const ids: string[] = [];
+    const walk = (n: WindowNode, isRoot: boolean) => {
+      if (n.children.length > 0 && !isRoot) ids.push(n.window_id);
+      for (const c of n.children) walk(c, false);
+    };
+    walk(canvasTree.root, true);
+    return ids;
+  }, [canvasTree]);
+
+  // Resolve null → the one-level default. Memoised so ``rows`` doesn't recompute
+  // every render while the default is in effect.
+  const effectiveCollapsed = useMemo(
+    () => collapsed ?? new Set(collapsibleIds),
+    [collapsed, collapsibleIds],
+  );
+
   const rows = useMemo(
-    () => (canvasTree ? flattenTree(canvasTree.root, collapsed) : []),
-    [canvasTree, collapsed],
+    () => (canvasTree ? flattenTree(canvasTree.root, effectiveCollapsed) : []),
+    [canvasTree, effectiveCollapsed],
   );
   const nodeById = useMemo(() => {
     const m = new Map<string, WindowNode>();
@@ -73,14 +97,19 @@ export function FolderTreePane({
   }, [canvasTree]);
 
   const setFocus = useCallback((id: string | null) => navigate.setCanvasFocus(id), []);
-  const toggleCollapse = useCallback((id: string) => {
-    setCollapsed((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  }, []);
+  const toggleCollapse = useCallback(
+    (id: string) => {
+      // Seed from the one-level default when the user hasn't touched it yet, so
+      // their first toggle edits the visible state rather than a blank set.
+      setCollapsed((prev) => {
+        const next = new Set(prev ?? collapsibleIds);
+        if (next.has(id)) next.delete(id);
+        else next.add(id);
+        return next;
+      });
+    },
+    [collapsibleIds],
+  );
   const openNode = useCallback(
     (id: string) => {
       const node = nodeById.get(id);
@@ -103,8 +132,14 @@ export function FolderTreePane({
 
   // Latest nav state, read by the window keydown listener (attached once) so
   // it never goes stale without re-binding on every focus/collapse change.
-  const navRef = useRef({ rows, focusedId, collapsed, focusedPane, detailOpen });
-  navRef.current = { rows, focusedId, collapsed, focusedPane, detailOpen };
+  const navRef = useRef({
+    rows,
+    focusedId,
+    collapsed: effectiveCollapsed,
+    focusedPane,
+    detailOpen,
+  });
+  navRef.current = { rows, focusedId, collapsed: effectiveCollapsed, focusedPane, detailOpen };
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -154,19 +189,8 @@ export function FolderTreePane({
 
   // Expand-all / collapse-all. Collapse-all keeps the ROOT open (collapsing it
   // would hide the whole run behind one row) and folds every deeper parent —
-  // an at-a-glance overview of the top-level structure. Walks the REACHABLE
-  // tree (not ``all_windows``, which carries unreachable orphan windows).
-  const collapsibleIds = useMemo(() => {
-    if (!canvasTree) return [];
-    const ids: string[] = [];
-    const walk = (n: WindowNode, isRoot: boolean) => {
-      if (n.children.length > 0 && !isRoot) ids.push(n.window_id);
-      for (const c of n.children) walk(c, false);
-    };
-    walk(canvasTree.root, true);
-    return ids;
-  }, [canvasTree]);
-  const anyCollapsed = collapsed.size > 0;
+  // the same one-level overview a freshly-opened tree starts in.
+  const anyCollapsed = effectiveCollapsed.size > 0;
   const toggleAll = () => setCollapsed(anyCollapsed ? new Set() : new Set(collapsibleIds));
 
   const overlayNode = (() => {
@@ -248,10 +272,15 @@ function TreeRow({
 }) {
   const { node, depth, hasChildren, collapsed } = row;
   const ref = useRef<HTMLDivElement | null>(null);
-  // Keep the keyboard cursor in view as it moves (the list is the only
-  // scroller — ``block: "nearest"`` avoids yanking the whole view around).
+  // Keep the soft cursor in view AND move real DOM focus onto it, so the
+  // keyboard cursor and document.activeElement stay unified (mirrors
+  // SessionListPane). ``block: "nearest"`` + ``preventScroll`` avoid yanking
+  // the list around. The visible focus ring is suppressed in the className —
+  // the cursor highlight (bg + left bar) is the focus affordance instead.
   useEffect(() => {
-    if (focused) ref.current?.scrollIntoView({ block: "nearest" });
+    if (!focused) return;
+    ref.current?.scrollIntoView({ block: "nearest" });
+    ref.current?.focus({ preventScroll: true });
   }, [focused]);
 
   const cost =
@@ -268,6 +297,9 @@ function TreeRow({
         onMouseLeave={onLeave}
         className={cn(
           "relative flex w-full cursor-pointer items-center gap-2 py-1 pr-3 text-left transition-colors",
+          // Suppress the browser focus rect — the cursor highlight below is
+          // the affordance (matches the session list's flat-row treatment).
+          "outline-none focus:outline-none focus-visible:outline-none",
           "before:absolute before:inset-y-0 before:left-0 before:w-[2px] before:bg-transparent",
           "hover:bg-foreground/[0.04]",
           focused && "bg-foreground/[0.07] before:bg-primary",
@@ -282,7 +314,7 @@ function TreeRow({
               onToggle();
             }}
             aria-label={collapsed ? "expand" : "collapse"}
-            className="shrink-0 rounded text-muted-foreground transition-colors hover:text-foreground"
+            className="shrink-0 rounded text-muted-foreground outline-none transition-colors hover:text-foreground focus:outline-none focus-visible:outline-none"
           >
             {collapsed ? (
               <ChevronRight className="h-3.5 w-3.5" />
