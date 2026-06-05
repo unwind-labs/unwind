@@ -896,11 +896,15 @@ function treeToReactFlow(args: {
         spawnKind:
           w.kind === "subagent"
             ? "subagent"
-            : w.kind === "resume"
-              ? "call"
-              : w.kind === "call"
-                ? "call"
-                : null,
+            : w.kind === "workflow"
+              ? "workflow"
+              : w.kind === "workflow_phase"
+                ? "workflow_phase"
+                : w.kind === "resume"
+                  ? "call"
+                  : w.kind === "call"
+                    ? "call"
+                    : null,
         canvasChildren: (childrenByParent[w.window_id] ?? []).map((c) => ({
           window_id: c.window_id,
           session_id: c.session_id,

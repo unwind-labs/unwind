@@ -68,7 +68,7 @@ export type Message = {
   is_error: boolean;
   model: string | null;
   raw_type: string | null;
-  spawn_kind: "call" | "subagent" | null;
+  spawn_kind: "call" | "subagent" | "workflow" | null;
   spawn_session_ids: string[];
   spawn_tasks: string[];
   // Per-child canonical status (parallel to spawn_session_ids). Lets the
@@ -159,7 +159,7 @@ export type WindowNode = {
    *  an otherwise-finished ancestor reflect "work is still happening
    *  somewhere below". */
   subtree_status: "done" | "live" | "yield" | "failed";
-  kind: "root" | "call" | "subagent" | "resume";
+  kind: "root" | "call" | "subagent" | "resume" | "workflow" | "workflow_phase";
   parent_window_id: string | null;
   window_index: number;
   /** Tokens attributed to this window alone. */

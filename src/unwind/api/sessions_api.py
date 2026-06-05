@@ -13,7 +13,7 @@ import json as _json
 
 from ..canvas_tree import build_canvas_tree
 from ..jsonl import collect_uuids
-from ..messages import annotate_spawns, base_uuid, read_messages, status_for_spawn
+from ..messages import Message, annotate_spawns, base_uuid, read_messages, status_for_spawn
 from .. import status as _status
 from ..processes import LIVE_MTIME_WINDOW_SEC, project_activity
 from ..registry import (
@@ -24,10 +24,16 @@ from ..registry import (
     project_state_signature,
     spawn_resolver_for_slug,
     subagent_index_for_slug,
+    workflow_index_for_slug,
 )
 from ..security import SessionIdPath, SlugPath
 from ..subagents import SUBAGENT_PREFIX
+from ..workflows import WorkflowRun
 from .request_state import RequestState, get_request_state
+
+# Workflow run / phase nodes are synthetic — their synthetic session id is
+# the run id (``wf_<hex>``) or ``wf_<hex>::p<n>``. Both start with this.
+WORKFLOW_PREFIX = "wf_"
 
 router = APIRouter(tags=["sessions"])
 
@@ -425,6 +431,23 @@ def get_messages(
             file_offset=page.file_offset,
         )
 
+    # Workflow run / phase nodes have no transcript of their own — synthesise
+    # a summary page (phases, totals, result, logs) from the rollup so the
+    # node is clickable and its card shows what the run did. Agent leaves
+    # (``agent-<id>``) already resolved through the subagent branch above.
+    if session_id.startswith(WORKFLOW_PREFIX):
+        wf = rs.memoize(("workflows", slug), lambda: workflow_index_for_slug(slug))
+        run = wf.resolve_run(session_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail="workflow run not found")
+        messages = _workflow_summary_messages(session_id, run)
+        return MessagesResponse(
+            session_id=session_id,
+            messages=[m.to_dict() for m in _slice_after_uuid(messages, since_uuid)],
+            last_uuid=messages[-1].uuid if messages else None,
+            file_offset=0,
+        )
+
     index = _rs_index(rs, slug)
     jsonl = index.jsonl_path_for(session_id)
     if jsonl is None:
@@ -523,6 +546,66 @@ def _slice_after_uuid(messages, since_uuid):
     if last_idx < 0:
         return messages
     return messages[last_idx + 1:]
+
+
+def _workflow_summary_messages(
+    session_id: str, run: WorkflowRun
+) -> list[Message]:
+    """Synthesise a few pseudo-messages describing a workflow run, for the
+    run/phase nodes (which have no transcript of their own). Rendered in the
+    node's card body and the trace pane like any other message stream."""
+    counts: dict[int, int] = {}
+    for a in run.agents:
+        counts[a.phase_index] = counts.get(a.phase_index, 0) + 1
+
+    head = [
+        f"# Workflow: {run.name}",
+        "",
+        f"- Run id: `{run.run_id}`",
+        f"- Status: {run.status}",
+        f"- Agents: {len(run.agents)}",
+        f"- Total tokens: {run.total_tokens:,}",
+    ]
+    if run.partial:
+        head.append("- _running — summary is partial until the run completes_")
+    head += ["", "## Phases"]
+    for p in run.phases:
+        title = p.title or "(unnamed)"
+        head.append(f"{p.index}. {title} — {counts.get(p.index, 0)} agent(s)")
+
+    msgs = [
+        Message(
+            uuid=f"{session_id}:summary",
+            session_id=session_id,
+            role="assistant",
+            timestamp=run.started_at,
+            text="\n".join(head),
+            raw_type="assistant",
+        )
+    ]
+    if run.result_preview:
+        msgs.append(
+            Message(
+                uuid=f"{session_id}:result",
+                session_id=session_id,
+                role="assistant",
+                timestamp=run.ended_at or run.started_at,
+                text="## Result\n\n```\n" + run.result_preview + "\n```",
+                raw_type="assistant",
+            )
+        )
+    if run.log_lines:
+        msgs.append(
+            Message(
+                uuid=f"{session_id}:logs",
+                session_id=session_id,
+                role="assistant",
+                timestamp=run.ended_at or run.started_at,
+                text="## Logs\n\n" + "\n".join(run.log_lines[-40:]),
+                raw_type="assistant",
+            )
+        )
+    return msgs
 
 
 class CanvasTreeResponse(BaseModel):

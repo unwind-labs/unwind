@@ -40,6 +40,7 @@ from .jsonl import (
 from .session_scan import SessionScan
 from .status import from_raw as _from_raw_status
 from .subagents import SubagentIndex
+from .workflows import WorkflowIndex, WorkflowRun
 
 
 # Signature for the optional per-session scan accessor. Production wires
@@ -83,10 +84,20 @@ CALLSTACK_AWAITING_TOOL_NAMES = frozenset(
 )
 CALLSTACK_TOOL_NAMES = CALLSTACK_SPAWNING_TOOL_NAMES | CALLSTACK_AWAITING_TOOL_NAMES
 SUBAGENT_TOOL_NAMES = frozenset({"Agent", "Task"})
+WORKFLOW_TOOL_NAMES = frozenset({"Workflow"})
 
 # These regexes used to live in messages.py; centralised here so the
 # anchor pass owns all tool_result parsing in one place.
 _AGENT_ID_RE = re.compile(r"agentId:\s*([0-9a-f]{8,})")
+# A ``Workflow`` tool_result echoes the run's transcript dir
+# (``.../subagents/workflows/wf_<runId>``) and, in newer envelopes, a
+# literal ``"runId": "wf_<runId>"``. Match either so the run node anchors
+# to the tool_use that launched it. The ``workflows/`` anchor avoids the
+# script-path ``workflows/scripts/...-wf_<runId>.js`` form (no ``wf_``
+# directly after ``workflows/`` there).
+_WORKFLOW_RUN_ID_RE = re.compile(
+    r'(?:"runId"\s*:\s*\\?"|workflows/)(wf_[A-Za-z0-9-]+)'
+)
 _INVOKE_ID_RE = re.compile(
     r'\\?"invoke_id\\?"\s*:\s*\\?"([0-9A-Za-z._-]+)\\?"'
 )
@@ -252,8 +263,29 @@ class SubagentSpawn(_SpawnBase):
     agent_id: str = ""  # bare hex id (without ``agent-`` prefix)
 
 
+@dataclass(kw_only=True)
+class WorkflowSpawn(_SpawnBase):
+    """One node in a ``Workflow`` run's synthetic subtree.
+
+    ``node_role`` distinguishes the three layers:
+      ``"run"``   — the workflow run; child of the launching session,
+                    anchored to the ``Workflow`` tool_use by ``run_id``.
+                    ``child_session_id`` is the run id (``wf_<hex>``).
+      ``"phase"`` — a phase grouping node; child of the run node.
+                    ``child_session_id`` is ``wf_<hex>::p<index>``.
+      ``"agent"`` — one workflow agent; child of its phase node.
+                    ``child_session_id`` is ``agent-<id>`` so its transcript
+                    resolves through the subagent machinery.
+    Only agent leaves have a real JSONL; run/phase nodes are pure grouping.
+    """
+
+    kind: Literal["workflow"] = "workflow"
+    run_id: str = ""
+    node_role: Literal["run", "phase", "agent"] = "run"
+
+
 # Discriminated union — narrow with ``isinstance`` OR ``s.kind``.
-Spawn: TypeAlias = Union[CallSpawn, SubagentSpawn]
+Spawn: TypeAlias = Union[CallSpawn, SubagentSpawn, WorkflowSpawn]
 
 
 class SpawnResolver:
@@ -266,12 +298,16 @@ class SpawnResolver:
         subagents: SubagentIndex,
         *,
         project_dir: Path,
+        workflows: Optional[WorkflowIndex] = None,
         invoke_index: Optional[dict[str, list[str]]] = None,
         session_scanner: Optional[SessionScanner] = None,
     ) -> None:
         self._cs = callstack
         self._fd = forks
         self._sa = subagents
+        # Optional so existing tests / ad-hoc construction without workflow
+        # data keep working; production wires it via the registry.
+        self._wf = workflows
         self._project_dir = project_dir
         self._cached: Optional[dict[str, list[Spawn]]] = None
         # ``session_scanner(sid) -> SessionScan`` from canvas_tree. When
@@ -328,6 +364,9 @@ class SpawnResolver:
             out.setdefault(spawn.parent_session_id, []).append(spawn)
 
         for spawn in self._iter_subagent_spawns():
+            out.setdefault(spawn.parent_session_id, []).append(spawn)
+
+        for spawn in self._iter_workflow_spawns():
             out.setdefault(spawn.parent_session_id, []).append(spawn)
 
         # Sort each parent's list chronologically. Stable for deterministic
@@ -438,6 +477,74 @@ class SpawnResolver:
                     source="subagent",
                 )
 
+    def _iter_workflow_spawns(self) -> Iterator[WorkflowSpawn]:
+        """Yield the run → phase → agent spawn nodes for every workflow run.
+
+        Timestamps come straight from the rollup so the canvas's window-
+        nesting (pure ``[start, end)`` containment) nests agents under
+        phases under the run under the launching session with no special
+        cases: run = ``[startTime, startTime+durationMs]``, phase =
+        ``[min agent start, max agent end]``, agent =
+        ``[startedAt, startedAt+durationMs]``.
+        """
+        if self._wf is None:
+            return
+        for parent_sid in self._wf.parent_sids():
+            for run in self._wf.list_for_session(parent_sid):
+                yield from self._run_to_workflow_spawns(parent_sid, run)
+
+    def _run_to_workflow_spawns(
+        self, parent_sid: str, run: WorkflowRun
+    ) -> Iterator[WorkflowSpawn]:
+        yield WorkflowSpawn(
+            parent_session_id=parent_sid,
+            child_session_id=run.run_id,
+            label=run.name,
+            status=_wf_run_status(run.status),
+            started_at=run.started_at,
+            ended_at=run.ended_at,
+            source="workflow",
+            run_id=run.run_id,
+            node_role="run",
+        )
+
+        agents_by_phase: dict[int, list] = {}
+        for a in run.agents:
+            agents_by_phase.setdefault(a.phase_index, []).append(a)
+        phase_titles = {p.index: p.title for p in run.phases}
+        # Union so an agent whose phase index isn't in the explicit phase
+        # list still gets a grouping node rather than being dropped.
+        phase_indices = sorted(set(phase_titles) | set(agents_by_phase))
+
+        for idx in phase_indices:
+            agents = agents_by_phase.get(idx, [])
+            starts = [a.started_at for a in agents if a.started_at]
+            ends = [a.ended_at for a in agents if a.ended_at]
+            phase_sid = run.phase_session_id(idx)
+            yield WorkflowSpawn(
+                parent_session_id=run.run_id,
+                child_session_id=phase_sid,
+                label=phase_titles.get(idx) or f"phase {idx}",
+                status=_wf_run_status(run.status),
+                started_at=min(starts) if starts else run.started_at,
+                ended_at=max(ends) if ends else run.ended_at,
+                source="workflow",
+                run_id=run.run_id,
+                node_role="phase",
+            )
+            for a in agents:
+                yield WorkflowSpawn(
+                    parent_session_id=phase_sid,
+                    child_session_id=a.synthetic_session_id,
+                    label=a.label or a.agent_id[:8],
+                    status=_wf_agent_status(a.state),
+                    started_at=a.started_at,
+                    ended_at=a.ended_at,
+                    source="workflow",
+                    run_id=run.run_id,
+                    node_role="agent",
+                )
+
     def for_parent(self, parent_sid: str) -> list[Spawn]:
         return list(self.spawns_by_parent().get(parent_sid, []))
 
@@ -534,12 +641,18 @@ class SpawnResolver:
         unbound_callstack: list[Spawn] = []
         subagent_by_agent: dict[str, Spawn] = {}
         subagent_by_desc: dict[str, list[Spawn]] = {}
+        workflow_run_by_id: dict[str, Spawn] = {}
         for s in spawns:
             if isinstance(s, CallSpawn):
                 if s.invoke_id:
                     callstack_by_invoke.setdefault(s.invoke_id, []).append(s)
                 callstack_by_label.setdefault(s.label or "", []).append(s)
                 unbound_callstack.append(s)
+            elif isinstance(s, WorkflowSpawn):
+                # Only the run node anchors to a tool_use; phase/agent nodes
+                # hang off synthetic parents with no message stream.
+                if s.node_role == "run" and s.run_id:
+                    workflow_run_by_id[s.run_id] = s
             else:
                 subagent_by_agent[s.agent_id] = s
                 subagent_by_desc.setdefault(s.label or "", []).append(s)
@@ -622,6 +735,13 @@ class SpawnResolver:
                         if id(s) in bound:
                             continue
                         _bind(s, tu_id)
+
+            elif name in WORKFLOW_TOOL_NAMES:
+                # The ``Workflow`` tool_use launches one run; bind the run
+                # node whose run_id the tool_result echoes.
+                run_id = _extract_run_id(res)
+                if run_id and run_id in workflow_run_by_id:
+                    _bind(workflow_run_by_id[run_id], tu_id)
 
             elif name in SUBAGENT_TOOL_NAMES:
                 agent_id = _extract_agent_id(res)
@@ -881,6 +1001,19 @@ def _task_session_ids(tasks: list[TaskNode]) -> set[str]:
 
 
 def _copy_spawn(s: Spawn) -> Spawn:
+    if isinstance(s, WorkflowSpawn):
+        return WorkflowSpawn(
+            parent_session_id=s.parent_session_id,
+            child_session_id=s.child_session_id,
+            label=s.label,
+            status=s.status,
+            started_at=s.started_at,
+            ended_at=s.ended_at,
+            parent_tool_use_id=s.parent_tool_use_id,
+            source=s.source,
+            run_id=s.run_id,
+            node_role=s.node_role,
+        )
     if isinstance(s, CallSpawn):
         return CallSpawn(
             parent_session_id=s.parent_session_id,
@@ -923,6 +1056,43 @@ def _extract_agent_id(result: Any) -> Optional[str]:
     return m.group(1) if m else None
 
 
+def _extract_run_id(result: Any) -> Optional[str]:
+    if result is None or getattr(result, "tool_result", None) is None:
+        return None
+    text = _stringify_result(result.tool_result)
+    m = _WORKFLOW_RUN_ID_RE.search(text)
+    return m.group(1) if m else None
+
+
+# Workflow status strings → the raw vocabulary ``status.from_raw`` accepts
+# (it knows ``complete``/``running``/``pending``/``failed`` but NOT the
+# rollup's ``completed``/``done``-on-agent spellings, so we normalise here).
+_WF_RUN_STATUS = {
+    "completed": "complete",
+    "complete": "complete",
+    "running": "running",
+    "failed": "failed",
+    "error": "failed",
+}
+_WF_AGENT_STATUS = {
+    "done": "complete",
+    "complete": "complete",
+    "running": "running",
+    "queued": "pending",
+    "pending": "pending",
+    "error": "failed",
+    "failed": "failed",
+}
+
+
+def _wf_run_status(raw: str) -> str:
+    return _WF_RUN_STATUS.get((raw or "").lower(), "complete")
+
+
+def _wf_agent_status(raw: str) -> str:
+    return _WF_AGENT_STATUS.get((raw or "").lower(), "complete")
+
+
 
 
 def _requested_tasks(tool_input: Any) -> list[str]:
@@ -952,8 +1122,10 @@ def _requested_tasks(tool_input: Any) -> list[str]:
 __all__ = [
     "CALLSTACK_TOOL_NAMES",
     "SUBAGENT_TOOL_NAMES",
+    "WORKFLOW_TOOL_NAMES",
     "CallSpawn",
     "Spawn",
     "SpawnResolver",
     "SubagentSpawn",
+    "WorkflowSpawn",
 ]

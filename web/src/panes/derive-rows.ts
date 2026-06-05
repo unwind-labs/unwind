@@ -15,7 +15,7 @@ export type Row =
   | { kind: "activity"; count: number; spanSeconds: number }
   | {
       kind: "spawn";
-      spawnKind: "call" | "subagent";
+      spawnKind: "call" | "subagent" | "workflow";
       /** Sub-classification of a call spawn — picks the icon. ``"fork"`` by
        *  default (also for subagent rows, which use a different icon
        *  altogether and ignore this field). */

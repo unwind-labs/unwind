@@ -21,10 +21,15 @@ from .settings import get_settings
 SLUG_PATTERN = r"^[A-Za-z0-9-]+$"
 # Standard UUID v1–v5 shape for session JSONL filenames, OR the synthetic
 # ``agent-<hex>`` id used to address an in-session subagent trace (see
-# unwind.subagents.SUBAGENT_PREFIX).
+# unwind.subagents.SUBAGENT_PREFIX), OR a workflow run / phase node id
+# (``wf_<hex-dash>`` optionally with a ``::p<n>`` phase suffix — see
+# unwind.workflows). The ``wf_`` alternative is constrained to
+# ``[0-9A-Za-z-]`` plus the literal ``::p<digits>`` so it can't smuggle path
+# separators or ``..`` traversal.
 SESSION_ID_PATTERN = (
     r"^(?:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
-    r"|agent-[0-9a-fA-F]+)$"
+    r"|agent-[0-9a-fA-F]+"
+    r"|wf_[0-9A-Za-z-]+(?:::p[0-9]+)?)$"
 )
 
 _SLUG_RE = re.compile(SLUG_PATTERN)

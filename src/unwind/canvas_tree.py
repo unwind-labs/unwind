@@ -92,6 +92,9 @@ class Invocation:
     status: str  # complete | yielded | running | failed
     kind: str    # ``call``/``invoke`` (legacy) | ``call_resume``/``invoke_resume`` (legacy)
     invoke_id: str
+    # For workflow spawns: ``run`` | ``phase`` | ``agent`` — drives the
+    # window kind in the wiring step. ``None`` for callstack/fork/subagent.
+    node_role: Optional[str] = None
 
 
 @dataclass
@@ -189,6 +192,7 @@ def collect_invocations(
                     status=s.status,
                     kind=s.kind,
                     invoke_id=getattr(s, "invoke_id", "") or "",
+                    node_role=getattr(s, "node_role", None),
                 )
             )
 
@@ -531,11 +535,18 @@ def build_canvas_tree(
                 continue
             tw.parent_window_id = cw.window_id
             # Override kind based on the invocation's nature:
-            #   * subagent invocations stay as "subagent" (preserved
-            #     from collect_invocations);
+            #   * workflow run/phase nodes get their own kinds; workflow
+            #     agents reuse "subagent" (real transcript + leaf rendering);
+            #   * subagent invocations stay as "subagent";
             #   * the first callstack invocation = "call";
             #   * subsequent callstack invocations = "resume".
-            if inv.kind != "subagent":
+            if inv.node_role == "run":
+                tw.kind = "workflow"
+            elif inv.node_role == "phase":
+                tw.kind = "workflow_phase"
+            elif inv.node_role == "agent":
+                tw.kind = "subagent"
+            elif inv.kind != "subagent":
                 tw.kind = "call" if k == 0 else "resume"
             else:
                 tw.kind = "subagent"

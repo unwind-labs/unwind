@@ -22,6 +22,7 @@ from .server_state import default_source_path
 from .sessions import SessionIndex
 from .spawns import SpawnResolver
 from .subagents import SubagentIndex
+from .workflows import WorkflowIndex
 
 
 _lock = threading.Lock()
@@ -29,6 +30,7 @@ _indices: dict[str, SessionIndex] = {}
 _callstack: dict[str, CallstackIndex] = {}
 _fork_detectors: dict[str, ForkDetector] = {}
 _subagents: dict[str, SubagentIndex] = {}
+_workflows: dict[str, WorkflowIndex] = {}
 _canvas_builders: dict[str, CanvasTreeBuilder] = {}
 _slug_to_source: dict[str, Path] = {}
 # (signature, invoke_id → [candidate_session_id, ...]) per slug. The
@@ -47,6 +49,7 @@ _PER_SLUG_CACHES: tuple[dict, ...] = (
     _callstack,
     _fork_detectors,
     _subagents,
+    _workflows,
     _canvas_builders,
 )
 
@@ -198,6 +201,10 @@ def subagent_index_for_slug(slug: str) -> SubagentIndex:
     return _per_slug(_subagents, slug, lambda idx: SubagentIndex(idx.paths.project_dir))
 
 
+def workflow_index_for_slug(slug: str) -> WorkflowIndex:
+    return _per_slug(_workflows, slug, lambda idx: WorkflowIndex(idx.paths.project_dir))
+
+
 def _project_jsonl_signature(project_dir: Path) -> tuple:
     """Stable fingerprint of every JSONL in ``project_dir``.
 
@@ -253,7 +260,28 @@ def project_state_signature(slug: str) -> tuple:
         _project_jsonl_signature(project_dir),
         _callstack_log_signature(index.paths.callstack_log_dir),
         _extra_report_signature(slug, project_dir),
+        _workflow_signature(slug, project_dir),
     )
+
+
+def _workflow_signature(slug: str, project_dir: Path) -> tuple:
+    """Stat fingerprint of each launching session's workflow dirs, so the
+    canvas ETag invalidates when a rollup lands or a running run gains an
+    agent (neither bumps the launching session's own JSONL)."""
+    wf = workflow_index_for_slug(slug)
+    out: list[tuple[str, float]] = []
+    for sid in wf.parent_sids():
+        for rel in (
+            project_dir / sid / "workflows",
+            project_dir / sid / "subagents" / "workflows",
+        ):
+            try:
+                st = rel.stat()
+            except OSError:
+                continue
+            out.append((str(rel), st.st_mtime))
+    out.sort()
+    return tuple(out)
 
 
 def _extra_report_signature(slug: str, project_dir: Path) -> tuple:
@@ -344,6 +372,7 @@ def spawn_resolver_for_slug(slug: str) -> SpawnResolver:
         fork_detector_for_slug(slug),
         subagent_index_for_slug(slug),
         project_dir=project_dir,
+        workflows=workflow_index_for_slug(slug),
         invoke_index=invoke_index_for_slug(slug, project_dir),
         # Share the canvas-tree builder's mtime-cached scans so fork
         # status inference doesn't re-walk each child JSONL.

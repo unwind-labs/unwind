@@ -24,6 +24,7 @@ from .spawns import (
     CALLSTACK_AWAITING_TOOL_NAMES,
     CALLSTACK_TOOL_NAMES,
     SUBAGENT_TOOL_NAMES,
+    WORKFLOW_TOOL_NAMES,
     CallSpawn,
     Spawn,
     SpawnResolver,
@@ -134,6 +135,8 @@ def _spawn_kind_for_tool(name: Optional[str]) -> Optional[str]:
         return "call"
     if name in SUBAGENT_TOOL_NAMES:
         return "subagent"
+    if name in WORKFLOW_TOOL_NAMES:
+        return "workflow"
     return None
 
 

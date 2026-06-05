@@ -121,7 +121,17 @@ class SubagentIndex:
         return out
 
     def resolve(self, synthetic_id: str) -> Optional[Path]:
-        """Map ``agent-<agentId>`` back to the JSONL path."""
+        """Map ``agent-<agentId>`` back to the JSONL path.
+
+        Searches both the top-level ``<sid>/subagents/agent-<id>.jsonl``
+        (Agent/Task spawns) AND the nested
+        ``<sid>/subagents/workflows/<runId>/agent-<id>.jsonl`` (workflow
+        agents). Agent ids are unique 16-hex, so the first match wins.
+        Listing for spawn enumeration stays top-level only (see
+        ``list_for_session``); only resolution reaches into workflow dirs,
+        so the workflow agents are parented by the workflow index alone and
+        never double-counted as direct subagents of the launching session.
+        """
         if not synthetic_id.startswith(SUBAGENT_PREFIX):
             return None
         agent_id = synthetic_id[len(SUBAGENT_PREFIX):]
@@ -137,6 +147,12 @@ class SubagentIndex:
             candidate = sub_dir / f"agent-{agent_id}.jsonl"
             if candidate.is_file():
                 return candidate
+            # Workflow agents log under subagents/workflows/<runId>/.
+            wf_dir = sub_dir / "workflows"
+            if wf_dir.is_dir():
+                for nested in wf_dir.glob(f"*/agent-{agent_id}.jsonl"):
+                    if nested.is_file():
+                        return nested
         return None
 
     def get(self, synthetic_id: str) -> Optional[SubagentInvocation]:

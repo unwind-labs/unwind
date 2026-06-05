@@ -11,6 +11,7 @@ import {
   Leaf,
   Telescope,
   Trees,
+  Workflow,
   Loader2,
   XCircle,
 } from "lucide-react";
@@ -85,8 +86,10 @@ export type CompactCardData = {
   isResumeInstance: boolean;
   /** Spawn kind from the parent's perspective: ``"call"`` if launched
    *  through ``/call``, ``"subagent"`` if launched as a Claude Code
-   *  subagent. ``null`` for the root. Drives the rail's tint and label. */
-  spawnKind: "call" | "subagent" | null;
+   *  subagent, ``"workflow"`` / ``"workflow_phase"`` for a Workflow run's
+   *  grouping nodes. ``null`` for the root. Drives the rail's tint and
+   *  label. */
+  spawnKind: "call" | "subagent" | "workflow" | "workflow_phase" | null;
   /** Called when a CALL/SUBAGENT row inside this card is clicked. The
    *  row's child window_id is passed so the canvas can pan/center it
    *  WITHOUT opening the detail overlay. ``undefined`` when the row's
@@ -215,7 +218,7 @@ export function CompactCardNode({ data }: { data: CompactCardData }) {
   // Kind drives the rail tint and the rotated label. Resume wins over
   // spawnKind so users immediately see "this is a continuation" in the
   // rail label rather than buried in a sub-line.
-  const kind: "root" | "call" | "subagent" | "resume" = data.isRoot
+  const kind: "root" | "call" | "subagent" | "resume" | "workflow" | "workflow_phase" = data.isRoot
     ? "root"
     : data.isResumeInstance
       ? "resume"
@@ -225,6 +228,8 @@ export function CompactCardNode({ data }: { data: CompactCardData }) {
     call: "from-sky-500/10 to-sky-500/0",
     subagent: "from-violet-500/10 to-violet-500/0",
     resume: "from-amber-500/10 to-amber-500/0",
+    workflow: "from-indigo-500/10 to-indigo-500/0",
+    workflow_phase: "from-indigo-500/10 to-indigo-500/0",
   }[kind];
   const shortSessionId = data.sessionId.startsWith("agent-")
     ? data.sessionId.slice(6, 14)
@@ -326,7 +331,9 @@ export function CompactCardNode({ data }: { data: CompactCardData }) {
               ? "error"
               : kind === "resume"
                 ? "continued"
-                : kind}
+                : kind === "workflow_phase"
+                  ? "phase"
+                  : kind}
         </span>
       </div>
       <div className="min-w-0 flex-1">
@@ -538,6 +545,9 @@ function SpawnRowDisplay({
   onFocus?: () => void;
 }) {
   const isCall = row.spawnKind === "call";
+  // A ``Workflow`` launch row — its own icon/badge/colour, distinct from
+  // both /call and subagent rows.
+  const isWorkflow = row.spawnKind === "workflow";
   // Sub-variant of a call: fork (default, inherits ctx), fresh (isolated,
   // same project), fresh_cross_project (isolated, different project).
   const isFresh = isCall && row.callType === "fresh";
@@ -554,46 +564,54 @@ function SpawnRowDisplay({
     ? "text-sky-300"
     : row.isResume
       ? "text-amber-300"
-      : isFreshCross
-        ? "text-teal-300"
-        : isFresh
-          ? "text-emerald-300"
-          : isCall
-            ? "text-sky-300"
-            : "text-violet-300";
+      : isWorkflow
+        ? "text-indigo-300"
+        : isFreshCross
+          ? "text-teal-300"
+          : isFresh
+            ? "text-emerald-300"
+            : isCall
+              ? "text-sky-300"
+              : "text-violet-300";
   const accentBg = row.isFollower
     ? "bg-transparent"
     : row.isResume
       ? "bg-amber-500/5"
-      : isFreshCross
-        ? "bg-teal-950/40"
-        : isFresh
-          ? "bg-emerald-950/40"
-          : isCall
-            ? "bg-sky-950/40"
-            : "bg-violet-950/40";
+      : isWorkflow
+        ? "bg-indigo-950/40"
+        : isFreshCross
+          ? "bg-teal-950/40"
+          : isFresh
+            ? "bg-emerald-950/40"
+            : isCall
+              ? "bg-sky-950/40"
+              : "bg-violet-950/40";
   const accentBorder = row.isFollower
     ? "border-sky-500/50"
     : row.isResume
       ? "border-amber-500/50"
-      : isFreshCross
-        ? "border-teal-500/50"
-        : isFresh
-          ? "border-emerald-500/50"
-          : isCall
-            ? "border-sky-500/50"
-            : "border-violet-500/50";
+      : isWorkflow
+        ? "border-indigo-500/50"
+        : isFreshCross
+          ? "border-teal-500/50"
+          : isFresh
+            ? "border-emerald-500/50"
+            : isCall
+              ? "border-sky-500/50"
+              : "border-violet-500/50";
   const badgeBorderText = row.isFollower
     ? "border-sky-500/40 text-sky-300"
     : row.isResume
       ? "border-amber-500/40 text-amber-300"
-      : isFreshCross
-        ? "border-teal-500/40 text-teal-300"
-        : isFresh
-          ? "border-emerald-500/40 text-emerald-300"
-          : isCall
-            ? "border-sky-500/40 text-sky-300"
-            : "border-violet-500/40 text-violet-300";
+      : isWorkflow
+        ? "border-indigo-500/40 text-indigo-300"
+        : isFreshCross
+          ? "border-teal-500/40 text-teal-300"
+          : isFresh
+            ? "border-emerald-500/40 text-emerald-300"
+            : isCall
+              ? "border-sky-500/40 text-sky-300"
+              : "border-violet-500/40 text-violet-300";
 
   return (
     <li
@@ -612,13 +630,15 @@ function SpawnRowDisplay({
             ? "hover:bg-sky-900/30 hover:ring-sky-400/70"
             : row.isResume
               ? "hover:bg-amber-500/15 hover:ring-amber-400/70"
-              : isFreshCross
-                ? "hover:bg-teal-900/60 hover:ring-teal-400/70"
-                : isFresh
-                  ? "hover:bg-emerald-900/60 hover:ring-emerald-400/70"
-                  : isCall
-                    ? "hover:bg-sky-900/60 hover:ring-sky-400/70"
-                    : "hover:bg-violet-900/60 hover:ring-violet-400/70"),
+              : isWorkflow
+                ? "hover:bg-indigo-900/60 hover:ring-indigo-400/70"
+                : isFreshCross
+                  ? "hover:bg-teal-900/60 hover:ring-teal-400/70"
+                  : isFresh
+                    ? "hover:bg-emerald-900/60 hover:ring-emerald-400/70"
+                    : isCall
+                      ? "hover:bg-sky-900/60 hover:ring-sky-400/70"
+                      : "hover:bg-violet-900/60 hover:ring-violet-400/70"),
       )}
       style={{ height: SPAWN_HEIGHT - 4 }}
       onClick={
@@ -632,6 +652,8 @@ function SpawnRowDisplay({
     >
       {row.isFollower ? (
         <Hourglass className={cn("h-3 w-3", accentText)} />
+      ) : isWorkflow ? (
+        <Workflow className={cn("h-3 w-3", accentText)} />
       ) : !isCall ? (
         <Sparkles className={cn("h-3 w-3", accentText)} />
       ) : isFreshCross ? (
@@ -646,13 +668,15 @@ function SpawnRowDisplay({
           ? "await"
           : row.isResume
             ? "continued"
-            : !isCall
-              ? "subagent"
-              : isFreshCross
-                ? "fresh @ other"
-                : isFresh
-                  ? "fresh"
-                  : "call"}
+            : isWorkflow
+              ? "workflow"
+              : !isCall
+                ? "subagent"
+                : isFreshCross
+                  ? "fresh @ other"
+                  : isFresh
+                    ? "fresh"
+                    : "call"}
       </Badge>
       <span className="flex-1 truncate font-mono text-[11px] text-foreground" title={row.title}>
         {row.title}
