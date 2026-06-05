@@ -10,6 +10,15 @@ export type PaneKey = "sessions" | "thread";
  *  - ``raw``: the underlying records, pretty-printed but copyable as JSONL. */
 export type TraceMode = "compact" | "normal" | "detailed" | "raw";
 
+/** How the right pane renders a session's call tree:
+ *  - ``canvas``: the graphical ReactFlow card graph (default for simple runs).
+ *  - ``tree``: the lightweight single-scroll folder-tree text view (default
+ *    for complex runs — see ``isComplexTree``).
+ *  ``viewModeOverride`` is the user's explicit choice; ``null`` means "auto"
+ *  (let complexity decide). It resets per session so each run is evaluated on
+ *  its own size — see ``selectRootSession``. */
+export type ViewMode = "canvas" | "tree";
+
 export type UrlSyncedState = {
   slug: string | null;
   rootSessionId: string | null;
@@ -26,6 +35,10 @@ interface UiState {
   threadSessionId: string | null;
   /** Node-detail trace view mode (compact / normal / detailed / raw). */
   traceMode: TraceMode;
+  /** Right-pane view: explicit user choice, or ``null`` to follow the
+   *  complexity auto-default. Local UI state (not URL-synced, like
+   *  ``traceMode``); resets to ``null`` whenever the root session changes. */
+  viewModeOverride: ViewMode | null;
   sessionFilter: string;
   showForks: boolean;
   focusedPane: PaneKey;
@@ -59,6 +72,7 @@ interface UiState {
   selectRootSession: (id: string | null) => void;
   selectThreadSession: (id: string | null) => void;
   setTraceMode: (v: TraceMode) => void;
+  setViewModeOverride: (v: ViewMode | null) => void;
   setSessionFilter: (v: string) => void;
   setShowForks: (v: boolean) => void;
   openDetail: (id: string, window?: { start: string | null; end: string | null } | null) => void;
@@ -84,6 +98,7 @@ export const useUi = create<UiState>((set, get) => ({
   rootSessionId: null,
   threadSessionId: null,
   traceMode: "normal",
+  viewModeOverride: null,
   sessionFilter: "",
   showForks: false,
   detailSessionId: null,
@@ -102,6 +117,7 @@ export const useUi = create<UiState>((set, get) => ({
       detailSessionId: null,
       detailWindow: null,
       canvasFocusedNodeId: null,
+      viewModeOverride: null,
     }),
   selectRootSession: (id) =>
     set({
@@ -110,9 +126,14 @@ export const useUi = create<UiState>((set, get) => ({
       detailSessionId: null,
       detailWindow: null,
       canvasFocusedNodeId: null,
+      // Re-evaluate canvas-vs-tree from scratch for the newly selected run —
+      // each session gets the complexity auto-default unless the user
+      // re-overrides it.
+      viewModeOverride: null,
     }),
   selectThreadSession: (id) => set({ threadSessionId: id }),
   setTraceMode: (v) => set({ traceMode: v }),
+  setViewModeOverride: (v) => set({ viewModeOverride: v }),
   setSessionFilter: (v) => set({ sessionFilter: v }),
   setShowForks: (v) => set({ showForks: v }),
   openDetail: (id, window) => set({ detailSessionId: id, detailWindow: window ?? null }),
@@ -141,6 +162,10 @@ export const useUi = create<UiState>((set, get) => ({
       detailSessionId: next.detailSessionId,
       detailWindow: next.detailWindow,
       canvasFocusedNodeId: next.canvasFocusedNodeId,
+      // View mode isn't in the URL, so a popstate to a different root drops
+      // the override back to auto (consistent with ``selectRootSession``);
+      // staying on the same root keeps whatever the user chose.
+      viewModeOverride: next.rootSessionId !== state.rootSessionId ? null : state.viewModeOverride,
     })),
   focusPane: (p) => set({ focusedPane: p }),
   rotateFocus: (dir) => {

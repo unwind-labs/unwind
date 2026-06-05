@@ -11,11 +11,12 @@ import ReactFlow, {
   useReactFlow,
 } from "reactflow";
 import "reactflow/dist/style.css";
-import { Download, Keyboard, X } from "lucide-react";
+import { Download, Keyboard, ListTree, Network, X } from "lucide-react";
 import { exportCanvasPng } from "@/panes/canvas-export";
-import { useUi } from "@/store/ui";
+import { useUi, type ViewMode } from "@/store/ui";
 import { isTypingTarget } from "@/lib/keyboard";
 import { navigate } from "@/lib/url-sync";
+import { cn } from "@/lib/utils";
 import {
   COMPACT_CARD_WIDTH,
   CompactCardNode,
@@ -24,6 +25,8 @@ import {
 } from "@/panes/CompactCard";
 import { ElbowEdge } from "@/panes/ElbowEdge";
 import { TracePane } from "@/panes/TracePane";
+import { FolderTreePane } from "@/panes/FolderTreePane";
+import { isComplexTree } from "@/panes/tree-nav";
 import { useCanvasTree, useMessages } from "@/api/client";
 import type { WindowNode } from "@/api/types";
 
@@ -36,6 +39,20 @@ export function CanvasPane() {
   const rootSessionId = useUi((s) => s.rootSessionId);
   const detailSessionId = useUi((s) => s.detailSessionId);
   const detailWindow = useUi((s) => s.detailWindow);
+  const viewModeOverride = useUi((s) => s.viewModeOverride);
+  const setViewModeOverride = useUi((s) => s.setViewModeOverride);
+  const focusedPane = useUi((s) => s.focusedPane);
+
+  // The canvas window-tree feeds both views and the complexity auto-default.
+  // react-query caches it, so calling it here AND inside CanvasInner is a
+  // single fetch.
+  const { data: canvasTree } = useCanvasTree(slug, rootSessionId);
+  const ready = !!canvasTree;
+  // Auto-default to the lightweight text view for complex runs; the user's
+  // explicit toggle wins when set. Until the tree loads we can't judge
+  // complexity, so the render below holds the decision when there's no override.
+  const effectiveMode: ViewMode =
+    viewModeOverride ?? (canvasTree && isComplexTree(canvasTree) ? "tree" : "canvas");
 
   // ESC closes the detail overlay. Hook MUST come before any early returns
   // to keep the hook count stable across renders (React #310).
@@ -51,6 +68,23 @@ export function CanvasPane() {
     return () => window.removeEventListener("keydown", onKey);
   }, [detailSessionId]);
 
+  // `v` flips canvas ⇄ text. Handled here (not in either child) so it works
+  // in both modes; reads the live mode via a ref so the listener attaches once.
+  const toggleStateRef = useRef({ effectiveMode, focusedPane, detailOpen: !!detailSessionId });
+  toggleStateRef.current = { effectiveMode, focusedPane, detailOpen: !!detailSessionId };
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (isTypingTarget(e)) return;
+      if (e.key !== "v" && e.key !== "V") return;
+      const s = toggleStateRef.current;
+      if (s.focusedPane !== "thread" || s.detailOpen) return;
+      e.preventDefault();
+      setViewModeOverride(s.effectiveMode === "canvas" ? "tree" : "canvas");
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [setViewModeOverride]);
+
   if (!rootSessionId) {
     return (
       <Shell>
@@ -61,19 +95,36 @@ export function CanvasPane() {
     );
   }
 
-  // Render the canvas always — never unmount it when the detail overlay
+  // Render the active view always — never unmount it when the detail overlay
   // opens, otherwise CanvasInner's local state (measured heights, user-
   // interacted ref, focused-node) all reset on close.
   return (
     <Shell>
       <div className="relative h-full w-full">
-        <ReactFlowProvider>
-          <CanvasInner
+        {!ready && viewModeOverride === null ? (
+          <div className="flex h-full items-center justify-center text-xs text-muted-foreground">
+            loading…
+          </div>
+        ) : effectiveMode === "tree" ? (
+          <FolderTreePane
             slug={slug!}
             rootSessionId={rootSessionId}
             onOpenDetail={navigate.openDetail}
           />
-        </ReactFlowProvider>
+        ) : (
+          <ReactFlowProvider>
+            <CanvasInner
+              slug={slug!}
+              rootSessionId={rootSessionId}
+              onOpenDetail={navigate.openDetail}
+            />
+          </ReactFlowProvider>
+        )}
+        {/* Floating Canvas/Text toggle, shared by both views. Hidden while the
+            detail overlay is up (it covers the whole pane). */}
+        {ready && !detailSessionId ? (
+          <ViewModeToggle mode={effectiveMode} onSelect={setViewModeOverride} />
+        ) : null}
         {detailSessionId ? (
           <div className="absolute inset-0 z-10 flex flex-col bg-background">
             <div className="flex items-center justify-between gap-2 border-b border-border bg-card/60 px-3 py-1.5">
@@ -101,6 +152,59 @@ export function CanvasPane() {
 
 function Shell({ children }: { children: React.ReactNode }) {
   return <div className="flex h-full flex-col">{children}</div>;
+}
+
+/** Compact segmented control to switch the right pane between the graphical
+ *  canvas and the lightweight text tree. Floats top-right over both views;
+ *  the tree pane's header reserves right padding to clear it. */
+function ViewModeToggle({ mode, onSelect }: { mode: ViewMode; onSelect: (m: ViewMode) => void }) {
+  return (
+    <div className="absolute right-2 top-2 z-10 flex items-center gap-0.5 rounded-lg border border-border/70 bg-card/90 p-0.5 shadow-sm backdrop-blur">
+      <ViewModeButton
+        active={mode === "canvas"}
+        onClick={() => onSelect("canvas")}
+        title="Graphical canvas view"
+      >
+        <Network className="h-3.5 w-3.5" />
+      </ViewModeButton>
+      <ViewModeButton
+        active={mode === "tree"}
+        onClick={() => onSelect("tree")}
+        title="Text tree view — press v"
+      >
+        <ListTree className="h-3.5 w-3.5" />
+      </ViewModeButton>
+    </div>
+  );
+}
+
+function ViewModeButton({
+  active,
+  onClick,
+  title,
+  children,
+}: {
+  active: boolean;
+  onClick: () => void;
+  title: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={title}
+      aria-pressed={active}
+      className={cn(
+        "inline-flex h-6 w-6 items-center justify-center rounded-md transition-colors",
+        active
+          ? "bg-primary/15 text-primary"
+          : "text-muted-foreground hover:bg-accent/50 hover:text-foreground",
+      )}
+    >
+      {children}
+    </button>
+  );
 }
 
 /** Shows the TracePane for a given session_id without touching the store's
@@ -556,6 +660,7 @@ const SHORTCUT_GROUPS: { title: string; rows: { keys: string[]; label: string }[
       { keys: ["0"], label: "Reset zoom" },
       { keys: ["f"], label: "Fit to view" },
       { keys: ["w", "a", "s", "d"], label: "Pan" },
+      { keys: ["v"], label: "Canvas / text view" },
     ],
   },
   {
