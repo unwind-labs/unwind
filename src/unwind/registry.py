@@ -35,6 +35,10 @@ _slug_to_source: dict[str, Path] = {}
 # signature is the (mtime, size) summary of every JSONL in the project
 # dir; rebuilds when anything moves.
 _invoke_indexes: dict[str, tuple[tuple, dict[str, list[str]]]] = {}
+# (signature, [out-of-tree report.yaml path, ...]) per slug. Same JSONL-stat
+# signature as ``_invoke_indexes``; recovers reports the runtime wrote under a
+# different cwd's log dir than the one viewed.
+_report_paths: dict[str, tuple[tuple, list[Path]]] = {}
 
 # All per-slug auxiliary caches (everything except _indices, which has its own
 # synthetic-slug upgrade logic). Listed once so forget/upgrade stay in sync
@@ -80,6 +84,7 @@ def forget_slug(slug: str) -> None:
             cache.pop(slug, None)
         _slug_to_source.pop(slug, None)
         _invoke_indexes.pop(slug, None)
+        _report_paths.pop(slug, None)
 
 
 def index_for_slug(slug: str) -> SessionIndex:
@@ -154,7 +159,19 @@ def _per_slug(cache: dict, slug: str, factory):
 
 
 def callstack_for_slug(slug: str) -> CallstackIndex:
-    return _per_slug(_callstack, slug, lambda idx: CallstackIndex(idx.paths.callstack_log_dir))
+    def make(idx) -> CallstackIndex:
+        project_dir = idx.paths.project_dir
+        return CallstackIndex(
+            idx.paths.callstack_log_dir,
+            # Recover reports the runtime wrote outside this project's log dir
+            # (cross-project forks / harness-driven runs). The provider is
+            # re-queried per request — registry-cached by JSONL signature — so
+            # the long-lived cached index still picks up newly-referenced
+            # reports as transcripts grow.
+            extra_report_paths=lambda: report_paths_for_slug(slug, project_dir),
+        )
+
+    return _per_slug(_callstack, slug, make)
 
 
 def fork_detector_for_slug(slug: str) -> ForkDetector:
@@ -231,10 +248,27 @@ def project_state_signature(slug: str) -> tuple:
       transitions)
     """
     index = index_for_slug(slug)
+    project_dir = index.paths.project_dir
     return (
-        _project_jsonl_signature(index.paths.project_dir),
+        _project_jsonl_signature(project_dir),
         _callstack_log_signature(index.paths.callstack_log_dir),
+        _extra_report_signature(slug, project_dir),
     )
+
+
+def _extra_report_signature(slug: str, project_dir: Path) -> tuple:
+    """Stat fingerprint of out-of-tree reports this project references, so the
+    ETag invalidates when a cross-project report updates (its mtime can change
+    without any JSONL in this project growing)."""
+    out: list[tuple[str, float, int]] = []
+    for rp in report_paths_for_slug(slug, project_dir):
+        try:
+            st = rp.stat()
+        except OSError:
+            continue
+        out.append((str(rp), st.st_mtime, st.st_size))
+    out.sort()
+    return tuple(out)
 
 
 def invoke_index_for_slug(slug: str, project_dir: Path) -> dict[str, list[str]]:
@@ -257,6 +291,40 @@ def invoke_index_for_slug(slug: str, project_dir: Path) -> dict[str, list[str]]:
     fresh = compute_invoke_index_for_project(project_dir)
     with _lock:
         _invoke_indexes[slug] = (sig, fresh)
+    return fresh
+
+
+def report_paths_for_slug(slug: str, project_dir: Path) -> list[Path]:
+    """Out-of-tree ``report.yaml`` paths referenced by this project's session
+    transcripts (reports the runtime wrote under a different cwd's log dir).
+
+    Registry-cached so the long-lived per-slug ``CallstackIndex`` resolves
+    cross-project / harness-driven runs without re-scanning on every request.
+
+    The cache key comes from the SHARED (TTL-cached) JSONL listing, not a fresh
+    scan: this accessor is invoked many times per request (via the
+    ``CallstackIndex`` extra-paths provider, hit from ``has_logs`` /
+    ``all_reports`` / ``_log_signature``), so a fresh ``os.scandir`` per call
+    would blow the per-request scan budget. The cost of the shared listing is a
+    ≤1 s staleness window before a *newly referenced* out-of-tree report is
+    discovered — acceptable for a continuously-polled UI, and already the
+    contract the fork detector lives with. The report files themselves are
+    stat-fingerprinted in ``CallstackIndex._log_signature``, so updates to an
+    already-discovered report are caught immediately regardless of this window.
+    """
+    from .spawns import compute_report_paths_for_project
+
+    sig = tuple(
+        (e.path.name, e.mtime, e.size)
+        for e in project_jsonl_listing(project_dir)
+    )
+    with _lock:
+        cached = _report_paths.get(slug)
+        if cached is not None and cached[0] == sig:
+            return cached[1]
+    fresh = compute_report_paths_for_project(project_dir)
+    with _lock:
+        _report_paths[slug] = (sig, fresh)
     return fresh
 
 

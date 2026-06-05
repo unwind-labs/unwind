@@ -527,3 +527,80 @@ def test_latest_view_is_memoized_until_files_change(tmp_path: Path, monkeypatch)
     # Force size to differ as well for belt-and-braces signature change.
     ci._latest_view()
     assert id(ci._view_cached) != initial_id
+
+
+def test_extra_report_paths_read_from_out_of_tree_dir(tmp_path: Path):
+    """Bug 2: when the runtime anchors its log dir to the ROOT invocation's
+    cwd, a session viewed under a different project has an EMPTY primary log
+    dir. The ``extra_report_paths`` provider recovers the out-of-tree
+    report.yaml (path harvested from the session's tool_result envelope) so the
+    call tree still resolves.
+    """
+    primary = tmp_path / "viewed" / ".claude" / "callstack" / "log"  # never created
+    out_of_tree = tmp_path / "root_project" / ".claude" / "callstack" / "log"
+    _write_report(
+        out_of_tree,
+        "20260101T000000-root",
+        {
+            "invoke_id": "20260101T000000-root",
+            "parent_session": "ROOT",
+            "started_at": "2026-01-01T00:00:00+00:00",
+            "status": "complete",
+            "tasks": [
+                {"task": "/a", "status": "complete", "depth": 1, "session_id": "A"}
+            ],
+        },
+    )
+    foreign = out_of_tree / "20260101T000000-root" / "report.yaml"
+
+    # No primary log dir at all — everything must come from the provider.
+    ci = CallstackIndex(primary, extra_report_paths=lambda: [foreign])
+    assert ci.has_logs  # extras count, even with no primary dir
+    reps = ci.all_reports()
+    assert len(reps) == 1 and reps[0].parent_session == "ROOT"
+    assert [t.session_id for t in reps[0].tasks] == ["A"]
+
+
+def test_extra_report_paths_deduped_against_primary(tmp_path: Path):
+    """A report reachable both via the primary log dir and the provider is
+    parsed exactly once (deduped by resolved path)."""
+    log = tmp_path / "log"
+    _write_report(
+        log,
+        "20260101T000000-r",
+        {
+            "invoke_id": "20260101T000000-r",
+            "parent_session": "ROOT",
+            "started_at": "2026-01-01T00:00:00+00:00",
+            "status": "complete",
+            "tasks": [
+                {"task": "/a", "status": "complete", "depth": 1, "session_id": "A"}
+            ],
+        },
+    )
+    same = log / "20260101T000000-r" / "report.yaml"
+    ci = CallstackIndex(log, extra_report_paths=lambda: [same])
+    assert len(ci.all_reports()) == 1
+
+
+def test_provider_exception_degrades_to_primary(tmp_path: Path):
+    """A failing provider must not break the primary log dir read."""
+    log = tmp_path / "log"
+    _write_report(
+        log,
+        "20260101T000000-r",
+        {
+            "invoke_id": "20260101T000000-r",
+            "parent_session": "ROOT",
+            "started_at": "2026-01-01T00:00:00+00:00",
+            "status": "complete",
+            "tasks": [{"task": "/a", "status": "complete", "depth": 1, "session_id": "A"}],
+        },
+    )
+
+    def boom() -> list:
+        raise RuntimeError("provider exploded")
+
+    ci = CallstackIndex(log, extra_report_paths=boom)
+    assert ci.has_logs
+    assert len(ci.all_reports()) == 1

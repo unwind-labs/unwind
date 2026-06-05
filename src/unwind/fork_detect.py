@@ -50,8 +50,16 @@ _REFRESH_TTL_SECONDS = 1.0
 # (typically record 0); a small window keeps probing cheap.
 PROBE_PROLOGUE_N = 4
 
-# The exact prefix the callstack runtime injects into a forked child's first
-# queued message. See agent-callstack/agent_callstack/protocol.py.
+# The sentinel the callstack runtime injects into a forked child's first
+# queued message. See agent-callstack/agent_callstack/protocol.py
+# (``FORK_SYSTEM_INSTRUCTION``).
+#
+# It is NOT at offset 0 of the content: ``protocol.starting_prompt`` prepends a
+# ``"## Starting Task [<id>]\n\n"`` header before the instruction, so a real
+# child's first enqueue reads ``"## Starting Task [a5ba828c]\n\nYou are running
+# in a forked session — …"``. We therefore look for the sentinel ANYWHERE in
+# the content rather than only as a prefix — an earlier ``startswith`` check
+# silently classified every real fork as a non-fork once that header landed.
 _CALLSTACK_FORK_PROLOGUE = "You are running in a forked session"
 
 
@@ -339,7 +347,7 @@ def _build_probe(path: Path, mtime: float, size: int) -> _Probe:
             and rec.get("operation") == "enqueue"
         ):
             content = rec.get("content")
-            if isinstance(content, str) and content.startswith(_CALLSTACK_FORK_PROLOGUE):
+            if isinstance(content, str) and _CALLSTACK_FORK_PROLOGUE in content:
                 is_callstack_fork = True
         u = rec.get("uuid")
         if isinstance(u, str):

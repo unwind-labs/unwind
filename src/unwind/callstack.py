@@ -22,7 +22,7 @@ import threading
 from dataclasses import dataclass, field
 from datetime import datetime  # noqa: F401
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from ._cache import PathCache
 from .jsonl import EPOCH, parse_ts as _parse_ts
@@ -89,8 +89,21 @@ class InvokeReport:
 class CallstackIndex:
     """Caches parsed reports keyed by ``invoke_id``."""
 
-    def __init__(self, log_dir: Path) -> None:
+    def __init__(
+        self,
+        log_dir: Path,
+        *,
+        extra_report_paths: Optional[Callable[[], list[Path]]] = None,
+    ) -> None:
         self._log_dir = log_dir
+        # Out-of-tree ``report.yaml`` paths this index should also read —
+        # reports a project's sessions produced but the runtime wrote under a
+        # different cwd's log dir (see ``spawns.compute_report_paths_for_project``).
+        # A provider (not a fixed list) so a long-lived cached index picks up
+        # reports newly referenced by growing session transcripts; it is
+        # registry-cached by JSONL signature, so calling it per request is cheap.
+        # ``None`` means "primary log dir only" (tests, ad-hoc construction).
+        self._extra_report_paths = extra_report_paths
         self._cache = PathCache(self._load_report)
         # Memoize aggregate views (_latest_view / reports_by_parent) by a
         # cheap signature over report.yaml stats. Without this, a single
@@ -108,44 +121,72 @@ class CallstackIndex:
 
     @property
     def has_logs(self) -> bool:
-        return self._log_dir.is_dir()
+        if self._log_dir.is_dir():
+            return True
+        return bool(self._extra_paths())
+
+    def _extra_paths(self) -> list[Path]:
+        """Out-of-tree report paths from the provider, or ``[]`` when none is
+        wired. Never raises — a provider failure degrades to "primary only"."""
+        if self._extra_report_paths is None:
+            return []
+        try:
+            return self._extra_report_paths()
+        except Exception:
+            return []
+
+    def _report_paths(self) -> list[Path]:
+        """Every ``report.yaml`` this index should read: per-invocation subdirs
+        under the primary log dir, plus out-of-tree extras, deduped by resolved
+        path (so a report reachable both ways is parsed once)."""
+        seen: set[str] = set()
+        out: list[Path] = []
+
+        def add(rp: Path) -> None:
+            try:
+                if not rp.is_file():
+                    return
+                key = str(rp.resolve())
+            except OSError:
+                return
+            if key not in seen:
+                seen.add(key)
+                out.append(rp)
+
+        if self._log_dir.is_dir():
+            try:
+                for invoke_dir in self._log_dir.iterdir():
+                    if invoke_dir.is_dir():
+                        add(invoke_dir / "report.yaml")
+            except OSError:
+                pass
+        for rp in self._extra_paths():
+            add(rp)
+        return out
 
     def all_reports(self) -> list[InvokeReport]:
-        if not self.has_logs:
-            return []
         out: list[InvokeReport] = []
-        for invoke_dir in self._log_dir.iterdir():
-            if not invoke_dir.is_dir():
-                continue
-            report_path = invoke_dir / "report.yaml"
-            if not report_path.is_file():
-                continue
+        for report_path in self._report_paths():
             rep = self._cache.get(report_path)
             if rep is not None:
                 out.append(rep)
         return out
 
     def _log_signature(self) -> tuple:
-        """Cheap fingerprint over all report.yaml files in the log dir.
+        """Cheap fingerprint over all report.yaml files this index reads.
 
         Used to invalidate the memoized aggregate views. Cost: one stat per
         report, vs the O(reports × tree-size) recursion in ``_latest_view``.
+        Keyed by resolved path so out-of-tree extras don't collide with the
+        per-invocation subdir names under the primary log dir.
         """
-        if not self.has_logs:
-            return ()
         sig: list[tuple[str, float, int]] = []
-        try:
-            for invoke_dir in self._log_dir.iterdir():
-                if not invoke_dir.is_dir():
-                    continue
-                report_path = invoke_dir / "report.yaml"
-                try:
-                    st = report_path.stat()
-                except OSError:
-                    continue
-                sig.append((invoke_dir.name, st.st_mtime, st.st_size))
-        except OSError:
-            return ()
+        for report_path in self._report_paths():
+            try:
+                st = report_path.stat()
+            except OSError:
+                continue
+            sig.append((str(report_path), st.st_mtime, st.st_size))
         sig.sort()
         return tuple(sig)
 

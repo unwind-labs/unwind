@@ -2181,3 +2181,73 @@ def test_await_call_message_carries_follower_flag(tmp_path: Path):
     assert by_id["tu-call"].spawn_is_follower is False
     # The await_call is a follower; its row must not pop a fresh window.
     assert by_id["tu-await"].spawn_is_follower is True
+
+
+def test_compute_report_paths_extracts_out_of_tree_report(tmp_path: Path):
+    """Bug 2: the absolute ``report_path`` echoed in a callstack tool_result is
+    recovered from the transcript, so reports the runtime wrote under a
+    different cwd's log dir are still discoverable from the viewed project."""
+    from unwind.spawns import compute_report_paths_for_project
+
+    proj = tmp_path / "proj"
+    # The real report lives OUTSIDE the viewed project's log dir.
+    foreign = tmp_path / "elsewhere" / ".claude" / "callstack" / "log" / "inv-1" / "report.yaml"
+    foreign.parent.mkdir(parents=True, exist_ok=True)
+    foreign.write_text("invoke_id: inv-1\nparent_session: ROOT\n")
+
+    _write_jsonl(
+        proj / "ORCH.jsonl",
+        [
+            {
+                "type": "user",
+                "uuid": "u1",
+                "sessionId": "ORCH",
+                "timestamp": "2026-05-04T10:00:02.000Z",
+                "message": {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "tu-1",
+                            "content": json.dumps(
+                                {"invoke_id": "inv-1", "report_path": str(foreign)}
+                            ),
+                        }
+                    ],
+                },
+            },
+        ],
+    )
+
+    paths = compute_report_paths_for_project(proj)
+    assert paths == [foreign]
+
+
+def test_compute_report_paths_skips_missing_files(tmp_path: Path):
+    """A referenced report that no longer exists on disk is dropped."""
+    from unwind.spawns import compute_report_paths_for_project
+
+    proj = tmp_path / "proj"
+    gone = tmp_path / "gone" / "report.yaml"  # never created
+    _write_jsonl(
+        proj / "ORCH.jsonl",
+        [
+            {
+                "type": "user",
+                "uuid": "u1",
+                "sessionId": "ORCH",
+                "timestamp": "2026-05-04T10:00:02.000Z",
+                "message": {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "tu-1",
+                            "content": json.dumps({"report_path": str(gone)}),
+                        }
+                    ],
+                },
+            },
+        ],
+    )
+    assert compute_report_paths_for_project(proj) == []

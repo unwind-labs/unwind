@@ -72,6 +72,43 @@ def test_marked_sibling_is_classified_as_fork(tmp_path: Path):
     assert fd.fork_session_ids() == {"fork"}
 
 
+def test_fork_prologue_behind_starting_task_header(tmp_path: Path):
+    """Regression: the runtime prepends a ``## Starting Task [<id>]`` header
+    before the fork prologue, so the sentinel is NOT at offset 0 of the first
+    enqueue. A prefix-only (``startswith``) check classified every real fork as
+    a non-fork. This mirrors the exact production shape produced by
+    ``protocol.starting_prompt`` (see callstack/agent_callstack/protocol.py).
+    """
+    p = tmp_path / "parent.jsonl"
+    _write(
+        p,
+        [
+            {"uuid": "u-head", "timestamp": "2026-04-24T09:00:00Z", "type": "user"},
+        ],
+    )
+    f = tmp_path / "fork.jsonl"
+    _write(
+        f,
+        [
+            {
+                "type": "queue-operation",
+                "operation": "enqueue",
+                "content": (
+                    "## Starting Task [a5ba828c]\n\n"
+                    "You are running in a forked session — a child process "
+                    "that inherited the full context of your parent agent.\n"
+                    "Task: execute /task-a"
+                ),
+                "timestamp": "2026-04-24T10:00:00Z",
+            },
+            {"uuid": "u-head", "timestamp": "2026-04-24T09:00:00Z", "type": "user"},
+            {"uuid": "u-fork-own", "timestamp": "2026-04-24T10:00:01Z", "type": "user"},
+        ],
+    )
+    fd = ForkDetector(tmp_path)
+    assert fd.fork_session_ids() == {"fork"}
+
+
 def test_unrelated_sessions_dont_classify_as_forks(tmp_path: Path):
     a = tmp_path / "x.jsonl"
     b = tmp_path / "y.jsonl"

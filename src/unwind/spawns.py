@@ -90,6 +90,56 @@ _AGENT_ID_RE = re.compile(r"agentId:\s*([0-9a-f]{8,})")
 _INVOKE_ID_RE = re.compile(
     r'\\?"invoke_id\\?"\s*:\s*\\?"([0-9A-Za-z._-]+)\\?"'
 )
+# The ``call``/``resume`` result envelope echoes the absolute on-disk
+# ``report_path`` (see callstack/mcp_server.py). The callstack runtime anchors
+# its log dir to the ROOT invocation's cwd, so when a session's own cwd differs
+# from the root's (a forked worker in another project, or a harness driving
+# calls from a different folder) the report.yaml lands OUTSIDE this project's
+# ``<cwd>/.claude/callstack/log``. Recovering the path from the transcript lets
+# us read those out-of-tree reports instead of guessing directories.
+_REPORT_PATH_RE = re.compile(
+    r'\\?"report_path\\?"\s*:\s*\\?"([^"\\]+\.yaml)\\?"'
+)
+
+
+def compute_report_paths_for_project(project_dir: Path) -> list[Path]:
+    """Absolute ``report.yaml`` paths referenced by callstack tool_results in
+    this project's JSONLs, deduped and existence-checked, in discovery order.
+
+    These are the reports the project's own sessions actually produced, even
+    when the runtime wrote them under a different project's log dir (see
+    ``_REPORT_PATH_RE``). The caller feeds them to :class:`CallstackIndex` as
+    extra report sources so cross-project / harness-driven runs still resolve
+    their call trees. Safe to call repeatedly; the registry caches by directory
+    signature.
+    """
+    out: list[Path] = []
+    seen: set[str] = set()
+    if not project_dir.is_dir():
+        return out
+    for entry in project_jsonl_listing(project_dir):
+        for rec in read_records(entry.path):
+            if rec.get("type") != "user":
+                continue
+            msg = rec.get("message")
+            if not isinstance(msg, dict):
+                continue
+            content = msg.get("content")
+            if not isinstance(content, list):
+                continue
+            for block in content:
+                if not isinstance(block, dict) or block.get("type") != "tool_result":
+                    continue
+                result_text = _stringify_result(block.get("content"))
+                for m in _REPORT_PATH_RE.finditer(result_text):
+                    raw = m.group(1)
+                    if raw in seen:
+                        continue
+                    seen.add(raw)
+                    p = Path(raw)
+                    if p.is_file():
+                        out.append(p)
+    return out
 def compute_invoke_index_for_project(
     project_dir: Path,
 ) -> dict[str, list[str]]:
