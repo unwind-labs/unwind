@@ -156,6 +156,11 @@ export function FolderTreePane({
       const isEsc = e.key === "Escape";
       if (!isUp && !isDown && !isLeft && !isRight && !isEnter && !isEsc) return;
       e.preventDefault();
+      // A keyboard action is now the most-recent intent — drop any lingering
+      // mouse-hover so the preview overlay follows the keyboard cursor
+      // (``overlayNode`` is ``hovered ?? focusedId``; clearing hover lets the
+      // focused row win). Last action between hover and selection wins.
+      setHovered(null);
 
       if (isEsc) {
         if (s.focusedId) setFocus(null);
@@ -193,6 +198,10 @@ export function FolderTreePane({
   const anyCollapsed = effectiveCollapsed.size > 0;
   const toggleAll = () => setCollapsed(anyCollapsed ? new Set() : new Set(collapsibleIds));
 
+  // Preview target = last action wins. ``hovered`` (set on mouse-enter, cleared
+  // on mouse-leave AND on any keyboard nav) takes precedence when present;
+  // otherwise the keyboard cursor (``focusedId``). So a hover shows the hovered
+  // row, and the next ↑/↓ clears hover and shows the focused row.
   const overlayNode = (() => {
     const id = hovered ?? focusedId;
     return id ? (nodeById.get(id) ?? null) : null;
