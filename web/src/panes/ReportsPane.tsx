@@ -1,5 +1,6 @@
-import { useEffect, useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { ChevronLeft, ChevronRight, DollarSign, X } from "lucide-react";
+import { SourceFilter } from "@/components/SourceFilter";
 import { useUsageReport } from "@/api/client";
 import { useUi } from "@/store/ui";
 import { navigate } from "@/lib/url-sync";
@@ -17,7 +18,8 @@ export function ReportsPane({ onClose }: { onClose?: () => void } = {}) {
   // Month lives in the store (URL-synced via lib/url-sync). The fallback
   // covers a hand-typed ``?view=reports`` link with no ``month`` param.
   const month = useUi((s) => s.reportsMonth) ?? currentLocalMonth();
-  const { data, isLoading, error } = useUsageReport(month, 20);
+  const [provider, setProvider] = useState("all");
+  const { data, isLoading, error } = useUsageReport(month, 20, provider);
 
   const monthLabel = useMemo(() => formatMonth(month), [month]);
 
@@ -72,6 +74,9 @@ export function ReportsPane({ onClose }: { onClose?: () => void } = {}) {
         </div>
       </header>
 
+      <div className="px-6 pb-4">
+        <SourceFilter value={provider} onChange={setProvider} label="Filter report by source" />
+      </div>
       <ScrollArea className="flex-1 px-6 pb-8">
         {isLoading && <div className="py-8 text-sm text-muted-foreground">loading…</div>}
         {error && (
@@ -81,11 +86,35 @@ export function ReportsPane({ onClose }: { onClose?: () => void } = {}) {
         )}
         {data && (
           <>
+            <p className="mb-4 text-xs text-muted-foreground">
+              Costs are API token estimates, not subscription charges. Codex uses{" "}
+              <a
+                href="https://developers.openai.com/api/docs/pricing"
+                target="_blank"
+                rel="noreferrer"
+                className="underline underline-offset-2"
+              >
+                OpenAI Standard pricing
+              </a>
+              ; service tiers, tool fees, and discounts are excluded.
+            </p>
+            {data.unpriced_tokens > 0 && (
+              <p className="mb-4 rounded-lg border border-border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
+                Cost is unavailable for {fmtTokens(data.unpriced_tokens)} tokens. These tokens are
+                included in usage; USD estimates exclude them.
+              </p>
+            )}
+            {data.session_count === 0 && (
+              <p className="mb-4 text-sm text-muted-foreground">
+                No usage for this source in this month.
+              </p>
+            )}
             <KpiStrip data={data} />
             <CategoryBreakdown
               usage={data.grand_usage}
               cost={data.grand_cost}
               total={data.total_cost}
+              unpriced={data.unpriced_tokens}
             />
             <ProjectTable
               top={data.buckets.top}
@@ -95,6 +124,7 @@ export function ReportsPane({ onClose }: { onClose?: () => void } = {}) {
               grandCost={data.grand_cost}
               grandSessions={data.session_count}
               grandTotal={data.total_cost}
+              unpriced={data.unpriced_tokens}
             />
           </>
         )}
@@ -151,6 +181,7 @@ function KpiStrip({
 }: {
   data: {
     total_cost: number;
+    unpriced_tokens: number;
     total_tokens: number;
     session_count: number;
     project_count: number;
@@ -160,7 +191,11 @@ function KpiStrip({
 }) {
   return (
     <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-      <Kpi label="Total cost" value={fmtUsd(data.total_cost)} accent="emerald" />
+      <Kpi
+        label="Estimated cost"
+        value={fmtCost(data.total_cost, data.unpriced_tokens)}
+        accent="emerald"
+      />
       <Kpi label="Total tokens" value={fmtTokens(data.total_tokens)} />
       <Kpi label="Sessions" value={data.session_count.toLocaleString()} />
       <Kpi label="Projects" value={data.project_count.toLocaleString()} />
@@ -190,7 +225,9 @@ function CategoryBreakdown({
   usage,
   cost,
   total,
+  unpriced,
 }: {
+  unpriced: number;
   usage: TokenUsage;
   cost: TokenCost;
   total: number;
@@ -204,17 +241,22 @@ function CategoryBreakdown({
   return (
     <div className="mt-4 rounded border border-border bg-card p-3">
       <div className="mb-2 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
-        Cost by category
+        {unpriced > 0 ? "Token usage by category" : "Cost by category"}
       </div>
       <table className="w-full text-xs tabular-nums">
         <tbody>
           {rows.map(({ key, label }) => {
-            const pct = total > 0 ? (cost[key] / total) * 100 : 0;
+            const denominator =
+              unpriced > 0 ? Object.values(usage).reduce((a, b) => a + b, 0) : total;
+            const numerator = unpriced > 0 ? usage[key] : cost[key];
+            const pct = denominator > 0 ? (numerator / denominator) * 100 : 0;
             return (
               <tr key={key} className="border-t border-border/40">
                 <td className="py-1 pr-3 text-muted-foreground">{label}</td>
                 <td className="w-24 py-1 pr-3 text-right font-mono">{fmtTokens(usage[key])}</td>
-                <td className="w-24 py-1 pr-3 text-right font-mono">{fmtUsd(cost[key])}</td>
+                <td className="w-24 py-1 pr-3 text-right font-mono">
+                  {fmtCost(cost[key], unpriced)}
+                </td>
                 <td className="py-1">
                   <div className="h-1.5 w-full overflow-hidden rounded bg-muted">
                     <div
@@ -243,7 +285,9 @@ function ProjectTable({
   grandCost,
   grandSessions,
   grandTotal,
+  unpriced,
 }: {
+  unpriced: number;
   top: ProjectUsageRow[];
   ephemeral: ProjectGroupRow | null;
   other: ProjectGroupRow | null;
@@ -275,6 +319,7 @@ function ProjectTable({
               sessions={p.session_count}
               usage={p.usage}
               total={p.total_cost}
+              unpriced={p.unpriced_tokens}
             />
           ))}
           {ephemeral && (
@@ -285,6 +330,7 @@ function ProjectTable({
               sessions={ephemeral.session_count}
               usage={ephemeral.usage}
               total={ephemeral.total_cost}
+              unpriced={ephemeral.unpriced_tokens}
               muted
             />
           )}
@@ -296,6 +342,7 @@ function ProjectTable({
               sessions={other.session_count}
               usage={other.usage}
               total={other.total_cost}
+              unpriced={other.unpriced_tokens}
               muted
             />
           )}
@@ -309,14 +356,14 @@ function ProjectTable({
             <td className="px-2 py-2 text-right font-mono">{fmtTokens(grandUsage.r)}</td>
             <td className="px-2 py-2 text-right font-mono">{fmtTokens(grandUsage.w)}</td>
             <td className="px-3 py-2 text-right font-mono text-emerald-400">
-              {fmtUsd(grandTotal)}
+              {fmtCost(grandTotal, unpriced)}
             </td>
           </tr>
         </tfoot>
       </table>
       <div className="border-t border-border px-3 py-1.5 text-[10px] text-muted-foreground">
         Grand total sums every event in the window, including ephemeral test runs and the long tail.
-        Category totals are{" "}
+        Known category costs are{" "}
         <span className="font-mono">
           ${grandCost.cw.toFixed(0)} CW · ${grandCost.cr.toFixed(0)} CR · ${grandCost.r.toFixed(0)}{" "}
           In · ${grandCost.w.toFixed(0)} Out
@@ -334,7 +381,9 @@ function ProjectRow({
   usage,
   total,
   muted,
+  unpriced,
 }: {
+  unpriced: number;
   name: string;
   sub: string;
   sessions: number;
@@ -353,7 +402,7 @@ function ProjectRow({
       <td className="px-2 py-1.5 text-right font-mono">{fmtTokens(usage.cr)}</td>
       <td className="px-2 py-1.5 text-right font-mono">{fmtTokens(usage.r)}</td>
       <td className="px-2 py-1.5 text-right font-mono">{fmtTokens(usage.w)}</td>
-      <td className="px-3 py-1.5 text-right font-mono">{fmtUsd(total)}</td>
+      <td className="px-3 py-1.5 text-right font-mono">{fmtCost(total, unpriced)}</td>
     </tr>
   );
 }
@@ -363,6 +412,10 @@ function ProjectRow({
 // Both are 5 lines, and extracting to a shared module would mean
 // editing UsageFooter (unrelated to this change). If/when a third
 // caller needs them, consolidate then.
+
+function fmtCost(n: number, unpriced: number): string {
+  return unpriced > 0 ? (n > 0 ? `${fmtUsd(n)} + unknown` : "Unavailable") : fmtUsd(n);
+}
 
 function fmtUsd(n: number): string {
   if (!n) return "$0.00";

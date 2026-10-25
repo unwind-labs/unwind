@@ -68,5 +68,5 @@ export function formatDuration(seconds: number | null | undefined): string {
 
 export function shortId(id: string | null | undefined): string {
   if (!id) return "—";
-  return id.slice(0, 8);
+  return id.replace(/^[a-z][a-z0-9]*-(?=[0-9a-f]{8}-)/, "").slice(0, 8);
 }

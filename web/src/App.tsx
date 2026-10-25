@@ -31,7 +31,7 @@ export function App() {
   // Global ← / → to switch focus between panes; cmd/ctrl+O opens the folder
   // picker. Per-pane up/down handlers live in the panes themselves.
   const rotateFocus = useUi((s) => s.rotateFocus);
-  const openPicker = useOpenFolderPicker();
+  const { openPicker, pickerError, clearPickerError } = useOpenFolderPicker();
   // focusedPane via ref so the keydown effect doesn't have to re-attach
   // on every focus change.
   const focusedPaneFromStore = useUi((s) => s.focusedPane);
@@ -92,7 +92,23 @@ export function App() {
         slug={slug}
         onBrowse={() => setShowBrowser(true)}
         onOpenReports={() => navigate.openReports()}
+        onOpenFolder={openPicker}
       />
+      {pickerError && (
+        <div
+          role="alert"
+          className="flex items-center justify-between gap-4 border-b border-border px-4 py-2 text-sm text-destructive"
+        >
+          <span>{pickerError}</span>
+          <button
+            type="button"
+            onClick={clearPickerError}
+            className="shrink-0 underline underline-offset-2"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
       <div className="relative flex-1 overflow-hidden">
         {slug ? (
           <ResizablePanelGroup direction="horizontal">
@@ -182,15 +198,27 @@ function PaneFrame({
 
 function useOpenFolderPicker() {
   const queryClient = useQueryClient();
-  return useCallback(async () => {
-    const result = await pickFolder();
-    if (result.cancelled || !result.slug) return;
-    // navigate.setSlug clears rootSessionId/detailSessionId/canvasFocus
-    // and pushes a history entry so back returns to the previous project.
-    navigate.setSlug(result.slug);
-    // Refetch the project list so the title bar can resolve the new path.
-    queryClient.invalidateQueries({ queryKey: ["projects"] });
+  const [pickerError, setPickerError] = useState<string | null>(null);
+  const pending = useRef(false);
+  const openPicker = useCallback(async () => {
+    if (pending.current) return;
+    pending.current = true;
+    setPickerError(null);
+    try {
+      const result = await pickFolder();
+      if (result.cancelled || !result.slug) return;
+      // navigate.setSlug clears rootSessionId/detailSessionId/canvasFocus
+      // and pushes a history entry so back returns to the previous project.
+      navigate.setSlug(result.slug);
+      // Refetch the project list so the title bar can resolve the new path.
+      queryClient.invalidateQueries({ queryKey: ["projects"] });
+    } catch (error) {
+      setPickerError(error instanceof Error ? error.message : "The folder picker could not open.");
+    } finally {
+      pending.current = false;
+    }
   }, [queryClient]);
+  return { openPicker, pickerError, clearPickerError: () => setPickerError(null) };
 }
 
 function TopBar({
@@ -198,14 +226,15 @@ function TopBar({
   slug,
   onBrowse,
   onOpenReports,
+  onOpenFolder,
 }: {
   defaultSourcePath: string | null;
   slug: string | null;
   onBrowse: () => void;
   onOpenReports: () => void;
+  onOpenFolder: () => Promise<void>;
 }) {
   const { data: projects } = useProjects();
-  const openPicker = useOpenFolderPicker();
 
   // Prefer the source path of the currently-selected project. Falls back to
   // the server's default-project hint, then the slug itself. The backend
@@ -218,23 +247,21 @@ function TopBar({
     <header className="flex items-center gap-3 border-b border-border bg-card px-4 py-2">
       <button
         type="button"
-        onClick={openPicker}
+        onClick={onOpenFolder}
         className="inline-flex items-center gap-1.5 text-sm font-semibold hover:underline"
         title="pick a folder"
       >
         <Telescope className="h-4 w-4" />
         unwind
       </button>
-      <div className="text-xs text-muted-foreground">
-        View Claude Code sessions with sub agent trees
-      </div>
+      <div className="text-xs text-muted-foreground">Inspect Claude Code and Codex sessions</div>
       <div className="ml-auto flex min-w-0 items-center gap-1.5">
         <div className="truncate text-xs text-muted-foreground">
           {currentSourcePath ?? slug ?? "no project selected"}
         </div>
         <button
           type="button"
-          onClick={openPicker}
+          onClick={onOpenFolder}
           title="pick a different folder"
           className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
         >

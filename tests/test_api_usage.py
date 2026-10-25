@@ -85,13 +85,13 @@ def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
     # Force the report's local-TZ defaulting onto UTC so the test is
     # hermetic against the CI box's clock.
-    def _utc_build(month, *, tz=None):
+    def _utc_build(month, *, tz=None, provider="all"):
         # ``tz`` arg required so signature matches the real function; the
         # value is intentionally ignored — this override pins the report
         # to UTC so the test doesn't depend on the CI box's local clock.
         _ = tz
         from unwind.usage_report import build_month_report as real_build
-        return real_build(month, tz=timezone.utc)
+        return real_build(month, tz=timezone.utc, provider=provider)
     monkeypatch.setattr(api_usage, "build_month_report", _utc_build)
 
     app = FastAPI()

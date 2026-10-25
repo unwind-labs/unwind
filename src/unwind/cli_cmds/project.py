@@ -22,12 +22,14 @@ from . import _common, _render
 app = typer.Typer(no_args_is_help=True, add_completion=False)
 
 
-def _build_summaries() -> list[ProjectSummary]:
+def _build_summaries(harness: str = "all") -> list[ProjectSummary]:
     """Build the same list of ``ProjectSummary`` rows the HTTP endpoint returns."""
     out: list[ProjectSummary] = []
     for slug, source in list_known_projects():
         index = index_for_slug(slug)
-        sessions = index.list_sessions()
+        sessions = [s for s in index.list_sessions() if harness == "all" or s.provider == harness]
+        if harness != "all" and not sessions:
+            continue
         last_ts = sessions[0].last_timestamp if sessions else None
         if last_ts is None:
             mtime = last_activity_for(slug)
@@ -58,13 +60,13 @@ def _build_summaries() -> list[ProjectSummary]:
 
 @app.command("list")
 def list_projects(
-    harness: str = typer.Option("claude", "--harness"),
+    harness: str = typer.Option("all", "--harness"),
     json_out: bool = typer.Option(False, "--json"),
     limit: Optional[int] = typer.Option(None, "--limit", min=1),
 ) -> None:
     """List every known/discoverable project."""
     _common.validate_harness(harness)
-    rows = _build_summaries()
+    rows = _build_summaries(harness)
     if limit is not None:
         rows = rows[:limit]
     if json_out:
@@ -79,7 +81,7 @@ def show_project(
         None, help="Project path (defaults to CWD)."
     ),
     slug: Optional[str] = typer.Option(None, "--slug", help="Resolve by slug instead."),
-    harness: str = typer.Option("claude", "--harness"),
+    harness: str = typer.Option("all", "--harness"),
     json_out: bool = typer.Option(False, "--json"),
 ) -> None:
     """Show one project's slug, path, last activity, and session count."""
@@ -112,7 +114,7 @@ def show_project(
 
 @app.command("current")
 def current_project(
-    harness: str = typer.Option("claude", "--harness"),
+    harness: str = typer.Option("all", "--harness"),
     json_out: bool = typer.Option(False, "--json"),
 ) -> None:
     """Show the current default project (env-provided or CWD)."""
@@ -147,11 +149,16 @@ def current_project(
 @app.command("path")
 def slug_to_path(
     slug: str = typer.Argument(...),
-    harness: str = typer.Option("claude", "--harness"),
+    harness: str = typer.Option("all", "--harness"),
 ) -> None:
     """Reverse-lookup a slug to its on-disk project directory."""
     _common.validate_harness(harness)
     paths = ProjectPaths.for_slug(slug)
     if not paths.project_dir.is_dir():
-        raise _common.not_found(f"slug {slug!r} not found under {claude_projects_root()}")
+        from ..sources import discover_projects
+        source = discover_projects().get(slug)
+        if source is None:
+            raise _common.not_found(f"slug {slug!r} not found")
+        typer.echo(str(source))
+        return
     typer.echo(str(paths.project_dir))

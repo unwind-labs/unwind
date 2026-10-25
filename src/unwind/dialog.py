@@ -5,14 +5,37 @@ GUI dialog from a request handler. Tkinter must run on the main thread on
 macOS, so we always invoke the picker in a fresh subprocess and read the
 chosen path off stdout. Returns ``None`` when the user cancels.
 """
+
 from __future__ import annotations
 
 import platform
+import re
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 from typing import Optional
+
+
+class FolderPickerUnavailable(RuntimeError):
+    """The native picker could not be started or failed."""
+
+
+class FolderPickerTimeout(RuntimeError):
+    """The native picker did not finish within its time limit."""
+
+
+def _run_picker(command: list[str]) -> subprocess.CompletedProcess[str]:
+    try:
+        return subprocess.run(command, capture_output=True, text=True, timeout=120)
+    except subprocess.TimeoutExpired as exc:
+        raise FolderPickerTimeout(
+            "The folder picker timed out after 120 seconds. Please try again."
+        ) from exc
+    except OSError as exc:
+        raise FolderPickerUnavailable(
+            "The folder picker could not be started."
+        ) from exc
 
 
 _TK_SCRIPT = """
@@ -52,10 +75,10 @@ def _escape_applescript_string(s: str) -> str:
 
 def _pick_with_osascript(initial: Optional[str]) -> Optional[str]:
     if platform.system() != "Darwin":
-        return None
+        raise FolderPickerUnavailable("AppleScript is only available on macOS.")
     osa = shutil.which("osascript")
     if not osa:
-        return None
+        raise FolderPickerUnavailable("osascript is unavailable.")
     choose = 'choose folder with prompt "Pick a project folder"'
     if initial:
         safe = _escape_applescript_string(initial)
@@ -74,35 +97,36 @@ def _pick_with_osascript(initial: Optional[str]) -> Optional[str]:
         "end tell\n"
         "POSIX path of chosenFolder"
     )
-    proc = subprocess.run(
-        [osa, "-e", script],
-        capture_output=True,
-        text=True,
-        timeout=120,
-    )
+    proc = _run_picker([osa, "-e", script])
     if proc.returncode != 0:
-        # User cancelled (-128) or another osascript error — treat as no-op.
-        return None
+        # Cancellation is final, not a reason to open the fallback picker.
+        if re.search(r"\(-128\)\s*$", proc.stderr):
+            return None
+        raise FolderPickerUnavailable("The macOS folder picker could not open.")
     chosen = proc.stdout.strip()
     return chosen or None
 
 
 def _pick_with_tk(initial: Optional[str]) -> Optional[str]:
-    proc = subprocess.run(
-        [sys.executable, "-c", _TK_SCRIPT, initial or ""],
-        capture_output=True,
-        text=True,
-        timeout=120,
-    )
+    proc = _run_picker([sys.executable, "-c", _TK_SCRIPT, initial or ""])
     if proc.returncode != 0:
-        return None
+        raise FolderPickerUnavailable(
+            "The folder picker is unavailable. Choose a project from the project list."
+        )
     chosen = proc.stdout.strip()
     return chosen or None
 
 
 def pick_folder(initial: Optional[str] = None) -> Optional[Path]:
-    """Open a folder picker; return the absolute path or ``None`` if cancelled."""
-    chosen = _pick_with_osascript(initial) or _pick_with_tk(initial)
+    """Return a path or None on cancel; raise a typed error on failure.
+
+    Fall back to Tk only when AppleScript is unavailable or fails, never after
+    cancellation or timeout. subprocess.run kills and reaps timed-out children.
+    """
+    try:
+        chosen = _pick_with_osascript(initial)
+    except FolderPickerUnavailable:
+        chosen = _pick_with_tk(initial)
     if not chosen:
         return None
     return Path(chosen).expanduser().resolve()

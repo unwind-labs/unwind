@@ -48,9 +48,19 @@ def iter_lines(path: Path) -> Iterator[dict[str, Any]]:
             if not raw:
                 continue
             try:
-                yield json.loads(raw)
+                value = json.loads(raw)
+                if isinstance(value, dict):
+                    yield value
             except json.JSONDecodeError:
                 continue
+
+
+def iter_session_records(path: Path) -> Iterator[dict[str, Any]]:
+    """Read a source into the shared transcript record format."""
+    from .sources import source_for_path
+    source = source_for_path(path)
+    for record in source.read_records(path):
+        yield {**record, "provider": source.id}
 
 
 def _load_records(path: Path) -> tuple[dict[str, Any], ...]:
@@ -62,6 +72,12 @@ def _load_records(path: Path) -> tuple[dict[str, Any], ...]:
 
 
 _RECORDS_CACHE = _PathCache(_load_records)
+_SESSION_RECORDS_CACHE = _PathCache(lambda path: tuple(iter_session_records(path)))
+
+
+def read_session_records(path: Path) -> tuple[dict[str, Any], ...]:
+    """Cached normalized records for provider-independent consumers."""
+    return _SESSION_RECORDS_CACHE.get(path)
 
 
 def read_records(path: Path) -> tuple[dict[str, Any], ...]:
@@ -164,6 +180,7 @@ class SessionSummary:
     cwd: Optional[str]
     git_branch: Optional[str]
     custom_title: Optional[str] = None
+    provider: str = "claude"
     # The ``message.id`` of the last assistant turn folded into
     # ``message_count``. Internal continuity token so ``apply_increment`` can
     # keep collapsing block-split records across an append boundary (a turn's
@@ -241,10 +258,12 @@ def extract_session_summary(path: Path, session_id: str) -> Optional[SessionSumm
     git_branch: Optional[str] = None
     custom_title: Optional[str] = None
     message_count = 0
+    provider = "claude"
     last_assistant_id: Optional[str] = None
 
-    for rec in iter_lines(path):
+    for rec in iter_session_records(path):
         rtype = rec.get("type")
+        provider = rec.get("provider", provider)
 
         if rtype == "custom-title":
             ct = rec.get("customTitle")
@@ -299,6 +318,7 @@ def extract_session_summary(path: Path, session_id: str) -> Optional[SessionSumm
 
     return SessionSummary(
         session_id=session_id,
+        provider=provider,
         title=title,
         first_timestamp=first_ts,
         last_timestamp=last_ts,

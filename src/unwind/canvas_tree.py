@@ -32,7 +32,6 @@ if TYPE_CHECKING:
     from .spawns import SpawnResolver
 
 from .jsonl import EPOCH
-from .pricing import cost_usd as _cost_usd
 from .session_scan import (
     CanvasTreeBuilder,
     SessionScan,
@@ -127,6 +126,7 @@ class WindowNode:
     subtree_usage: dict[str, int] = field(default_factory=_zero_tokens)
     self_cost: dict[str, float] = field(default_factory=_zero_costs)
     subtree_cost: dict[str, float] = field(default_factory=_zero_costs)
+    unpriced_tokens: int = 0
     # Extra parent → child edges sourced from ``await_call`` tool_uses in
     # THIS window's session. An ``await_call`` references an already-
     # running invocation by ``invoke_id`` instead of spawning a new
@@ -144,6 +144,7 @@ class WindowNode:
     follower_edges: list[dict[str, str]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
+        from .sources import source_for_session
         return {
             "window_id": self.window_id,
             "session_id": self.session_id,
@@ -157,6 +158,8 @@ class WindowNode:
             "kind": self.kind,
             "parent_window_id": self.parent_window_id,
             "window_index": self.window_index,
+            "provider": source_for_session(self.session_id).id,
+            "unpriced_tokens": self.unpriced_tokens,
             "self_usage": self.self_usage,
             "subtree_usage": self.subtree_usage,
             "self_cost": self.self_cost,
@@ -348,7 +351,12 @@ def _attribute_self_usage(
         # ``_TOKEN_KEYS`` is a subset; an explicit dict keeps that
         # invariant from quietly breaking if either side changes.
         _add_into(w.self_usage, {"cw": ev.cw, "cr": ev.cr, "r": ev.r, "w": ev.w})
-        _add_into(w.self_cost, _cost_usd(ev.model, ev.cw, ev.cr, ev.r, ev.w))
+        from .sources import source_by_id
+        cost = source_by_id(ev.provider).estimate_cost(ev.model, ev.cw, ev.cr, ev.r, ev.w)
+        if cost is None:
+            w.unpriced_tokens += ev.cw + ev.cr + ev.r + ev.w
+        else:
+            _add_into(w.self_cost, cost)
 
 
 def _finalize_subtree(
@@ -389,7 +397,10 @@ def _finalize_subtree(
     usage = dict(node.self_usage)
     cost = dict(node.self_cost)
     for child in node.children:
+        already_seen = child.window_id in _seen
         c_status, c_usage, c_cost = _finalize_subtree(child, _seen)
+        if not already_seen:
+            node.unpriced_tokens += child.unpriced_tokens
         statuses.append(c_status)
         _add_into(usage, c_usage)
         _add_into(cost, c_cost)
@@ -572,7 +583,8 @@ def build_canvas_tree(
     def _annotated_messages_for(parent_sid: str) -> Optional[list[Any]]:
         if parent_sid in parent_msgs_cache:
             return parent_msgs_cache[parent_sid]
-        path = project_dir / f"{parent_sid}.jsonl"
+        from .sources import resolve_session_path
+        path = resolve_session_path(project_dir.name, project_dir, parent_sid) or project_dir / f"{parent_sid}.jsonl"
         msgs: Optional[list[Any]] = None
         if path.is_file():
             from .messages import annotate_spawns, read_messages

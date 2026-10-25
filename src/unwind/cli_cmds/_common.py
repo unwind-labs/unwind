@@ -22,16 +22,18 @@ EXIT_USAGE = 2
 
 
 class Harness(str, enum.Enum):
-    """Supported agent harnesses. Only ``claude`` is wired in v1."""
+    """Built-in harness identifiers. Validation uses the source registry."""
 
     claude = "claude"
+    codex = "codex"
 
 
 def validate_harness(harness: str) -> None:
     """Raise a usage error if ``harness`` is not a supported value."""
-    if harness != Harness.claude.value:
+    from ..sources import SOURCES
+    if harness != "all" and harness not in {s.id for s in SOURCES}:
         typer.echo(
-            f"error: --harness {harness!r} is not supported in v1 (only 'claude')",
+            f"error: --harness {harness!r} is not supported",
             err=True,
         )
         raise typer.Exit(EXIT_USAGE)
@@ -49,19 +51,23 @@ def resolve_project(arg: Optional[str], harness: str) -> ProjectPaths:
     """
     validate_harness(harness)
     raw = arg if arg is not None else os.getcwd()
+    from ..sources import discover_projects, list_session_files
+    known = discover_projects()
     paths: ProjectPaths
     if "/" not in raw and "\\" not in raw:
         candidate = claude_projects_root() / raw
-        if candidate.is_dir():
+        if raw in known and known[raw] != candidate:
+            paths = ProjectPaths.for_path(known[raw])
+        elif candidate.is_dir():
             paths = ProjectPaths.for_slug(raw)
         else:
             paths = ProjectPaths.for_path(Path(raw).expanduser().resolve())
     else:
         paths = ProjectPaths.for_path(Path(raw).expanduser().resolve())
 
-    if not paths.has_project_dir:
+    if not list_session_files(paths.slug, paths.project_dir):
         typer.echo(
-            f"warning: no Claude sessions found for this project yet.\n"
+            f"warning: no sessions found for this project yet.\n"
             f"  path: {paths.source_path}\n"
             f"  slug: {paths.slug}\n"
             f"  looked in: {paths.project_dir}",
@@ -70,7 +76,7 @@ def resolve_project(arg: Optional[str], harness: str) -> ProjectPaths:
 
     # Mirror the server-side behavior: register the real source path so the
     # registry's slug-to-source mapping skips the synthetic ``for_slug`` path.
-    if paths.has_project_dir and paths.source_path.is_dir():
+    if paths.source_path.is_dir() and paths.source_path != paths.project_dir:
         try:
             register_default_project(str(paths.source_path))
         except Exception:

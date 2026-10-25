@@ -14,7 +14,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from ..jsonl import EPOCH
-from ..dialog import pick_folder
+from ..dialog import FolderPickerTimeout, FolderPickerUnavailable, pick_folder
 from ..security import require_same_or_missing_origin, require_trusted_origin
 from ..projects import claude_projects_root, slug_for
 from ..registry import (
@@ -28,6 +28,13 @@ from ..server_state import default_source_path, default_slug
 from ..watcher import stop_watcher
 
 router = APIRouter(tags=["projects"])
+
+
+@router.get("/sources")
+def list_sources() -> list[dict[str, str]]:
+    from ..sources import SOURCES
+    return [{"id": source.id, "label": source.label} for source in SOURCES]
+
 
 
 class ProjectSummary(BaseModel):
@@ -114,7 +121,11 @@ def list_projects() -> list[ProjectSummary]:
     root = claude_projects_root()
     for slug, source in list_known_projects():
         project_dir = root / slug
-        count, max_mtime, jsonl_paths = _scan_project_dir(project_dir)
+        from ..sources import list_session_files
+        entries = list_session_files(slug, project_dir)
+        count = len(entries)
+        max_mtime = max((e.mtime for e in entries), default=0)
+        jsonl_paths = [e.path for e in entries]
         last_ts = (
             datetime.fromtimestamp(max_mtime, tz=timezone.utc)
             if max_mtime > 0
@@ -255,6 +266,10 @@ def pick_folder_endpoint(body: PickFolderRequest) -> PickedFolder:
         raise HTTPException(status_code=409, detail="folder picker already open")
     try:
         chosen = pick_folder()
+    except FolderPickerTimeout as exc:
+        raise HTTPException(status_code=504, detail=str(exc)) from exc
+    except FolderPickerUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     finally:
         _picker_inflight.release()
     if chosen is None:

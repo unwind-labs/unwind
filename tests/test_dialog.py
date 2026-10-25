@@ -1,9 +1,13 @@
 """AppleScript string escaping for the folder-picker prompt."""
+
 from __future__ import annotations
 
 import subprocess
 import sys
 
+import pytest
+
+from unwind import dialog
 from unwind.dialog import _escape_applescript_string, _pick_with_tk, _TK_SCRIPT
 
 
@@ -24,9 +28,9 @@ def test_backslash_escaped():
 def test_backslash_must_be_doubled_first():
     """If we escaped quotes before backslashes we'd produce \\" → \\\\\\"
     which closes the string. Verify the actual escape order."""
-    out = _escape_applescript_string(r'/tmp/a\"b')
+    out = _escape_applescript_string(r"/tmp/a\"b")
     # Backslash first becomes \\, then quote becomes \" → \\\\"
-    assert out == r'/tmp/a\\\"b'
+    assert out == r"/tmp/a\\\"b"
 
 
 def test_newline_stripped():
@@ -97,3 +101,81 @@ def test_tk_passes_empty_string_when_initial_none(monkeypatch):
 def test_tk_script_is_syntactically_valid_python():
     """Compile the fixed script body to confirm no syntax errors."""
     compile(_TK_SCRIPT, "<dialog _TK_SCRIPT>", "exec")
+
+
+@pytest.fixture
+def macos(monkeypatch):
+    monkeypatch.setattr(dialog.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(dialog.shutil, "which", lambda _: "/usr/bin/osascript")
+
+
+def test_macos_cancel_does_not_open_tk(macos, monkeypatch):
+    calls = []
+
+    def cancel(cmd, **kwargs):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(
+            cmd, 1, "", "execution error: User canceled. (-128)\n"
+        )
+
+    monkeypatch.setattr(subprocess, "run", cancel)
+    assert dialog.pick_folder() is None
+    assert len(calls) == 1
+    assert calls[0][0] == "/usr/bin/osascript"
+
+
+@pytest.mark.parametrize("native_failure", ["missing", "error", "launch"])
+def test_unavailable_macos_picker_falls_back_to_tk(
+    macos, monkeypatch, tmp_path, native_failure
+):
+    calls = []
+    if native_failure == "missing":
+        monkeypatch.setattr(dialog.shutil, "which", lambda _: None)
+
+    def run(cmd, **kwargs):
+        calls.append(cmd)
+        if cmd[0] == "/usr/bin/osascript":
+            if native_failure == "launch":
+                raise OSError("could not launch")
+            return subprocess.CompletedProcess(
+                cmd, 1, "", "execution error: Not authorized. (-1743)"
+            )
+        return subprocess.CompletedProcess(cmd, 0, str(tmp_path), "")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    assert dialog.pick_folder() == tmp_path.resolve()
+    assert calls[-1][0] == sys.executable
+
+
+@pytest.mark.parametrize("backend", ["osascript", "tk"])
+def test_timeout_is_typed_and_never_opens_another_picker(macos, monkeypatch, backend):
+    if backend == "tk":
+        monkeypatch.setattr(dialog.platform, "system", lambda: "Linux")
+    calls = []
+
+    def timeout(cmd, **kwargs):
+        calls.append(cmd)
+        assert kwargs["timeout"] == 120
+        raise subprocess.TimeoutExpired(cmd, kwargs["timeout"])
+
+    monkeypatch.setattr(subprocess, "run", timeout)
+    with pytest.raises(dialog.FolderPickerTimeout, match="120 seconds"):
+        dialog.pick_folder()
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("result", ["cancel", "failure", "launch"])
+def test_tk_cancellation_is_distinct_from_unavailability(monkeypatch, result):
+    monkeypatch.setattr(dialog.platform, "system", lambda: "Linux")
+
+    def run(cmd, **kwargs):
+        if result == "launch":
+            raise OSError("could not launch")
+        return subprocess.CompletedProcess(cmd, 0 if result == "cancel" else 2, "", "")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    if result == "cancel":
+        assert dialog.pick_folder() is None
+    else:
+        with pytest.raises(dialog.FolderPickerUnavailable):
+            dialog.pick_folder()

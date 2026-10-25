@@ -1,10 +1,10 @@
 # unwind
 
-See all you Claude Code sessions, where your budget went, which subagent is stuck, and how a multi-agent run actually branched.
+See your Claude Code and Codex/ChatGPT sessions, where your budget went, which subagent is stuck, and how a multi-agent run actually branched.
 
 ![unwind - Inspect Claude Code sessions, callstack call trees, and subagents.](assets/unwind-1.png)
 
-unwind reads Claude Code's own session logs and renders every session as a call tree — including subagents and forked/fresh `/call` invocations from the [callstack](https://github.com/unwind-labs/callstack) plugin. No instrumentation, no plugin, no startup hook. Point it at a project that's been running for months and the whole history is there.
+unwind reads local Claude Code and Codex session logs and renders sessions as a call tree — including subagents and forked/fresh `/call` invocations from the [callstack](https://github.com/unwind-labs/callstack) plugin. No instrumentation, no plugin, no startup hook. Point it at a project that's been running for months and the whole history is there.
 
 ## Try it
 
@@ -24,12 +24,27 @@ unwind serve            # opens a browser at http://127.0.0.1:<port>
 
 ## How it works
 
-unwind reads two sources, both already on your machine:
+unwind reads session sources already on your machine:
 
 - `~/.claude/projects/<slug>/*.jsonl` — Claude Code's own session logs (source of truth for conversations, tool calls, and token usage).
+- `$CODEX_HOME/sessions/**/*.jsonl` and `$CODEX_HOME/archived_sessions/**/*.jsonl` — local Codex CLI and desktop sessions (`CODEX_HOME` defaults to `~/.codex`).
 - `<project>/.claude/callstack/log/` — `/call` invocation reports written by the [callstack](https://github.com/unwind-labs/callstack) plugin (source of truth for nested `/call` trees).
 
-It joins these into a unified call tree, prices each turn at the model that produced it, and serves the result over a local HTTP port.
+The session list identifies each source with an icon. Filter sessions and monthly
+reports by source, or see both together. Codex messages, tool calls, readable
+reasoning summaries, and token usage are available in the existing views.
+
+Claude callstack logs add nested call trees. Claude costs use the existing model
+estimates; Codex uses [OpenAI Standard API prices](https://developers.openai.com/api/docs/pricing),
+including cached input, cache writes, and long-context rates where applicable.
+These are token cost estimates, not ChatGPT subscription charges. Unknown models
+remain unpriced and are excluded from USD totals.
+Codex sessions refresh every 30 seconds. Live-process detection and nested agent
+relationships remain Claude-only. This reads local Codex logs, including sessions
+signed in with ChatGPT; it does not import cloud-only ChatGPT conversations.
+
+To add another source, implement and register a `SessionSource` adapter. See
+[Session sources](dev/SESSION_SOURCES.md) for the contract and extension guide.
 
 <table>
   <tr>
@@ -64,6 +79,9 @@ The same data the web UI shows is also available from the CLI. Run any of them w
 | `unwind session` | `list`, `show`, `tree` — list sessions in a project, inspect one, or render its call/subagent tree |
 | `unwind messages` | `dump`, `grep` — dump a session's normalized messages (text/json/markdown) or grep them |
 | `unwind task` | `tree`, `list`, `roots`, `forks` — explore the unified call+subagent tree, top-level roots, and in-flight forks |
+
+Use `--harness claude` or `--harness codex` to filter session/project listings.
+For usage, run `unwind usage report --month 2026-10 --provider codex`.
 
 ### Let Claude Code introspect its own runs
 

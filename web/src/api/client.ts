@@ -35,7 +35,12 @@ export async function pickFolder(): Promise<PickedFolder> {
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ nonce }),
   });
-  if (!r.ok) throw new Error(`pick-folder -> ${r.status}`);
+  if (!r.ok) {
+    const error = await r.json().catch(() => null);
+    throw new Error(
+      typeof error?.detail === "string" ? error.detail : `Folder picker failed (${r.status}).`,
+    );
+  }
   return (await r.json()) as PickedFolder;
 }
 
@@ -43,6 +48,14 @@ export function useDefaultProject() {
   return useQuery({
     queryKey: ["default-project"],
     queryFn: () => j<DefaultProject>("/api/projects/default"),
+  });
+}
+
+export function useSources() {
+  return useQuery({
+    queryKey: ["sources"],
+    queryFn: () => j<{ id: string; label: string }[]>("/api/sources"),
+    staleTime: Infinity,
   });
 }
 
@@ -122,11 +135,15 @@ export function useMessages(
  *  Cross-session aggregation isn't affected by the WS event stream the
  *  way per-session queries are, so we skip the safety-net poll —
  *  Reports view explicitly refetches when the user changes the month. */
-export function useUsageReport(month: string | null | undefined, topN: number = 20) {
+export function useUsageReport(
+  month: string | null | undefined,
+  topN: number = 20,
+  provider: string = "all",
+) {
   return useQuery({
-    queryKey: ["usage", month ?? "current", topN],
+    queryKey: ["usage", month ?? "current", topN, provider],
     queryFn: () => {
-      const params = new URLSearchParams({ top: String(topN) });
+      const params = new URLSearchParams({ top: String(topN), provider });
       if (month) params.set("month", month);
       return j<UsageReportResponse>(`/api/usage?${params}`);
     },

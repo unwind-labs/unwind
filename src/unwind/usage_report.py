@@ -18,8 +18,6 @@ from datetime import datetime, timezone, tzinfo
 from typing import Optional
 
 from .jsonl import collect_uuids
-from .pricing import cost_usd
-from .projects import project_jsonl_listing
 from .registry import (
     callstack_for_slug,
     canvas_tree_builder_for_slug,
@@ -60,6 +58,7 @@ class ProjectUsage:
     session_count: int = 0
     usage: dict[str, int] = field(default_factory=_zero_usage)
     cost: dict[str, float] = field(default_factory=_zero_cost)
+    unpriced_tokens: int = 0
 
     @property
     def total_tokens(self) -> int:
@@ -135,7 +134,7 @@ def _month_window_utc(
 
 
 def build_month_report(
-    month: str, *, tz: Optional[tzinfo] = None
+    month: str, *, tz: Optional[tzinfo] = None, provider: str = "all"
 ) -> UsageReport:
     """Build a token + USD cost report for the local calendar month
     ``month`` (``"YYYY-MM"``).
@@ -149,6 +148,9 @@ def build_month_report(
     Projects with zero in-window events are omitted from
     :attr:`UsageReport.projects`.
     """
+    from .sources import SOURCES, list_session_files, source_by_id
+    if provider != "all" and provider not in {s.id for s in SOURCES}:
+        raise ValueError("unknown session provider")
     start_utc, end_utc, tz_name = _month_window_utc(month, tz)
 
     rows: list[ProjectUsage] = []
@@ -178,7 +180,9 @@ def build_month_report(
             return out
 
         row = ProjectUsage(slug=slug, source_path=str(source_path))
-        for entry in project_jsonl_listing(builder.project_dir):
+        for entry in list_session_files(slug, builder.project_dir):
+            if provider != "all" and provider != entry.provider:
+                continue
             scan = builder.get_scan(entry.sid)
             inherited = _inherited(entry.sid)
             session_had_event = False
@@ -192,7 +196,10 @@ def build_month_report(
                 row.usage["cr"] += ev.cr
                 row.usage["r"] += ev.r
                 row.usage["w"] += ev.w
-                c = cost_usd(ev.model, ev.cw, ev.cr, ev.r, ev.w)
+                c = source_by_id(ev.provider).estimate_cost(ev.model, ev.cw, ev.cr, ev.r, ev.w)
+                if c is None:
+                    row.unpriced_tokens += ev.cw + ev.cr + ev.r + ev.w
+                    continue
                 for k in TOKEN_KEYS:
                     row.cost[k] += c[k]
             if session_had_event:
@@ -200,7 +207,7 @@ def build_month_report(
         if row.session_count:
             rows.append(row)
 
-    rows.sort(key=lambda r: r.total_cost, reverse=True)
+    rows.sort(key=lambda r: (r.total_cost, r.total_tokens), reverse=True)
     grand_usage = {k: sum(r.usage[k] for r in rows) for k in TOKEN_KEYS}
     grand_cost = {k: sum(r.cost[k] for r in rows) for k in TOKEN_KEYS}
 
@@ -226,6 +233,7 @@ class ProjectGroup:
     session_count: int
     usage: dict[str, int]
     cost: dict[str, float]
+    unpriced_tokens: int = 0
 
     @property
     def total_tokens(self) -> int:
@@ -275,6 +283,7 @@ def bucket_for_display(report: UsageReport, *, top_n: int = 20) -> BucketedRepor
             session_count=sum(p.session_count for p in ps),
             usage=u,
             cost=c,
+            unpriced_tokens=sum(p.unpriced_tokens for p in ps),
         )
 
     return BucketedReport(

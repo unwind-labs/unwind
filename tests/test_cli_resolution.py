@@ -33,12 +33,12 @@ def _import_app():
     return cli_mod.app
 
 
-def test_harness_codex_rejected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_unknown_harness_rejected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _setup_home(tmp_path, monkeypatch)
     _reload_unwind()
     app = _import_app()
     runner = CliRunner()
-    result = runner.invoke(app, ["project", "list", "--harness", "codex"])
+    result = runner.invoke(app, ["project", "list", "--harness", "unknown"])
     assert result.exit_code == 2
     assert "not supported" in (result.stderr or result.output)
 

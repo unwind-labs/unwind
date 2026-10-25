@@ -74,7 +74,7 @@ def _load_messages(
 def dump_messages(
     session_id: str = typer.Argument(...),
     project: Optional[str] = typer.Option(None, "--project"),
-    harness: str = typer.Option("claude", "--harness"),
+    harness: str = typer.Option("all", "--harness"),
     fmt: str = typer.Option(
         "text", "--format", help="text | json | markdown.", case_sensitive=False
     ),
@@ -126,7 +126,7 @@ def grep_messages(
     session_id: str = typer.Argument(...),
     pattern: str = typer.Argument(...),
     project: Optional[str] = typer.Option(None, "--project"),
-    harness: str = typer.Option("claude", "--harness"),
+    harness: str = typer.Option("all", "--harness"),
     regex: bool = typer.Option(False, "--regex"),
 ) -> None:
     """Grep a session's messages for a literal substring or regex pattern."""

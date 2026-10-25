@@ -107,6 +107,7 @@ export type CompactCardData = {
    *  and a grand total). Always present so future cards can opt in
    *  without a new field. */
   subtreeCost: TokenCost;
+  unpricedTokens?: number;
   /** True iff this card has descendant cards on the canvas. Drives the
    *  2-row vs 1-row footer layout. Computed at canvas-tree build time
    *  rather than from ``canvasChildren`` so it stays stable even while
@@ -440,6 +441,7 @@ export function CompactCardNode({ data }: { data: CompactCardData }) {
           self={data.selfUsage}
           subtree={data.subtreeUsage}
           subtreeCost={data.subtreeCost}
+          unpricedTokens={data.unpricedTokens}
           showSubtree={data.hasCanvasDescendants}
           isRoot={data.isRoot}
         />

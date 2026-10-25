@@ -27,7 +27,7 @@ from .jsonl import (
     _text_blocks,
     extract_assistant_text as _extract_assistant_text,
     is_tool_result_record as _is_tool_result_record,
-    iter_lines,
+    iter_session_records as iter_lines,
     parse_ts as _parse_ts,
 )
 
@@ -61,6 +61,7 @@ class UsageEvent(NamedTuple):
     r: int
     w: int
     uuid: Optional[str] = None
+    provider: str = "claude"
 
 
 @dataclass
@@ -153,7 +154,7 @@ def scan_session(path: Path) -> SessionScan:
                 scan.start_ts = ts
             scan.end_ts = ts
         rtype = rec.get("type")
-        if rtype == "assistant":
+        if rtype in ("assistant", "usage"):
             msg = rec.get("message")
             if isinstance(msg, dict):
                 u = msg.get("usage")
@@ -176,8 +177,11 @@ def scan_session(path: Path) -> SessionScan:
                             UsageEvent(
                                 ts, model, cw, cr, r_in, w_out,
                                 rec_uuid if isinstance(rec_uuid, str) else None,
+                                rec.get("provider", "claude"),
                             )
                         )
+            if rtype == "usage":
+                continue
             text = _extract_assistant_text(rec)
             if text and _YIELD_RE.search(text):
                 if ts is not None:
@@ -235,8 +239,11 @@ class CanvasTreeBuilder:
         return self._project_dir
 
     def get_scan(self, session_id: str) -> SessionScan:
-        path = self._project_dir / f"{session_id}.jsonl"
-        return self._cache.get(path)
+        from .sources import resolve_session_path
+        path = resolve_session_path(self._project_dir.name, self._project_dir, session_id) or self._project_dir / f"{session_id}.jsonl"
+        scan = self._cache.get(path)
+        scan.session_id = session_id
+        return scan
 
     def get_scan_at(self, path: Path) -> SessionScan:
         """Scan an arbitrary JSONL through the same mtime cache.

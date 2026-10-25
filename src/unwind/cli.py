@@ -41,7 +41,7 @@ def _version_callback(value: bool) -> None:
 
 app = typer.Typer(
     name="unwind",
-    help=f"unwind {__version__} — inspect Claude Code sessions, callstack call trees, and subagents.",
+    help=f"unwind {__version__} — inspect Claude Code and Codex sessions, call trees, and usage.",
     no_args_is_help=True,
     add_completion=False,
 )
@@ -146,7 +146,7 @@ def serve(
         False, "--no-browser", help="Print the URL instead of opening a browser."
     ),
     all_projects: bool = typer.Option(
-        False, "--all", help="Show a project picker across every Claude project."
+        False, "--all", help="Show a project picker across every Claude Code and Codex project."
     ),
     log_level: str = typer.Option(
         "warning", "--log-level", help="Uvicorn log level."
@@ -161,20 +161,22 @@ def serve(
     paths = _paths_for_serve(chosen_path)
 
     if all_projects:
-        if not claude_projects_root().is_dir():
+        from .sources import discover_projects
+        if not discover_projects():
             console.print(
-                "[red]~/.claude/projects not found — run Claude Code at least once first.[/]"
+                "[red]No session logs found — run Claude Code or Codex at least once first.[/]"
             )
             raise typer.Exit(1)
         query = ""
     else:
-        if not paths.has_project_dir:
+        from .sources import list_session_files
+        if not list_session_files(paths.slug, paths.project_dir):
             console.print(
-                f"[yellow]No Claude sessions found for this folder yet.[/]\n"
+                f"[yellow]No Claude Code or Codex sessions found for this folder yet.[/]\n"
                 f"  path: {paths.source_path}\n"
                 f"  slug: {paths.slug}\n"
                 f"  looked in: {paths.project_dir}\n"
-                "Will still launch — sessions will appear here once you run Claude Code in this folder."
+                "Will still launch — sessions will appear here once you run Claude Code or Codex in this folder."
             )
         query = f"?project={paths.slug}"
 
