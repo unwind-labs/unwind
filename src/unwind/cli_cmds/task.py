@@ -61,7 +61,7 @@ def _trim_depth(children: list[dict], depth_limit: Optional[int], depth: int = 0
 def task_tree(
     session_id: str = typer.Argument(...),
     project: Optional[str] = typer.Option(None, "--project"),
-    harness: str = typer.Option("claude", "--harness"),
+    harness: str = typer.Option("all", "--harness"),
     kind: str = typer.Option("all", "--kind"),
     depth: Optional[int] = typer.Option(None, "--depth", min=1),
     json_out: bool = typer.Option(False, "--json"),
@@ -83,7 +83,7 @@ def task_tree(
 def task_list(
     session_id: str = typer.Argument(...),
     project: Optional[str] = typer.Option(None, "--project"),
-    harness: str = typer.Option("claude", "--harness"),
+    harness: str = typer.Option("all", "--harness"),
     kind: str = typer.Option("all", "--kind"),
     json_out: bool = typer.Option(False, "--json"),
 ) -> None:
@@ -127,7 +127,7 @@ def task_list(
 @app.command("roots")
 def task_roots(
     project: Optional[str] = typer.Option(None, "--project"),
-    harness: str = typer.Option("claude", "--harness"),
+    harness: str = typer.Option("all", "--harness"),
     json_out: bool = typer.Option(False, "--json"),
 ) -> None:
     """List top-level callstack root sessions in this project.
@@ -160,7 +160,7 @@ def task_roots(
 @app.command("forks")
 def task_forks(
     project: Optional[str] = typer.Option(None, "--project"),
-    harness: str = typer.Option("claude", "--harness"),
+    harness: str = typer.Option("all", "--harness"),
     json_out: bool = typer.Option(False, "--json"),
 ) -> None:
     """List in-flight forks not yet accounted for as callstack tasks."""

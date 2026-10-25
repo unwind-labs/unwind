@@ -1,10 +1,13 @@
 """Nonce + in-flight lock + timeout hardening for the folder-picker endpoint."""
+
 from __future__ import annotations
 
 import threading
 import time
+import subprocess
 from unittest.mock import patch
 
+import pytest
 from fastapi.testclient import TestClient
 
 from unwind.api import projects as projects_api
@@ -124,15 +127,32 @@ def test_concurrent_post_returns_409(tmp_path, monkeypatch):
             assert result.get("first") == 200
 
 
-def test_dialog_timeout_is_120s():
-    """The blocking subprocess must not stall the picker for 10 minutes."""
-    import inspect
-
+@pytest.mark.parametrize("failure,status", [("timeout", 504), ("unavailable", 503)])
+def test_picker_failure_is_reported_and_releases_lock(
+    tmp_path, monkeypatch, failure, status
+):
+    """Exercise the subprocess failure through HTTP, then retry with a new nonce."""
     from unwind import dialog
 
-    osa_src = inspect.getsource(dialog._pick_with_osascript)
-    tk_src = inspect.getsource(dialog._pick_with_tk)
-    assert "timeout=120" in osa_src
-    assert "timeout=120" in tk_src
-    assert "timeout=600" not in osa_src
-    assert "timeout=600" not in tk_src
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(dialog.platform, "system", lambda: "Linux")
+
+    def fail(cmd, **kwargs):
+        if failure == "timeout":
+            raise subprocess.TimeoutExpired(cmd, 120)
+        raise OSError("cannot open picker")
+
+    with TestClient(create_app()) as c:
+        nonce = _nonce(c)
+        with patch("unwind.dialog.subprocess.run", side_effect=fail):
+            response = c.post(
+                "/api/projects/pick-folder", headers=HEADERS, json={"nonce": nonce}
+            )
+        assert response.status_code == status
+        assert "folder picker" in response.json()["detail"]
+        with patch("unwind.api.projects.pick_folder", return_value=None):
+            retry = c.post(
+                "/api/projects/pick-folder", headers=HEADERS, json={"nonce": _nonce(c)}
+            )
+        assert retry.status_code == 200
+        assert retry.json()["cancelled"] is True

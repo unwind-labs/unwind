@@ -27,7 +27,7 @@ SLUG_PATTERN = r"^[A-Za-z0-9-]+$"
 # ``[0-9A-Za-z-]`` plus the literal ``::p<digits>`` so it can't smuggle path
 # separators or ``..`` traversal.
 SESSION_ID_PATTERN = (
-    r"^(?:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+    r"^(?:(?:[a-z][a-z0-9]*-)?[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
     r"|agent-[0-9a-fA-F]+"
     r"|wf_[0-9A-Za-z-]+(?:::p[0-9]+)?)$"
 )

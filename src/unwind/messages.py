@@ -17,7 +17,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable, Literal, Optional
 
-from .jsonl import parse_ts as _parse_ts, read_records
+from .jsonl import parse_ts as _parse_ts, read_session_records as read_records
 from .jsonl import stringify_tool_result as _stringify_result
 from .spawns import (
     _INVOKE_ID_RE,

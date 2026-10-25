@@ -70,6 +70,7 @@ def _rs_active_session(rs: RequestState, slug: str, index, project_path):
 class SessionRow(BaseModel):
     session_id: str
     title: str
+    provider: str = "claude"
     custom_title: Optional[str] = None
     first_timestamp: Optional[datetime]
     last_timestamp: Optional[datetime]
@@ -158,6 +159,7 @@ def list_sessions(
         rows.append(
             SessionRow(
                 session_id=s.session_id,
+                provider=s.provider,
                 title=s.title,
                 custom_title=s.custom_title,
                 first_timestamp=s.first_timestamp,
@@ -204,6 +206,7 @@ def get_session(
     )
     return SessionRow(
         session_id=summary.session_id,
+        provider=summary.provider,
         title=summary.title,
         first_timestamp=summary.first_timestamp,
         last_timestamp=summary.last_timestamp,
@@ -233,7 +236,8 @@ def _active_session_for_project(
     if not project_activity(project_path).claude_running:
         return None
     sessions = index.list_sessions()
-    candidates = [s for s in sessions if s.last_timestamp is not None]
+    from ..sources import source_by_id
+    candidates = [s for s in sessions if source_by_id(s.provider).session_status() is None and s.last_timestamp is not None]
     if not candidates:
         return None
     candidates.sort(key=lambda s: s.last_timestamp, reverse=True)
@@ -310,6 +314,10 @@ def _compute_session_status(
     up via ``rs`` (memoized request-scoped); falls back to a direct call
     when ``rs`` is also missing.
     """
+    from ..sources import source_for_session
+    source_status = source_for_session(session_id).session_status()
+    if source_status is not None:
+        return source_status
     del cwd  # currently unused; reserved for future per-session checks
     cs_status = ci.aggregate_status_for_session(session_id) if ci.has_logs else None
     is_fork = ci.has_logs and ci.is_callstack_task(session_id)

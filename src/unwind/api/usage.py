@@ -45,6 +45,7 @@ class ProjectUsageRow(BaseModel):
     cost: _TokenCost
     total_tokens: int
     total_cost: float
+    unpriced_tokens: int = 0
 
 
 class ProjectGroupRow(BaseModel):
@@ -59,6 +60,7 @@ class ProjectGroupRow(BaseModel):
     cost: _TokenCost
     total_tokens: int
     total_cost: float
+    unpriced_tokens: int = 0
 
 
 class UsageBuckets(BaseModel):
@@ -78,6 +80,7 @@ class UsageReportResponse(BaseModel):
     grand_cost: _TokenCost
     total_tokens: int
     total_cost: float
+    unpriced_tokens: int = 0
     ephemeral_path_prefixes: list[str]
     ephemeral_slug_prefixes: list[str]
     buckets: UsageBuckets
@@ -85,10 +88,12 @@ class UsageReportResponse(BaseModel):
     # ``top`` without a second request. Same rows as ``buckets.top``
     # plus everything else.
     projects: list[ProjectUsageRow]
+    provider: str = "all"
 
 
 @router.get("/usage", response_model=UsageReportResponse)
 def usage_report(
+    provider: str = Query("all"),
     month: Optional[str] = Query(
         None,
         description=(
@@ -116,7 +121,7 @@ def usage_report(
     if month is None:
         month = datetime.now().astimezone().strftime("%Y-%m")
     try:
-        report = build_month_report(month)
+        report = build_month_report(month, provider=provider)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     bucketed = bucket_for_display(report, top_n=top)
@@ -130,6 +135,7 @@ def usage_report(
             cost=_TokenCost(**p.cost),
             total_tokens=p.total_tokens,
             total_cost=p.total_cost,
+            unpriced_tokens=p.unpriced_tokens,
         )
 
     def _g(g) -> Optional[ProjectGroupRow]:
@@ -143,10 +149,13 @@ def usage_report(
             cost=_TokenCost(**g.cost),
             total_tokens=g.total_tokens,
             total_cost=g.total_cost,
+            unpriced_tokens=g.unpriced_tokens,
         )
 
     return UsageReportResponse(
         month=report.month,
+        provider=provider,
+        unpriced_tokens=sum(p.unpriced_tokens for p in report.projects),
         tz_name=report.tz_name,
         window_start_utc=report.window_start_utc,
         window_end_utc=report.window_end_utc,

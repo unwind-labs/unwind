@@ -28,8 +28,7 @@ export function ProjectPicker({ onClose }: { onClose?: () => void } = {}) {
             unwind
           </div>
           <div className="mt-1 text-xs text-muted-foreground">
-            pick a project to observe. all data lives under{" "}
-            <code className="font-mono">~/.claude/projects/</code>.
+            Choose a project to inspect its local Claude Code and Codex sessions.
           </div>
         </div>
         {onClose && (
@@ -85,7 +84,7 @@ export function ProjectPicker({ onClose }: { onClose?: () => void } = {}) {
           ))}
           {data && data.length === 0 && (
             <li className="px-4 py-3 text-xs text-muted-foreground">
-              no projects yet — run Claude Code in any folder first.
+              No projects yet. Run Claude Code or Codex in any folder first.
             </li>
           )}
         </ul>

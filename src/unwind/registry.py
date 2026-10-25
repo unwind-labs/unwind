@@ -97,6 +97,11 @@ def index_for_slug(slug: str) -> SessionIndex:
         if existing is not None:
             return existing
         source = _slug_to_source.get(slug)
+        if source is None:
+            from .sources import discover_projects
+            candidate = discover_projects().get(slug)
+            if candidate != claude_projects_root() / slug:
+                source = candidate
         if source is not None:
             paths = ProjectPaths.for_path(source)
         else:
@@ -254,10 +259,11 @@ def project_state_signature(slug: str) -> tuple:
     * Any callstack report created/updated (covers new spawns + status
       transitions)
     """
+    from .sources import list_session_files
     index = index_for_slug(slug)
     project_dir = index.paths.project_dir
     return (
-        _project_jsonl_signature(project_dir),
+        tuple((e.sid, e.mtime, e.size) for e in list_session_files(slug, project_dir, fresh=True)),
         _callstack_log_signature(index.paths.callstack_log_dir),
         _extra_report_signature(slug, project_dir),
         _workflow_signature(slug, project_dir),
@@ -391,16 +397,15 @@ def list_known_projects() -> list[tuple[str, Path]]:
     seen: dict[str, Path] = {}
     with _lock:
         seen.update(_slug_to_source)
-    root = claude_projects_root()
-    if root.is_dir():
-        for child in root.iterdir():
-            if child.is_dir() and child.name not in seen:
-                seen[child.name] = child
+    from .sources import discover_projects
+    for slug, source in discover_projects().items():
+        seen.setdefault(slug, source)
     return sorted(seen.items(), key=lambda kv: kv[0])
 
 
 def last_activity_for(slug: str) -> Optional[float]:
     """Max mtime across JSONLs in a project, for project-picker sorting."""
     index = index_for_slug(slug)
-    entries = project_jsonl_listing(index.paths.project_dir)
+    from .sources import list_session_files
+    entries = list_session_files(slug, index.paths.project_dir)
     return max((e.mtime for e in entries), default=None)

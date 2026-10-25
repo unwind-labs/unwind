@@ -20,12 +20,14 @@ export function UsageFooter({
   subtreeCost,
   showSubtree,
   isRoot,
+  unpricedTokens = 0,
 }: {
   self: TokenUsage;
   subtree: TokenUsage;
   subtreeCost: TokenCost;
   showSubtree: boolean;
   isRoot: boolean;
+  unpricedTokens?: number;
 }) {
   const empty = (u: TokenUsage) => !u.cw && !u.cr && !u.r && !u.w;
   const selfEmpty = empty(self);
@@ -74,12 +76,16 @@ export function UsageFooter({
               <td className="text-left text-muted-foreground/70">{label}</td>
               <td className="pl-2 text-right">{fmtTokens(self[key])}</td>
               {showSubtree ? <td className="pl-2 text-right">{fmtTokens(subtree[key])}</td> : null}
-              <td className="pl-2 text-right text-emerald-300/90">{fmtUsd(subtreeCost[key])}</td>
+              <td className="pl-2 text-right text-emerald-300/90">
+                {unpricedTokens > 0 ? "—" : fmtUsd(subtreeCost[key])}
+              </td>
             </tr>
           ))}
         </tbody>
       </table>
-      <div className="mt-1 text-right tabular-nums text-emerald-300/90">{fmtUsd(costTotal)}</div>
+      <div className="mt-1 text-right tabular-nums text-emerald-300/90">
+        {unpricedTokens > 0 ? "Cost unavailable" : fmtUsd(costTotal)}
+      </div>
     </footer>
   );
 }

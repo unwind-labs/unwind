@@ -31,6 +31,7 @@ def _serialize_for_json(b: BucketedReport) -> dict:
             "cost": p.cost,
             "total_tokens": p.total_tokens,
             "total_cost": p.total_cost,
+            "unpriced_tokens": p.unpriced_tokens,
         }
 
     def _g(g):
@@ -44,6 +45,7 @@ def _serialize_for_json(b: BucketedReport) -> dict:
             "cost": g.cost,
             "total_tokens": g.total_tokens,
             "total_cost": g.total_cost,
+            "unpriced_tokens": g.unpriced_tokens,
         }
 
     return {
@@ -55,6 +57,7 @@ def _serialize_for_json(b: BucketedReport) -> dict:
         "session_count": r.session_count,
         "grand_usage": r.grand_usage,
         "grand_cost": r.grand_cost,
+        "unpriced_tokens": sum(p.unpriced_tokens for p in r.projects),
         "total_tokens": r.total_tokens,
         "total_cost": r.total_cost,
         "ephemeral_path_prefixes": list(EPHEMERAL_PATH_PREFIXES),
@@ -71,6 +74,7 @@ def _serialize_for_json(b: BucketedReport) -> dict:
 
 @app.command("report")
 def report(
+    provider: str = typer.Option("all", "--provider", help="Filter by all, claude, or codex."),
     month: Optional[str] = typer.Option(
         None,
         "--month",
@@ -93,7 +97,7 @@ def report(
     if month is None:
         month = datetime.now().astimezone().strftime("%Y-%m")
     try:
-        rep = build_month_report(month)
+        rep = build_month_report(month, provider=provider)
     except ValueError as exc:
         raise _common.usage_error(str(exc))
     bucketed = bucket_for_display(rep, top_n=top)
@@ -101,3 +105,5 @@ def report(
         _common.echo_json(_serialize_for_json(bucketed))
         return
     _render.render_usage_report(bucketed)
+    if any(p.unpriced_tokens for p in rep.projects):
+        typer.echo("Some tokens have no cost estimate. They are included in usage but excluded from USD totals.")

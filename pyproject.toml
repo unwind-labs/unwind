@@ -4,13 +4,13 @@ build-backend = "poetry.core.masonry.api"
 
 [project]
 name = "unwind-labs"
-version = "0.4.5"
-description = "Outside-in web observer for Claude Code sessions and callstack call trees"
+version = "0.5.0"
+description = "Local observer for Claude Code and Codex sessions, call trees, and usage"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { file = "LICENSE" }
 authors = [{ name = "Amol Kelkar" }]
-keywords = ["claude-code", "agents", "observability", "callstack"]
+keywords = ["claude-code", "codex", "agents", "observability", "callstack"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",

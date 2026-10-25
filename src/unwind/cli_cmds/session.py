@@ -38,7 +38,11 @@ def _row_for(summary, ci, project_path: Optional[str]) -> SessionRow:
     # session must defer to live process detection so a session the user is
     # still driving doesn't get marked done after its last invoke completes.
     cs_status = ci.aggregate_status_for_session(summary.session_id) if ci.has_logs else None
-    if cs_status == "yield":
+    from ..sources import source_by_id
+    source_status = source_by_id(summary.provider).session_status()
+    if source_status is not None:
+        status = source_status
+    elif cs_status == "yield":
         status = "yield"
     elif cs_status == "live":
         status = "live"
@@ -48,6 +52,7 @@ def _row_for(summary, ci, project_path: Optional[str]) -> SessionRow:
         status = session_status(summary.cwd or project_path, last_epoch)
     return SessionRow(
         session_id=summary.session_id,
+        provider=summary.provider,
         title=summary.title,
         custom_title=summary.custom_title,
         first_timestamp=summary.first_timestamp,
@@ -63,7 +68,7 @@ def _row_for(summary, ci, project_path: Optional[str]) -> SessionRow:
 @app.command("list")
 def list_sessions(
     project: Optional[str] = typer.Option(None, "--project"),
-    harness: str = typer.Option("claude", "--harness"),
+    harness: str = typer.Option("all", "--harness"),
     include_forks: bool = typer.Option(False, "--include-forks"),
     status: str = typer.Option(
         "all", "--status", help="Filter by status: live | yield | done | all."
@@ -89,7 +94,7 @@ def list_sessions(
 
     rows: list[SessionRow] = []
     for s in index.list_sessions():
-        if s.session_id in fork_ids:
+        if s.session_id in fork_ids or (harness != "all" and s.provider != harness):
             continue
         rows.append(_row_for(s, ci, project_path))
 
@@ -114,7 +119,7 @@ def list_sessions(
 def show_session(
     session_id: str = typer.Argument(...),
     project: Optional[str] = typer.Option(None, "--project"),
-    harness: str = typer.Option("claude", "--harness"),
+    harness: str = typer.Option("all", "--harness"),
     json_out: bool = typer.Option(False, "--json"),
 ) -> None:
     """Show one session's metadata."""
@@ -235,7 +240,7 @@ def _trim_depth(children: list[dict], depth_limit: Optional[int], depth: int = 0
 def session_tree(
     session_id: str = typer.Argument(...),
     project: Optional[str] = typer.Option(None, "--project"),
-    harness: str = typer.Option("claude", "--harness"),
+    harness: str = typer.Option("all", "--harness"),
     depth: Optional[int] = typer.Option(None, "--depth", min=1),
     json_out: bool = typer.Option(False, "--json"),
 ) -> None:
@@ -262,7 +267,7 @@ def session_tree(
 def session_usage(
     session_id: str = typer.Argument(...),
     project: Optional[str] = typer.Option(None, "--project"),
-    harness: str = typer.Option("claude", "--harness"),
+    harness: str = typer.Option("all", "--harness"),
     json_out: bool = typer.Option(False, "--json"),
 ) -> None:
     """Show token-usage + USD-cost breakdown for a session's window tree.

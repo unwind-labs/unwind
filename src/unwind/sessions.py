@@ -13,7 +13,7 @@ from .jsonl import (
     parse_ts,
     turn_delta,
 )
-from .projects import ProjectPaths, project_jsonl_listing
+from .projects import ProjectPaths
 
 
 @dataclass
@@ -44,11 +44,10 @@ class SessionIndex:
         (newest first). ``last_timestamp`` reflects ongoing work — a
         session that's been actively used today should outrank one
         that started earlier today but has been idle for hours."""
-        if not self._paths.project_dir.is_dir():
-            return []
         results: list[SessionSummary] = []
-        for entry in project_jsonl_listing(self._paths.project_dir):
-            summary = self._get_summary(entry.path)
+        from .sources import list_session_files
+        for entry in list_session_files(self._paths.slug, self._paths.project_dir):
+            summary = self._get_summary(entry.path, entry.sid)
             if summary is not None:
                 results.append(summary)
         results.sort(
@@ -58,14 +57,14 @@ class SessionIndex:
         return results
 
     def get_session(self, session_id: str) -> Optional[SessionSummary]:
-        jsonl = self._paths.project_dir / f"{session_id}.jsonl"
-        if not jsonl.is_file():
+        jsonl = self.jsonl_path_for(session_id)
+        if jsonl is None:
             return None
-        return self._get_summary(jsonl)
+        return self._get_summary(jsonl, session_id)
 
     def jsonl_path_for(self, session_id: str) -> Optional[Path]:
-        jsonl = self._paths.project_dir / f"{session_id}.jsonl"
-        return jsonl if jsonl.is_file() else None
+        from .sources import resolve_session_path
+        return resolve_session_path(self._paths.slug, self._paths.project_dir, session_id)
 
     def invalidate(self, session_id: str) -> None:
         with self._lock:
@@ -131,12 +130,12 @@ class SessionIndex:
 
     # --- internals --------------------------------------------------------
 
-    def _get_summary(self, jsonl: Path) -> Optional[SessionSummary]:
+    def _get_summary(self, jsonl: Path, session_id: str | None = None) -> Optional[SessionSummary]:
         try:
             stat = jsonl.stat()
         except OSError:
             return None
-        session_id = jsonl.stem
+        session_id = session_id or jsonl.stem
         with self._lock:
             cached = self._cache.get(session_id)
             if (

@@ -427,6 +427,7 @@ def _summary_dict(summary) -> dict | None:
         return None
     return {
         "session_id": summary.session_id,
+        "provider": summary.provider,
         "title": summary.title,
         "first_timestamp": summary.first_timestamp.isoformat()
         if summary.first_timestamp

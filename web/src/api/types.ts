@@ -3,6 +3,7 @@ import type { Status } from "@/lib/status";
 export type SessionStatus = "live" | "yield" | "idle" | "done";
 
 export type SessionRow = {
+  provider: string;
   session_id: string;
   title: string;
   custom_title: string | null;
@@ -173,6 +174,8 @@ export type WindowNode = {
   /** USD cost for this window plus every descendant. The root card uses
    *  this for the ``$`` footer row + grand total. */
   subtree_cost: TokenCost;
+  provider?: string;
+  unpriced_tokens?: number;
   /** Extra source → target window edges for ``await_call`` rows. The
    *  standard ``parent_window_id`` edge anchors the originating
    *  ``call`` row; a follower edge anchors the matching ``await_call``
@@ -196,6 +199,7 @@ export type CanvasTreeResponse = {
  *  Reports table can render top-N rows and bucket rows with one
  *  component. */
 export type ProjectUsageRow = {
+  unpriced_tokens: number;
   slug: string;
   source_path: string;
   session_count: number;
@@ -209,6 +213,7 @@ export type ProjectUsageRow = {
  *  ``other`` (the long tail past top-N). Several projects collapsed
  *  into one row. */
 export type ProjectGroupRow = {
+  unpriced_tokens: number;
   label: string;
   project_count: number;
   session_count: number;
@@ -230,6 +235,8 @@ export type UsageBuckets = {
 };
 
 export type UsageReportResponse = {
+  provider: string;
+  unpriced_tokens: number;
   /** ``YYYY-MM`` — the local calendar month this report covers. */
   month: string;
   /** Informational timezone label (e.g. ``"PDT"``). Shown in the report

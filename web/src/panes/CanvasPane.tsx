@@ -1017,6 +1017,7 @@ function treeToReactFlow(args: {
         selfUsage: w.self_usage,
         subtreeUsage: w.subtree_usage,
         subtreeCost: w.subtree_cost,
+        unpricedTokens: w.unpriced_tokens,
         hasCanvasDescendants: (childrenByParent[w.window_id]?.length ?? 0) > 0,
       };
       return {

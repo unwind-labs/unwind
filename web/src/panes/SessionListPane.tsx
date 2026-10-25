@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Search, Telescope } from "lucide-react";
+import { Search } from "lucide-react";
+import { ProviderIcon } from "@/components/ProviderIcon";
+import { SourceFilter } from "@/components/SourceFilter";
 import { useSessions } from "@/api/client";
 import type { SessionRow, SessionStatus } from "@/api/types";
 import { useUi } from "@/store/ui";
@@ -34,6 +36,7 @@ export function SessionListPane() {
   const filter = useUi((s) => s.sessionFilter);
   const setFilter = useUi((s) => s.setSessionFilter);
   const { data, isLoading, error } = useSessions(slug, false);
+  const [provider, setProvider] = useState("all");
   const searchRef = useRef<HTMLInputElement>(null);
   useTicker(5_000);
 
@@ -50,15 +53,15 @@ export function SessionListPane() {
 
   const filtered = useMemo(() => {
     if (!data) return [];
-    if (!filter.trim()) return data;
-    const q = filter.toLowerCase();
+    const q = filter.trim().toLowerCase();
     return data.filter(
       (s) =>
-        s.title.toLowerCase().includes(q) ||
-        s.session_id.toLowerCase().includes(q) ||
-        (s.git_branch ?? "").toLowerCase().includes(q),
+        (provider === "all" || s.provider === provider) &&
+        (s.title.toLowerCase().includes(q) ||
+          s.session_id.toLowerCase().includes(q) ||
+          (s.git_branch ?? "").toLowerCase().includes(q)),
     );
-  }, [data, filter]);
+  }, [data, filter, provider]);
 
   const focusedPane = useUi((s) => s.focusedPane);
 
@@ -71,7 +74,10 @@ export function SessionListPane() {
       const target = e.target as HTMLElement | null;
       const typing =
         target &&
-        (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable);
+        (target.tagName === "INPUT" ||
+          target.tagName === "SELECT" ||
+          target.tagName === "TEXTAREA" ||
+          target.isContentEditable);
       if (!typing && e.key === "/") {
         e.preventDefault();
         searchRef.current?.focus();
@@ -118,6 +124,9 @@ export function SessionListPane() {
             className="w-full bg-transparent text-xs outline-none placeholder:text-muted-foreground"
           />
         </div>
+        <div className="mt-2">
+          <SourceFilter value={provider} onChange={setProvider} label="Filter sessions by source" />
+        </div>
       </header>
       <ScrollArea className="flex-1">
         {isLoading && <div className="px-3 py-4 text-xs text-muted-foreground">loading…</div>}
@@ -126,7 +135,12 @@ export function SessionListPane() {
         )}
         {data && data.length === 0 && (
           <div className="px-3 py-4 text-xs text-muted-foreground">
-            no sessions yet — run Claude Code in this folder.
+            No sessions yet. Run Claude Code or Codex in this folder.
+          </div>
+        )}
+        {data && data.length > 0 && filtered.length === 0 && (
+          <div className="px-3 py-4 text-xs text-muted-foreground">
+            No sessions match these filters.
           </div>
         )}
         <ul className="py-1">
@@ -195,13 +209,7 @@ function SessionItem({
       >
         <div className="flex items-center gap-2">
           <StatusDot status={session.status ?? "done"} />
-          {selected ? (
-            <Telescope
-              className="h-3.5 w-3.5 shrink-0 text-primary"
-              aria-label="current session"
-              strokeWidth={2.25}
-            />
-          ) : null}
+          <ProviderIcon provider={session.provider ?? "claude"} />
           <span className="flex-1 truncate text-[13px] text-foreground">
             {session.title || shortId(session.session_id)}
           </span>
